@@ -1,0 +1,102 @@
+[
+[
+"crates/yrl/src/stepup.rs",
+"        if m.mode() & 0o077 != 0 || m.len() != 64 {",
+"        if m.len() != 64 {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if m.mode() & 0o022 != 0 || m.len() > MAX_STORE {",
+"        if m.len() > MAX_STORE {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if m.mode() & 0o022 != 0 || m.len() > MAX_STORE {",
+"        if m.mode() & 0o022 != 0 {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if want != got {",
+"        if false {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if lines.next()? != \"YRLLOCK 1\" {",
+"        if false {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"[\"GLOBAL\", g] => st.global = *g == \"1\",",
+"[\"GLOBAL\", g] => st.global = *g == \"0\","
+],
+[
+"crates/yrl/src/stepup.rs",
+"            if r.fails == 0 && !r.locked && r.until <= now_secs() {\n                continue;\n            }\n",
+""
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if !store.path.exists() && !store.key_path.exists() {",
+"        if !store.path.exists() {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if st.tampered {\n            return f(&mut st); // nothing is saved over a damaged store: only the owner repairs it\n        }",
+"        if false {\n            return f(&mut st);\n        }"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        st.tampered |= g.tampered;",
+"        let _ = 0;"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if write && store.save(&st).is_none() {",
+"        if false {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"                if st.tampered || (level == Level::Root && st.global) {",
+"                if level == Level::Root && st.global {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"                if st.tampered || (level == Level::Root && st.global) {",
+"                if st.tampered {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"                Some(r) if r.locked || now_secs() < r.until => Standing::Locked,",
+"                Some(r) if r.locked => Standing::Locked,"
+],
+[
+"crates/yrl/src/stepup.rs",
+"                        Level::Sudo => r.until = now_secs() + sudo_lock.as_secs().max(1),",
+"                        Level::Sudo => r.until = 0,"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if self.store.is_some() {\n            return;\n        }\n        *self.mem.lock().unwrap() = State::default();",
+"        *self.mem.lock().unwrap() = State::default();"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        self.with(|st| st.global || st.tampered, false)",
+"        self.with(|st| st.global, false)"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        let _ = std::fs::remove_file(&store.key_path);\n        match store.save(&State::default()) {",
+"        match store.save(&State::default()) {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        std::fs::rename(&tmp, &self.path).ok()",
+"        std::fs::copy(&tmp, &self.path).ok().map(|_| ())"
+],
+[
+"crates/yrl/src/bin/yrld.rs",
+"    cfg.root_lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&dir, \"root\"));\n",
+"\n"
+]
+]

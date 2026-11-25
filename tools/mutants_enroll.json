@@ -1,0 +1,112 @@
+[
+[
+"crates/yrl/src/enroll.rs",
+"    if ttl_secs == 0 || ttl_secs > 900 {",
+"    if ttl_secs == 0 {"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if ttl_secs == 0 || ttl_secs > 900 {",
+"    if ttl_secs > 900 {"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if rights.iter().any(|r| !right_ok(r)) {\n        bail!(\"rights are plain words\");",
+"    if false {\n        bail!(\"rights are plain words\");"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    for stale in [\"request\", \"decision\", \"closed\"] {",
+"    for stale in [\"request\", \"decision\"] {"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if m.mode() & 0o022 != 0 || m.len() > 4096 {\n        return None;",
+"    if m.len() > 4096 {\n        return None;"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if now() >= expires || rights.iter().any(|r| !right_ok(r)) {",
+"    if rights.iter().any(|r| !right_ok(r)) {"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if now() >= expires || rights.iter().any(|r| !right_ok(r)) {",
+"    if now() >= expires {"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if dir_of(dir).join(\"closed\").exists() {\n        return None; // three wrong codes were enough\n    }",
+"    let _ = 0;"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if code.is_empty() || code.len() > 32 || !label_ok(label) {",
+"    if code.is_empty() || code.len() > 32 {"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if b.len() != 2 + n + m {\n        return Err(Malformed);",
+"    if b.len() < 2 + n + m {\n        return Err(Malformed);"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    !l.is_empty() && l.len() <= 32 && l.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))",
+"    !l.is_empty() && l.len() <= 32"
+],
+[
+"crates/yrl/src/enroll.rs",
+"        if self.window.swap(w.expires, SeqCst) != w.expires {\n            self.bad.store(0, SeqCst); // a new window starts clean\n        }",
+"        self.window.store(w.expires, SeqCst);"
+],
+[
+"crates/yrl/src/enroll.rs",
+"        if self.bad.load(SeqCst) >= MAX_BAD_CODES {\n            return Outcome::Refused;\n        }",
+"        let _ = 0;"
+],
+[
+"crates/yrl/src/enroll.rs",
+"            if self.bad.fetch_add(1, SeqCst) + 1 >= MAX_BAD_CODES {",
+"            if self.bad.fetch_add(1, SeqCst) + 1 > MAX_BAD_CODES {"
+],
+[
+"crates/yrl/src/enroll.rs",
+"        if self.busy.swap(true, SeqCst) {\n            return Outcome::Refused; // one request at a time\n        }",
+"        self.busy.store(true, SeqCst);"
+],
+[
+"crates/yrl/src/enroll.rs",
+"                    if d.trim() == format!(\"accept {}\", hex::encode(public)) {",
+"                    if d.trim().starts_with(\"accept\") {"
+],
+[
+"crates/yrl/src/enroll.rs",
+"        self.busy.store(false, SeqCst);\n        result",
+"        result"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if accept {\n        crate::keys::authorize(",
+"    if true {\n        crate::keys::authorize("
+],
+[
+"crates/yrl/src/enroll.rs",
+"    for f in [\"window\", \"request\"] {",
+"    for f in [\"window\", \"request\", \"decision\"] {"
+],
+[
+"crates/yrl/src/enroll.rs",
+"    if public.len() != 32 || !label_ok(&label) {",
+"    if !label_ok(&label) {"
+],
+[
+"crates/yrl/src/server.rs",
+"    if !authorized.iter().any(|a| a.public == who.public) {\n        // a guest",
+"    if false {\n        // a guest"
+],
+[
+"crates/yrl/src/server.rs",
+"    if f.kind != ENROLL {\n        return;\n    }",
+"    let _ = 0;"
+]
+]

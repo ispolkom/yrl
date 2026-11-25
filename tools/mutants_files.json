@@ -1,0 +1,172 @@
+[
+[
+"crates/yrl/src/fshelper.rs",
+"& 0o777; // no setuid",
+"& 0o7777; // no setuid"
+],
+[
+"crates/yrl/src/fshelper.rs",
+".custom_flags(libc::O_NOFOLLOW)",
+""
+],
+[
+"crates/yrl/src/fshelper.rs",
+"|| meta.uid() != unsafe { libc::geteuid() } {",
+"{"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"let have = if meta.len() > size { 0 } else { meta.len() };",
+"let have = meta.len();"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"if have == 0 {\n        file.set_len(0).map_err(|_| E_IO)?;\n    }",
+"let _ = 0;"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"if *h.finalize().as_bytes() != want {",
+"if false {"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"let _ = fs::remove_file(&part);\n        return Err(E_VERIFY);",
+"return Err(E_VERIFY);"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"if n == 0 {\n            return Err(E_VERIFY); // the sender went away",
+"if n == 0 {\n            break; // the sender went away"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"if size > MAX_FILE_SIZE {",
+"if false {"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"if !meta.is_file() {\n        return Err(E_OPEN);\n    }\n    let size = meta.len();",
+"let size = meta.len();"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"if offset > size {",
+"if false {"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"hash_prefix(&mut file, offset, &mut h).map_err(|_| E_IO)?;",
+"let _ = offset;"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"fs::rename(&part, &path).map_err(|_| E_IO)?;",
+"fs::copy(&part, &path).map_err(|_| E_IO)?;"
+],
+[
+"crates/yrl/src/fshelper.rs",
+"b.is_empty() || b.len() > crate::filewire::MAX_PATH || b.contains(&0)",
+"false"
+],
+[
+"crates/yrl/src/files.rs",
+"if req.size > max_size {",
+"if false {"
+],
+[
+"crates/yrl/src/files.rs",
+"if got > expected {",
+"if false {"
+],
+[
+"crates/yrl/src/files.rs",
+"if got != expected {",
+"if false {"
+],
+[
+"crates/yrl/src/files.rs",
+"Some((Some(n), _)) if n <= req.size => n,",
+"Some((Some(n), _)) => n,"
+],
+[
+"crates/yrl/src/files.rs",
+"hex::encode(&req.path));\n    if stdin.write_all(head.as_bytes()).await.is_err() {\n        let _ = tx.send(err(id, E_IO, code_text(E_IO))).await;\n        return;\n    }\n    let offset",
+"String::from_utf8_lossy(&req.path));\n    if stdin.write_all(head.as_bytes()).await.is_err() {\n        let _ = tx.send(err(id, E_IO, code_text(E_IO))).await;\n        return;\n    }\n    let offset"
+],
+[
+"crates/yrl/src/server.rs",
+"if !session_rights.iter().any(|r| r == \"files\") {",
+"if false {"
+],
+[
+"crates/yrl/src/server.rs",
+"if transfers.len() >= cfg.max_transfers_per_connection || transfers.contains_key(&fid) {",
+"if false {"
+],
+[
+"crates/yrl/src/server.rs",
+"if transfers.len() >= cfg.max_transfers_per_connection || transfers.contains_key(&fid) {",
+"if transfers.len() >= cfg.max_transfers_per_connection {"
+],
+[
+"crates/yrl/src/server.rs",
+"drop(transfers); // every transfer is stopped",
+"std::mem::forget(transfers); // every transfer is stopped"
+],
+[
+"crates/yrl/src/filewire.rs",
+"if b.len() != 52 + n {",
+"if b.len() < 52 + n {"
+],
+[
+"crates/yrl/src/filewire.rs",
+"if b.len() != 18 + n {",
+"if b.len() < 18 + n {"
+],
+[
+"crates/yrl/src/filewire.rs",
+"!p.is_empty() && p.len() <= MAX_PATH && !p.contains(&0)",
+"!p.is_empty() && p.len() <= MAX_PATH"
+],
+[
+"crates/yrl/src/filewire.rs",
+"!p.is_empty() && p.len() <= MAX_PATH && !p.contains(&0)",
+"p.len() <= MAX_PATH && !p.contains(&0)"
+],
+[
+"crates/yrl/src/client.rs",
+"if n != size || h != want_hash {",
+"if false {"
+],
+[
+"crates/yrl/src/client.rs",
+"let _ = std::fs::remove_file(part); // a bad partial copy",
+"let _ = 0; // a bad partial copy"
+],
+[
+"crates/yrl/src/client.rs",
+"if have + got != size {",
+"if false {"
+],
+[
+"crates/yrl/src/client.rs",
+"if have + got > size {",
+"if false {"
+],
+[
+"crates/yrl/src/client.rs",
+"file.set_len(have).await?;",
+"let _ = have;"
+],
+[
+"crates/yrl/src/client.rs",
+"let _ = std::fs::remove_file(&part); // the partial copy is longer",
+"let _ = 0; // the partial copy is longer"
+],
+[
+"crates/yrl/src/client.rs",
+"file.seek(std::io::SeekFrom::Start(offset)).await?;",
+"let _ = offset;"
+]
+]

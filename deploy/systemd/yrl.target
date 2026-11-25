@@ -1,0 +1,7 @@
+[Unit]
+Description=YRL remote link (all parts)
+Wants=yrl-audit.service yrl-broker.service yrl-executor.service yrl-firewall.service yrl-gatekeeper.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

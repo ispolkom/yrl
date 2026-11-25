@@ -1,0 +1,167 @@
+[
+[
+"crates/yrl/src/visual.rs",
+"c if c.is_control() => '?',",
+""
+],
+[
+"crates/yrl/src/visual.rs",
+"'\\u{200B}'..='\\u{200F}' | '\\u{202A}'..='\\u{202E}' | '\\u{2060}'..='\\u{2064}' | '\\u{2066}'..='\\u{2069}' | '\\u{FEFF}' | '\\u{061C}' => '?',",
+"'\\u{200B}'..='\\u{200F}' => '?',"
+],
+[
+"crates/yrl/src/visual.rs",
+"Some(0) | None => b\"/\".to_vec(),",
+"Some(0) | None => b\"\".to_vec(),"
+],
+[
+"crates/yrl/src/visual.rs",
+"    if !v.ends_with(b\"/\") {\n        v.push(b'/');\n    }",
+"    v.push(b'/');"
+],
+[
+"crates/yrl/src/visual.rs",
+"n != \".\" && n != \"..\" && !n.contains('/')",
+"n != \".\" && !n.contains('/')"
+],
+[
+"crates/yrl/src/visual.rs",
+"n != \".\" && n != \"..\" && !n.contains('/')",
+"n != \".\" && n != \"..\""
+],
+[
+"crates/yrl/src/visual.rs",
+"&& !n.contains('\\0') && !n.chars().any(|c| c.is_control())",
+"&& !n.contains('\\0')"
+],
+[
+"crates/yrl/src/visual.rs",
+"entries.retain(|e| !e.name.is_empty() && e.name != b\".\" && e.name != b\"..\" && !e.name.contains(&b'/') && !e.name.contains(&0));",
+"entries.retain(|e| !e.name.is_empty());"
+],
+[
+"crates/yrl/src/visual.rs",
+"now.saturating_duration_since(t) <= DOUBLE_CLICK",
+"true"
+],
+[
+"crates/yrl/src/visual.rs",
+"j == i && now.saturating_duration_since(t) <= DOUBLE_CLICK",
+"now.saturating_duration_since(t) <= DOUBLE_CLICK"
+],
+[
+"crates/yrl/src/visual.rs",
+"if row >= 2 && row < 2 + h {",
+"if row >= 1 && row < 2 + h {"
+],
+[
+"crates/yrl/src/visual.rs",
+"if row >= 2 && row < 2 + h {",
+"if row >= 2 && row <= 2 + h {"
+],
+[
+"crates/yrl/src/visual.rs",
+"if matches!(k, Key::Char('y') | Key::Char('Y')) {",
+"if true {"
+],
+[
+"crates/yrl/src/visual.rs",
+"Key::Char(c) if !c.is_control() => {",
+"Key::Char(c) => {"
+],
+[
+"crates/yrl/src/visual.rs",
+"if text.len() < MAX_PROMPT {",
+"if true {"
+],
+[
+"crates/yrl/src/visual.rs",
+"5 => Key::PageUp,\n            6 => Key::PageDown,",
+"5 => Key::PageDown,\n            6 => Key::PageUp,"
+],
+[
+"crates/yrl/src/visual.rs",
+"MouseKind::Wheel(if b & 1 == 0 { -1 } else { 1 })",
+"MouseKind::Wheel(if b & 1 == 0 { 1 } else { -1 })"
+],
+[
+"crates/yrl/src/visual.rs",
+"if self.select_name.is_none() {\n                    self.select_name = self.selected_name(); // a rename has already said which name to land on\n                }",
+"self.select_name = self.selected_name();"
+],
+[
+"crates/yrl/src/visual.rs",
+"        // an open prompt or confirmation stays: a listing that arrives meanwhile (a refresh after an operation) must not cancel what the user is typing\n",
+"        self.mode = Mode::Browse;\n"
+],
+[
+"crates/yrl/src/visual.rs",
+"if self.rows >= 4 && row == self.rows as usize - 1 {",
+"if row == self.rows as usize - 1 {"
+],
+[
+"crates/yrl/src/visual.rs",
+"self.select_name = self.cwd.rsplit(|c| *c == b'/').next().map(|n| n.to_vec());\n            return vec![Cmd::List(parent(&self.cwd))];",
+"return vec![Cmd::List(parent(&self.cwd))];"
+],
+[
+"crates/yrl/src/visual.rs",
+"Some(e) if e.kind == Kind::File => {\n                    self.note(&format!(\"downloading",
+"Some(e) if true => {\n                    self.note(&format!(\"downloading"
+],
+[
+"crates/yrl/src/visual.rs",
+"if v.len() != 3 || !(fin == b'M' || fin == b'm') || v[0] > 255 {",
+"if v.len() != 3 || v[0] > 255 {"
+],
+[
+"crates/yrl/src/visual.rs",
+"if b.len() > MAX_SEQ {\n                                self.buf.clear(); // garbage that never ends\n                                return Some(None);\n                            }",
+"if false {\n                                return Some(None);\n                            }"
+],
+[
+"crates/yrl/src/fsops.rs",
+"1u32 /* RENAME_NOREPLACE */",
+"0u32 /* RENAME_NOREPLACE */"
+],
+[
+"crates/yrl/src/fsops.rs",
+"if m.file_type().is_dir() { std::fs::remove_dir(&p) } else { std::fs::remove_file(&p) }",
+"if m.file_type().is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) }"
+],
+[
+"crates/yrl/src/fsops.rs",
+"let Ok(m) = std::fs::symlink_metadata(item.path()) else { continue };",
+"let Ok(m) = std::fs::metadata(item.path()) else { continue };"
+],
+[
+"crates/yrl/src/fsops.rs",
+"let mode = u32::from_str_radix(f[1], 8).map_err(|_| E_REQUEST)? & 0o777;\n            let p = hex_path(f[2])",
+"let mode = u32::from_str_radix(f[1], 8).map_err(|_| E_REQUEST)? & 0o7777;\n            let p = hex_path(f[2])"
+],
+[
+"crates/yrl/src/fsops.rs",
+"if b.len() != 13 + al + bl {",
+"if b.len() < 13 + al + bl {"
+],
+[
+"crates/yrl/src/fsops.rs",
+"if nl > MAX_NAME {\n            return Err(WireError::TooLarge);\n        }\n        at += 21;",
+"at += 21;"
+],
+[
+"crates/yrl/src/fsops.rs",
+"if at != b.len() {\n        return Err(WireError::Malformed);\n    }\n    Ok(out)",
+"Ok(out)"
+],
+[
+"crates/yrl/src/fsops.rs",
+"|| (b_needed && self.b.is_empty()) || (!b_needed && !self.b.is_empty())",
+"|| (!b_needed && !self.b.is_empty())"
+],
+[
+"crates/yrl/src/fsops.rs",
+"|| (b_needed && self.b.is_empty()) || (!b_needed && !self.b.is_empty())",
+"|| (b_needed && self.b.is_empty())"
+]
+]

@@ -1,0 +1,157 @@
+[
+[
+"crates/yrl/src/link.rs",
+"if seq < s.expected_in {\n            return Ok(None);",
+"if seq > s.expected_in {\n            return Ok(None);"
+],
+[
+"crates/yrl/src/link.rs",
+"if seq > s.expected_in {\n            return Err(());",
+"if false {\n            return Err(());"
+],
+[
+"crates/yrl/src/link.rs",
+"if n > s.next_seq {\n            return Err(());",
+"if false {\n            return Err(());"
+],
+[
+"crates/yrl/src/link.rs",
+"if *cursor < *front {\n                return Action::Bad;",
+"if false {\n                return Action::Bad;"
+],
+[
+"crates/yrl/src/link.rs",
+"if s.unacked.is_empty() || s.bytes + inner.len() <= self.window {",
+"if true {"
+],
+[
+"crates/yrl/src/link.rs",
+"link.st.lock().unwrap().pong_due = true;",
+"let _ = 0;"
+],
+[
+"crates/yrl/src/link.rs",
+"    if link.on_ack(peer_expected).is_err() {\n        return End::Protocol;\n    }\n",
+"    let _ = peer_expected;\n"
+],
+[
+"crates/yrl/src/link.rs",
+"let mut cursor = peer_expected;",
+"let mut cursor = 0;"
+],
+[
+"crates/yrl/src/link.rs",
+"return if link.is_closed() { End::Closed } else { End::Superseded };",
+"return End::Closed;"
+],
+[
+"crates/yrl/src/link.rs",
+"let Ok(permit) = sink.reserve().await else { return End::Closed };\n                    match link.deliver(seq, &f.payload[8..]) {",
+"let Ok(permit) = sink.reserve().await else { return End::Closed };\n                    match link.deliver(seq.max(0), &f.payload[8..]) {"
+],
+[
+"crates/yrl/src/link.rs",
+"if f.payload.len() < 8 + 5 {",
+"if false {"
+],
+[
+"crates/yrl/src/link.rs",
+"if owed >= ACK_EVERY || (owed > 0 && idle_ack_due) {",
+"if owed >= ACK_EVERY {"
+],
+[
+"crates/yrl/src/link.rs",
+"if s.closed {\n            return Action::Stop;",
+"if false {\n            return Action::Stop;"
+],
+[
+"crates/yrl/src/link.rs",
+"if s.closed {\n                    return Err(LinkClosed);",
+"if false {\n                    return Err(LinkClosed);"
+],
+[
+"crates/yrl/src/server.rs",
+"Some(e) if e.key == who.public && !e.link.is_closed() && client_expected <= e.link.positions().0 => {",
+"Some(e) if !e.link.is_closed() && client_expected <= e.link.positions().0 => {"
+],
+[
+"crates/yrl/src/server.rs",
+"Some(e) if e.key == who.public && !e.link.is_closed() && client_expected <= e.link.positions().0 => {",
+"Some(e) if e.key == who.public && client_expected <= e.link.positions().0 => {"
+],
+[
+"crates/yrl/src/server.rs",
+"Some(e) if e.key == who.public && !e.link.is_closed() && client_expected <= e.link.positions().0 => {",
+"Some(e) if e.key == who.public && !e.link.is_closed() => {"
+],
+[
+"crates/yrl/src/server.rs",
+"                        cfg.throttle.fail(&key_id);\n                        cfg.throttle.fail(&ip_id);\n                        cfg.log(format!(\"resume refused",
+"                        cfg.log(format!(\"resume refused"
+],
+[
+"crates/yrl/src/server.rs",
+"if cfg.throttle.locked(&key_id) || cfg.throttle.locked(&ip_id) {\n                    return;\n                }\n                let sid",
+"if false {\n                    return;\n                }\n                let sid"
+],
+[
+"crates/yrl/src/server.rs",
+"if e2.attach_gen.load(std::sync::atomic::Ordering::SeqCst) == gen {",
+"if true {"
+],
+[
+"crates/yrl/src/server.rs",
+"if e2.attach_gen.load(std::sync::atomic::Ordering::SeqCst) == gen {",
+"if false {"
+],
+[
+"crates/yrl/src/server.rs",
+"    entry.end();\n    cfg.sessions.remove(&sid);\n    cfg.log(format!(\"session closed via",
+"    cfg.log(format!(\"session closed via"
+],
+[
+"crates/yrl/src/server.rs",
+"m.len() < max && m.values().filter(|e| e.key == key).count() < max_key",
+"m.len() < max"
+],
+[
+"crates/yrl/src/server.rs",
+"m.len() < max && m.values().filter(|e| e.key == key).count() < max_key",
+"m.values().filter(|e| e.key == key).count() < max_key"
+],
+[
+"crates/yrl/src/server.rs",
+"    if entry.link.is_closed() {\n        cfg.sessions.remove(&sid);\n        return;\n    }",
+"    if entry.link.is_closed() {\n        return;\n    }"
+],
+[
+"crates/yrl/src/client.rs",
+"Resume::Refused => {\n                lost.store(true, std::sync::atomic::Ordering::SeqCst); // the server no longer has this session\n                break;\n            }",
+"Resume::Refused => {}"
+],
+[
+"crates/yrl/src/client.rs",
+"        if last_ok.elapsed() > o.give_up_after {",
+"        if false {"
+],
+[
+"crates/yrl/src/client.rs",
+"let _ = link.push(&Frame::new(wire::CLOSE, 0, vec![])).await;\n                    for _ in 0..50 {",
+"for _ in 0..50 {"
+],
+[
+"crates/yrl/src/client.rs",
+"Resume::Ok(rd, wr, sec, e) => conn = Some((rd, wr, sec, e)),",
+"Resume::Ok(rd, wr, sec, _e) => conn = Some((rd, wr, sec, 0)),"
+],
+[
+"crates/yrl/src/client.rs",
+"p.extend_from_slice(&link.positions().1.to_be_bytes());",
+"p.extend_from_slice(&0u64.to_be_bytes());"
+],
+[
+"crates/yrl/src/client.rs",
+"backoff = (backoff * 2).min(o.retry_max);",
+"backoff = o.retry_max.max(backoff);"
+]
+]

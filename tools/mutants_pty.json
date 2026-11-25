@@ -1,0 +1,107 @@
+[
+[
+"crates/yrl/src/server.rs",
+"if !session_rights.iter().any(|r| r == \"shell\") {",
+"if false {"
+],
+[
+"crates/yrl/src/server.rs",
+"if ptys.len() >= cfg.max_pty_per_connection || ptys.contains_key(&pid) {",
+"if false {"
+],
+[
+"crates/yrl/src/server.rs",
+"if ptys.len() >= cfg.max_pty_per_connection || ptys.contains_key(&pid) {",
+"if ptys.len() >= cfg.max_pty_per_connection {"
+],
+[
+"crates/yrl/src/server.rs",
+"    drop(ptys); // every terminal gets its hangup",
+"    std::mem::forget(ptys); // never hung up"
+],
+[
+"crates/yrl/src/server.rs",
+"let _ = ch.send(PtyCmd::Resize(r, c)).await;",
+"let _ = (r, c, ch);"
+],
+[
+"crates/yrl/src/server.rs",
+"let _ = c.send(PtyCmd::Hangup).await;",
+"let _ = c;"
+],
+[
+"crates/yrl/src/pty.rs",
+"if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {",
+"if libc::setsid() < 0 {"
+],
+[
+"crates/yrl/src/pty.rs",
+"    if ok { String::from_utf8_lossy(t).into_owned() } else { \"xterm\".into() }",
+"    String::from_utf8_lossy(t).into_owned()"
+],
+[
+"crates/yrl/src/pty.rs",
+"matches!(c, b'-' | b'_' | b'.' | b'+')",
+"matches!(c, b'-' | b'_' | b'.' | b'+' | b' ')"
+],
+[
+"crates/yrl/src/pty.rs",
+"cmd.env(\"TERM\", term)",
+"cmd.env(\"TERM\", \"dumb\")"
+],
+[
+"crates/yrl/src/pty.rs",
+"cmd.arg0(format!(\"-{name}\"))",
+"cmd.arg0(name.clone())"
+],
+[
+"crates/yrl/src/pty.rs",
+"unsafe { libc::ioctl(fd.get_ref().0.as_raw_fd(), libc::TIOCSWINSZ, &ws) };",
+"let _ = ws;"
+],
+[
+"crates/yrl/src/pty.rs",
+"unsafe { libc::kill(-pid, libc::SIGHUP) };\n        match",
+"match"
+],
+[
+"crates/yrl/src/pty.rs",
+"unsafe { libc::kill(-pid, libc::SIGKILL) };",
+"let _ = 0;"
+],
+[
+"crates/yrl/src/wire.rs",
+"    if b.len() != 13 + n {",
+"    if b.len() < 13 + n {"
+],
+[
+"crates/yrl/src/wire.rs",
+"    if b.len() != 12 {",
+"    if b.len() < 12 {"
+],
+[
+"crates/yrl/src/wire.rs",
+"    if term.len() > MAX_TERM || !(1..=MAX_DIM).contains(&rows) || !(1..=MAX_DIM).contains(&cols) {\n        return Err(WireError::TooLarge);\n    }\n    let mut v = with_id(id, &rows",
+"    if term.len() > MAX_TERM {\n        return Err(WireError::TooLarge);\n    }\n    let mut v = with_id(id, &rows"
+],
+[
+"crates/yrl/src/identity.rs",
+"        && !shell.ends_with(\"/nologin\")\n",
+""
+],
+[
+"crates/yrl/src/identity.rs",
+"        && shells_file.lines().any(|l| l.trim() == shell)\n",
+""
+],
+[
+"crates/yrl/src/identity.rs",
+"    shell.starts_with('/')\n",
+"    true\n"
+],
+[
+"crates/yrl/src/identity.rs",
+"&& std::fs::metadata(shell).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)",
+"&& true"
+]
+]

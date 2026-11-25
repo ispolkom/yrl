@@ -1,0 +1,162 @@
+[
+[
+"crates/yrl/src/spa.rs",
+"    if bytes.len() != LEN {",
+"    if bytes.len() < LEN {"
+],
+[
+"crates/yrl/src/spa.rs",
+"if &bytes[..4] != MAGIC || bytes[4] != VERSION {",
+"if &bytes[..4] != MAGIC {"
+],
+[
+"crates/yrl/src/spa.rs",
+"if bytes[13..21] != server_id(&self.server.public) {",
+"if false {"
+],
+[
+"crates/yrl/src/spa.rs",
+"if r.2 > self.cfg.global_per_sec {",
+"if r.2 > self.cfg.global_per_sec + 1000 {"
+],
+[
+"crates/yrl/src/spa.rs",
+"if *n > self.cfg.per_source_per_sec {",
+"if *n > self.cfg.per_source_per_sec + 1 {"
+],
+[
+"crates/yrl/src/spa.rs",
+"if ts.abs_diff(now) > self.cfg.window {",
+"if ts > now + self.cfg.window {"
+],
+[
+"crates/yrl/src/spa.rs",
+"if ts.abs_diff(now) > self.cfg.window {",
+"if ts.abs_diff(now) >= self.cfg.window {"
+],
+[
+"crates/yrl/src/spa.rs",
+"is_some_and(|until| *until > now)",
+"is_some_and(|until| *until > now + 1000)"
+],
+[
+"crates/yrl/src/spa.rs",
+"if rp.len() >= self.cfg.max_replay_entries {\n                rp.retain(|_, until| *until > now);\n                if rp.len() >= self.cfg.max_replay_entries {",
+"if rp.len() >= self.cfg.max_replay_entries {\n                rp.retain(|_, until| *until > now);\n                if rp.len() > self.cfg.max_replay_entries {"
+],
+[
+"crates/yrl/src/spa.rs",
+"if want != blake3::Hash::from_bytes(bytes[LEN - 32..].try_into().unwrap()) {",
+"if false {"
+],
+[
+"crates/yrl/src/spa.rs",
+"if vip != virtual_ipv6(&client_pub) {",
+"if false {"
+],
+[
+"crates/yrl/src/spa.rs",
+"if !self.cfg.enabled_services.contains(&service) {",
+"if false {"
+],
+[
+"crates/yrl/src/spa.rs",
+"        self.replay.lock().unwrap().insert((cid, nonce), ttl_end);\n",
+"        let _ = ttl_end;\n"
+],
+[
+"crates/yrl/src/spa.rs",
+"let ttl_end = now + 2 * self.cfg.window + 10;",
+"let ttl_end = now + 1;"
+],
+[
+"crates/yrl/src/spa.rs",
+"if c.loaded == 0 || now > c.loaded {",
+"if c.loaded == 0 {"
+],
+[
+"crates/yrl/src/spa.rs",
+"let key = mac_key(&self.server.private, &client_pub)",
+"let key = mac_key(&self.server.private, &self.server.public)"
+],
+[
+"crates/yrl/src/spa.rs",
+"    h.update(b\"yrl-spa-server\");",
+"    h.update(b\"yrl-spa-client\");"
+],
+[
+"crates/yrl/src/firewall.rs",
+"if !self.policy.work_ports.contains(&port) {",
+"if false {"
+],
+[
+"crates/yrl/src/firewall.rs",
+"if ttl_secs == 0 || ttl_secs > self.policy.max_ttl_secs {",
+"if ttl_secs == 0 {"
+],
+[
+"crates/yrl/src/firewall.rs",
+"if !address_ok(&addr, self.policy.allow_loopback) {",
+"if false {"
+],
+[
+"crates/yrl/src/firewall.rs",
+"if !known && (ix.len() >= self.policy.max_entries ||",
+"if !known && (ix.len() > self.policy.max_entries ||"
+],
+[
+"crates/yrl/src/firewall.rs",
+"ix.keys().filter(|(a, _)| *a == addr).count() >= self.policy.per_addr_max",
+"ix.keys().filter(|(a, _)| *a == addr).count() > self.policy.per_addr_max"
+],
+[
+"crates/yrl/src/firewall.rs",
+"if a.record_critical(ev).await.is_err() {\n                        return Err(Refusal::NotRecorded);\n                    }",
+"let _ = a.record_critical(ev).await;"
+],
+[
+"crates/yrl/src/firewall.rs",
+"if self.backend.lock().unwrap().add(addr, port, ttl_secs).is_err() {\n                    return Err(Refusal::BackendFailed);\n                }",
+"let _ = self.backend.lock().unwrap().add(addr, port, ttl_secs);"
+],
+[
+"crates/yrl/src/firewall.rs",
+"Err(_) => Err(Refusal::NotSure),",
+"Err(_) => Ok(Some(false)),"
+],
+[
+"crates/yrl/src/firewall.rs",
+"filter(|(_, e)| e.session == session)",
+"filter(|(_, e)| e.session != session)"
+],
+[
+"crates/yrl/src/firewall.rs",
+"ix.retain(|_, e| e.until > now);",
+"ix.retain(|_, e| e.until >= now + 100000);"
+],
+[
+"crates/yrl/src/firewall.rs",
+"FW_ANSWER if f.payload.len() == 1 => Ok(Some(f.payload[0] == 1)),",
+"FW_ANSWER if f.payload.len() == 1 => Ok(Some(true)),"
+],
+[
+"crates/yrl/src/gatenet.rs",
+"let src = from.ip().to_canonical();",
+"let src = from.ip();"
+],
+[
+"crates/yrl/src/gatenet.rs",
+"let due = told.get(&(why, src)).is_none_or(|t| now >= t + 10);",
+"let due = true;"
+],
+[
+"crates/yrl/src/gatenet.rs",
+"match fw.call(Request::Open { addr: src, port: work_port, ttl_secs, session }).await {",
+"match fw.call(Request::Open { addr: src, port: work_port, ttl_secs: ttl_secs + 1000, session }).await {"
+],
+[
+"crates/yrl/src/gatenet.rs",
+"cfg.rec(0, Event::new(\"spa_ok\", LEVEL_NONE, RESULT_OK)",
+"cfg.rec(0, Event::new(\"spa_ok\", LEVEL_NONE, RESULT_ERROR)"
+]
+]

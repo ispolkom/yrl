@@ -1,0 +1,142 @@
+[
+[
+"crates/yrl/src/tunnel.rs",
+"(f[0] == \"*\" || f[0] == login) &&",
+"true &&"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"(f[1] == \"*\" || f[1].eq_ignore_ascii_case(host))",
+"true"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"(f[1] == \"*\" || f[1].eq_ignore_ascii_case(host))",
+"(f[1] == \"*\" || f[1] == host)"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"if f.len() != 3 {\n            return false; // a damaged rule allows nothing\n        }",
+"if f.len() < 3 {\n            return false;\n        }"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"a <= port && port <= b",
+"a <= port"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"a <= port && port <= b",
+"port <= b"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"m.mode() & 0o077 == 0 =>",
+"true =>"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"Some(TunIn::Close) | None => break,\n            },\n            _ = &mut reader",
+"Some(TunIn::Close) | None => {}\n            },\n            _ = &mut reader"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"let _ = wr.shutdown().await;\n                    client_done = true;",
+"client_done = true;"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"m = rx.recv() => if matches!(m, Some(TunIn::Close) | None) { break },",
+"m = rx.recv() => { let _ = m; }"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"    reader.abort();\n",
+"    let _ = &reader;\n"
+],
+[
+"crates/yrl/src/tunnel.rs",
+"let _ = tx.send(err(id, E_CONNECT, \"cannot connect\")).await;",
+"let _ = tx.send(err(id, E_DENIED, \"cannot connect\")).await;"
+],
+[
+"crates/yrl/src/server.rs",
+"if !session_rights.iter().any(|r| r == \"tunnel\") {",
+"if false {"
+],
+[
+"crates/yrl/src/server.rs",
+"if !tunnel::permits(&tunnel::read_rules(&cfg.dir.join(\"tunnels\")), &account, &host, port) {",
+"if false {"
+],
+[
+"crates/yrl/src/server.rs",
+"tunnel::permits(&tunnel::read_rules(&cfg.dir.join(\"tunnels\")), &account, &host, port)",
+"tunnel::permits(&tunnel::read_rules(&cfg.dir.join(\"tunnels\")), \"*\", &host, port)"
+],
+[
+"crates/yrl/src/server.rs",
+"if tunnels.len() >= cfg.max_tunnels_per_connection || tunnels.contains_key(&tid) {",
+"if false {"
+],
+[
+"crates/yrl/src/server.rs",
+"drop(tunnels); // every tunnel is closed",
+"std::mem::forget(tunnels); // every tunnel is closed"
+],
+[
+"crates/yrl/src/server.rs",
+"                    account = typed_login;",
+"                    account = String::from(\"*\");"
+],
+[
+"crates/yrl/src/tunwire.rs",
+"if b.len() != 11 + n {",
+"if b.len() < 11 + n {"
+],
+[
+"crates/yrl/src/tunwire.rs",
+"if !host_ok(host) || port == 0 {\n        return Err(WireError::Malformed);",
+"if false {\n        return Err(WireError::Malformed);"
+],
+[
+"crates/yrl/src/tunwire.rs",
+"!h.is_empty() && h.len() <= MAX_HOST && h.bytes().all(|c| c.is_ascii_graphic())",
+"!h.is_empty() && h.len() <= MAX_HOST"
+],
+[
+"crates/yrl/src/client_tun.rs",
+"Some(E_DENIED) | Some(1) => 2,",
+"Some(E_DENIED) | Some(1) => 1,"
+],
+[
+"crates/yrl/src/client_tun.rs",
+"Some(E_CONNECT) => 5,",
+"Some(E_CONNECT) => 1,"
+],
+[
+"crates/yrl/src/client_tun.rs",
+"if req[1] != 1 {",
+"if false {"
+],
+[
+"crates/yrl/src/client_tun.rs",
+"if !methods.contains(&0) {",
+"if false {"
+],
+[
+"crates/yrl/src/client_tun.rs",
+"if head[0] != 5 {",
+"if false {"
+],
+[
+"crates/yrl/src/client_tun.rs",
+"    tunnel.close().await;\n}",
+"}"
+],
+[
+"crates/yrl/src/client_tun.rs",
+"_ => { local_done = true; if tunnel.eof().await.is_err() { break; } }",
+"_ => { local_done = true; }"
+]
+]

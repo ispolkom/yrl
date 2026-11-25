@@ -1,0 +1,30 @@
+[Unit]
+Description=YRL executor (acts for the logged-in person, as that person's system user)
+After=yrl-audit.service yrl-broker.service
+Requires=yrl-audit.service
+
+# This part runs as root on purpose: it has to become the account's system user, which only root may do.
+# Its capability set holds nothing but that right. No file-system sandbox here: it works in the people's own directories.
+[Service]
+Type=simple
+User=root
+Group=root
+SupplementaryGroups=yrl-conf yrl-to-audit yrl-to-broker yrl-to-exec
+Environment=YRL_RUN=/run/yrl
+Environment=YRL_SOCKET_GROUP=yrl-to-exec
+ExecStart=/usr/local/bin/yrld executor /var/lib/yrl --gate-uid yrl-gate --gate-exe -
+Restart=on-failure
+RestartSec=2
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+UMask=0027
+
+[Install]
+WantedBy=yrl.target

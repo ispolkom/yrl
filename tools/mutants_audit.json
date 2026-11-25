@@ -1,0 +1,177 @@
+[
+[
+"crates/yrl/src/auditlog.rs",
+"        v.push(self.journal as u8);\n        v.push(self.source as u8);",
+"        v.push(self.journal as u8);"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        v.extend_from_slice(&self.ev.request_id.to_be_bytes());\n        put(&mut v, &self.ev.session)?;",
+"        put(&mut v, &self.ev.session)?;"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        put(&mut v, &self.ev.cap)?;\n        put(&mut v, &self.extra)?;",
+"        put(&mut v, &self.extra)?;"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        if r.1 != b.len() {\n            bail!(\"trailing bytes in a record\");\n        }",
+"        let _ = 0;"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"    h.update(prev);\n    h.update(canonical);",
+"    h.update(canonical);"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        if rec.seq != expect {",
+"        if false {"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        if rec.journal != journal || p != prev || chain_hash(&prev, body).as_slice() != h {",
+"        if rec.journal != journal || chain_hash(&prev, body).as_slice() != h {"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        if rec.journal != journal || p != prev || chain_hash(&prev, body).as_slice() != h {",
+"        if rec.journal != journal || p != prev {"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"            if !ok {\n                rep.fault = Some(Fault::BadSignature(rec.seq));\n                return rep;\n            }",
+"            let _ = ok;"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        if hs >= rep.records {",
+"        if hs > rep.records {"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        } else if hash_at_head != Some(hh) {",
+"        } else if false {"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        if n < 64 || n > MAX_RECORD || bytes.len() < at + 4 + n {",
+"        if n < 64 || n > MAX_RECORD {"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"            Source::Gatekeeper => matches!(op, \"login\" | \"resume\" | \"enroll_guest\" | \"audit_degraded\"),",
+"            Source::Gatekeeper => true,"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"            Source::Audit => matches!(op, \"checkpoint\" | \"start\" | \"audit_degraded\" | \"repair\"),",
+"            Source::Audit => true,"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"            Source::Broker => matches!(",
+"            Source::Broker => !matches!(op, \"\") || matches!("
+],
+[
+"crates/yrl/src/auditlog.rs",
+"            \"peer_refused\" | \"lockout_tamper\" | \"unlock\" | \"enroll_open\" | \"enroll_decision\" | \"enroll_guest\" | \"word_set\" | \"global_root_off\" | \"replay\" | \"audit_degraded\" | \"repair\" | \"init\" | \"start\" => Journal::Security,",
+"            \"peer_refused\" | \"lockout_tamper\" | \"unlock\" | \"enroll_open\" | \"enroll_decision\" | \"word_set\" | \"global_root_off\" | \"replay\" | \"audit_degraded\" | \"repair\" | \"init\" | \"start\" => Journal::Ordinary,"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        v.extend_from_slice(hex::encode(&blake3::hash(t).as_bytes()[..16]).as_bytes());",
+"        v.extend_from_slice(t);"
+],
+[
+"crates/yrl/src/auditlog.rs",
+"        self.user = u.chars().filter(|c| !c.is_control()).take(64).collect();",
+"        self.user = u.to_string();"
+],
+[
+"crates/yrl/src/audit.rs",
+"        if !src.may_report(&ev.op) {\n            bail!(",
+"        if false {\n            bail!("
+],
+[
+"crates/yrl/src/audit.rs",
+"            if !g.seen.insert((src, ev.session.clone(), ev.request_id, ev.op.clone())) {\n                flags |= FLAG_REPEAT;\n            }",
+"            g.seen.insert((src, ev.session.clone(), ev.request_id, ev.op.clone()));"
+],
+[
+"crates/yrl/src/audit.rs",
+"            if !g.seen.insert((src, ev.session.clone(), ev.request_id, ev.op.clone())) {",
+"            if !g.seen.insert((src, vec![], ev.request_id, ev.op.clone())) {"
+],
+[
+"crates/yrl/src/audit.rs",
+"        if g.broken {\n            bail!(\"the journal could not be written earlier and is closed\");\n        }",
+"        let _ = 0;"
+],
+[
+"crates/yrl/src/audit.rs",
+"        if append_file(&g.journals[idx].path, &bytes).is_err() {\n            g.broken = true;",
+"        if append_file(&g.journals[idx].path, &bytes).is_err() {\n            "
+],
+[
+"crates/yrl/src/audit.rs",
+"        if g.journals[idx].since_cp >= self.every && ",
+"        if g.journals[idx].since_cp > self.every && "
+],
+[
+"crates/yrl/src/audit.rs",
+"            if let Some(f) = rep.fault {\n                bail!(",
+"            if let Some(_f) = rep.fault.filter(|_| false) {\n                let f = 0;\n                bail!("
+],
+[
+"crates/yrl/src/audit.rs",
+"            if std::os::unix::fs::MetadataExt::mode(&m) & 0o077 != 0 {\n                bail!(\"the signing key can be read by others\");\n            }",
+"            let _ = m;"
+],
+[
+"crates/yrl/src/audit.rs",
+"        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX | libc::LOCK_NB) } != 0 {",
+"        if false {"
+],
+[
+"crates/yrl/src/audit.rs",
+"    let Some((src, _)) = ipc.sources.iter().find(|(_, k)| *k == who.public) else { return };\n    let src = *src;",
+"    let src = Source::Executor;"
+],
+[
+"crates/yrl/src/audit.rs",
+"    if r.kind != KIND_EVENT || r.seq != 0 || r.time != 0 || r.flags != 0 || !r.extra.is_empty() {",
+"    if r.kind != KIND_EVENT {"
+],
+[
+"crates/yrl/src/audit.rs",
+"        if f.kind != AUDIT_EVENT {\n            break;\n        }",
+"        let _ = 0;"
+],
+[
+"crates/yrl/src/audit.rs",
+"            Err(e) if e.to_string().contains(\"refused\") => Err(e), // the audit process said no: it will say no again",
+"            Err(e) if false => Err(e),"
+],
+[
+"crates/yrl/src/audit.rs",
+"            if lost > 0 {\n                let mut d",
+"            if false {\n                let mut d"
+],
+[
+"crates/yrl/src/stepup.rs",
+"            if a.record_critical(ctx.event(p.level, crate::auditlog::RESULT_OK, rid).cap(&cap.id).target(&desc)).await.is_err() {",
+"            if false {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"            ctx.report(ctx.event(p.level, if locked { crate::auditlog::RESULT_LOCKED } else { crate::auditlog::RESULT_DENIED }, rid).target(if locked { \"wrong phrase, now locked\" } else { \"wrong phrase\" })); // the phrase itself is nowhere",
+"            let _ = locked;"
+],
+[
+"crates/yrl/src/executor.rs",
+"        cfg.rec(1, crate::auditlog::Event::new(\"peer_refused\", crate::auditlog::LEVEL_NONE, crate::auditlog::RESULT_DENIED).target(\"handshake\"));",
+"        let _ = 0;"
+]
+]

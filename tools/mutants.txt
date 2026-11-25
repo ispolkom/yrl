@@ -1,0 +1,39 @@
+crates/yrl/src/server.rs	if frame.kind != wire::LOGIN {	if false {
+crates/yrl/src/server.rs	if attempts >= cfg.max_login_attempts {	if attempts > cfg.max_login_attempts {
+crates/yrl/src/server.rs	if attempts >= cfg.max_login_attempts {	if false {
+crates/yrl/src/server.rs	.filter(|r| who.rights.contains(r))	.filter(|_| true)
+crates/yrl/src/server.rs	let locked = cfg.throttle.locked(&key_id) || cfg.throttle.locked(&ip_id);	let locked = false;
+crates/yrl/src/server.rs	let locked = cfg.throttle.locked(&key_id) || cfg.throttle.locked(&ip_id);	let locked = cfg.throttle.locked(&key_id);
+crates/yrl/src/server.rs	let locked = cfg.throttle.locked(&key_id) || cfg.throttle.locked(&ip_id);	let locked = cfg.throttle.locked(&ip_id);
+crates/yrl/src/server.rs	if !locked {	if true {
+crates/yrl/src/server.rs	cfg.throttle.ok(&key_id);	let _ = 0;
+crates/yrl/src/server.rs	wire::LOGIN => break, // a second login	wire::LOGIN => {} // a second login
+crates/yrl/src/server.rs	rights = Some(eff);	rights = Some(vec!["exec".to_string(), "root".to_string()]);
+crates/yrl/src/server.rs	if !session_rights.iter().any(|r| r == "exec") {	if false {
+crates/yrl/src/server.rs	let wait = if rights.is_none() { login_deadline.saturating_duration_since(Instant::now()) } else { cfg.idle_timeout };	let wait = cfg.idle_timeout;
+crates/yrl/src/users.rs	if meta.mode() & 0o077 != 0 {	if false {
+crates/yrl/src/users.rs	if p.next().is_some() || PasswordHash::new(&phc).is_err() {	if false {
+crates/yrl/src/server.rs	verify_hash(dummy_hash(), &password);	let _ = 0;
+crates/yrl/src/users.rs	Ok(h) => Argon2::default().verify_password(password, &h).is_ok(),	Ok(_) => true,
+crates/yrl/src/users.rs	if password.len() < 8 ||	if false ||
+crates/yrl/src/users.rs	.filter(|l| l.split_whitespace().next() != Some(login))	.filter(|_| true)
+crates/yrl/src/users.rs	.mode(0o600)	.mode(0o644)
+crates/yrl/src/throttle.rs	if e.0 >= self.lock_after {	if e.0 > self.lock_after {
+crates/yrl/src/throttle.rs	.min(20)	.min(40)
+crates/yrl/src/throttle.rs	.min(self.lock_max)	.min(Duration::from_secs(99999))
+crates/yrl/src/throttle.rs	m.retain(|_, (_, until)| now < *until);	m.retain(|_, _| true);
+crates/yrl/src/throttle.rs	if m.len() >= MAX_ENTRIES {	if false {
+crates/yrl/src/wire.rs	    if b.len() != 3 + n + m {	    if b.len() < 3 + n + m {
+crates/yrl/src/wire.rs	    if m > MAX_PASSWORD {	    if false {
+crates/yrl/src/wire.rs	    if n == 0 || n > MAX_LOGIN {	    if n > MAX_LOGIN {
+crates/yrl/src/wire.rs	if login.is_empty() || login.len() > MAX_LOGIN || password.len() > MAX_PASSWORD {	if login.len() > MAX_LOGIN {
+crates/yrl/src/identity.rs	        if my_euid == 0 {	        if false {
+crates/yrl/src/identity.rs	    if pw.uid == 0 && !rights.iter().any(|r| r == "root") {	    if false {
+crates/yrl/src/identity.rs	    if pw.uid == my_euid {	    if false {
+crates/yrl/src/identity.rs	    if my_euid != 0 {	    if false {
+crates/yrl/src/identity.rs	f.len() < 6	f.len() < 5
+crates/yrl/src/exec.rs	cmd.env_clear().env(	cmd.env(
+crates/yrl/src/exec.rs	    if std::path::Path::new(&target.pw.home).is_dir() {	    if false {
+crates/yrl/src/users.rs	b.len() <= 32	b.len() <= 99
+crates/yrl/src/users.rs	(b[0].is_ascii_lowercase() || b[0] == b'_')	true
+crates/yrl/src/users.rs	|| *c == b'_' || *c == b'-')	|| true)

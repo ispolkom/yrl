@@ -1,0 +1,112 @@
+[
+[
+"crates/yrl/src/ipc.rs",
+"        if peer.uid != u {\n            return PeerVerdict::WrongUser;",
+"        if false {\n            return PeerVerdict::WrongUser;"
+],
+[
+"crates/yrl/src/ipc.rs",
+"        if &got != want {\n            return PeerVerdict::WrongProgram;",
+"        if false {\n            return PeerVerdict::WrongProgram;"
+],
+[
+"crates/yrl/src/ipc.rs",
+"let Some(pid) = peer.pid else { return PeerVerdict::Unknown };",
+"let Some(pid) = peer.pid else { return PeerVerdict::Ok };"
+],
+[
+"crates/yrl/src/ipc.rs",
+"let Some(got) = exe_of_pid(pid) else { return PeerVerdict::Unknown };",
+"let Some(got) = exe_of_pid(pid) else { return PeerVerdict::Ok };"
+],
+[
+"crates/yrl/src/ipc.rs",
+"    mode & 0o007 == 0\n",
+"    true\n"
+],
+[
+"crates/yrl/src/ipc.rs",
+"m.mode() & 0o022 == 0)",
+"m.mode() & 0o002 == 0)"
+],
+[
+"crates/yrl/src/ipc.rs",
+"        bail!(\"the directory of the socket is writable by others\");",
+"        eprintln!(\"ignored\");"
+],
+[
+"crates/yrl/src/ipc.rs",
+"} else {\n            bail!(\"something that is not a socket is in the way\");\n        }",
+"} else {\n            let _ = std::fs::remove_file(path);\n        }"
+],
+[
+"crates/yrl/src/ipc.rs",
+"std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;\n    Ok(l)",
+"std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;\n    Ok(l)"
+],
+[
+"crates/yrl/src/ipc.rs",
+"    if v.len() != 32 {\n        bail!(\"not a public key",
+"    if v.is_empty() {\n        bail!(\"not a public key"
+],
+[
+"crates/yrl/src/ipc.rs",
+"    if b.len() != 35 + n + m {",
+"    if b.len() < 35 + n + m {"
+],
+[
+"crates/yrl/src/ipc.rs",
+"if rights.iter().any(|r| !r.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')) {",
+"if false {"
+],
+[
+"crates/yrl/src/ipc.rs",
+"if key.len() != 32 || account.is_empty()",
+"if account.is_empty()"
+],
+[
+"crates/yrl/src/executor.rs",
+"if wanted.iter().any(|r| !(u.rights.contains(r) && k.rights.contains(r))) {",
+"if wanted.iter().any(|r| !u.rights.contains(r)) {"
+],
+[
+"crates/yrl/src/executor.rs",
+"if wanted.iter().any(|r| !(u.rights.contains(r) && k.rights.contains(r))) {",
+"if wanted.iter().any(|r| !k.rights.contains(r)) {"
+],
+[
+"crates/yrl/src/executor.rs",
+"find(|a| a.public == key)?;",
+"find(|_| true)?;"
+],
+[
+"crates/yrl/src/executor.rs",
+"if verdict != PeerVerdict::Ok {",
+"if false {"
+],
+[
+"crates/yrl/src/executor.rs",
+"if open.kind != IPC_OPEN {",
+"if false {"
+],
+[
+"crates/yrl/src/executor.rs",
+"match identity::resolve(os_user.as_deref(), identity::euid(), &rights, identity::lookup_name, identity::lookup_uid) {",
+"match identity::resolve(None, identity::euid(), &rights, identity::lookup_name, identity::lookup_uid) {"
+],
+[
+"crates/yrl/src/executor.rs",
+"public: ipc.gatekeeper_public.clone(), label: \"gatekeeper\"",
+"public: ipc.key.public.clone(), label: \"gatekeeper\""
+],
+[
+"crates/yrl/src/executor.rs",
+"    if sec.open(&msg).ok()?.kind != IPC_OK {\n        return None;\n    }",
+"    let _ = sec.open(&msg).ok()?;"
+],
+[
+"crates/yrl/src/server.rs",
+"                        let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;\n                        return;\n                    };\n                    let sid = new_sid();",
+"                        let _ = 0;\n                        return;\n                    };\n                    let sid = new_sid();"
+]
+]

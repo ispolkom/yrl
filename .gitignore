@@ -1,0 +1,19 @@
+target/
+
+# Local identities and runtime state created by the README examples.
+srv/
+cli/
+*.yrl-part
+
+# Environment files and cryptographic material must never be committed.
+.env
+.env.*
+!.env.example
+deploy/yrl.env
+*.pem
+*.key
+
+# Editor and operating-system metadata.
+.DS_Store
+*.swp
+*~

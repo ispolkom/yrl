@@ -1,0 +1,36 @@
+[Unit]
+Description=YRL broker (the only part that does typed privileged operations)
+After=yrl-audit.service
+Requires=yrl-audit.service
+
+[Service]
+Type=simple
+User=yrl-broker
+Group=yrl-broker
+SupplementaryGroups=yrl-to-audit yrl-to-broker
+Environment=YRL_RUN=/run/yrl
+Environment=YRL_SOCKET_GROUP=yrl-to-broker
+ExecStart=/usr/local/bin/yrld broker /var/lib/yrl --exec-uid root --exec-exe -
+Restart=on-failure
+RestartSec=2
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/yrl/broker /run/yrl/broker
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+UMask=0027
+
+[Install]
+WantedBy=yrl.target

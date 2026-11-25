@@ -1,0 +1,162 @@
+[
+[
+"crates/yrl/src/stepup.rs",
+"            Op::TestPrivileged(_) => Some(Level::Sudo),",
+"            Op::TestPrivileged(_) => Some(Level::Root),"
+],
+[
+"crates/yrl/src/stepup.rs",
+"            Op::RestartService(_) => Some(Level::Root),",
+"            Op::RestartService(_) => Some(Level::Sudo),"
+],
+[
+"crates/yrl/src/stepup.rs",
+"            2 if arg.is_empty() || name_ok(&arg) => Ok(Op::TestPrivileged(arg)),",
+"            2 => Ok(Op::TestPrivileged(arg)),"
+],
+[
+"crates/yrl/src/stepup.rs",
+"            3 if name_ok(&arg) => Ok(Op::RestartService(arg)),",
+"            3 => Ok(Op::RestartService(arg)),"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if b.len() != 3 + n {",
+"        if b.len() < 3 + n {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"    p.extend_from_slice(&op.digest());\n    p.extend_from_slice(executor_public);",
+"    p.extend_from_slice(executor_public);"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if phrase.len() < MIN_PHRASE || phrase.len() > MAX_PHRASE {",
+"        if phrase.len() > MAX_PHRASE {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if meta.mode() & 0o077 != 0 {\n            return false;\n        }\n        let text",
+"        if false {\n            return false;\n        }\n        let text"
+],
+[
+"crates/yrl/src/stepup.rs",
+"(p.next() == Some(level.right())).then(|| p.next().map(String::from)).flatten()",
+"(true).then(|| p.next().map(String::from)).flatten()"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if level == Level::Root && g.1 {\n            return Standing::Locked;\n        }",
+"        if false {\n            return Standing::Locked;\n        }"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if r.fails >= self.max_fails {",
+"        if r.fails > self.max_fails {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"                Level::Root => r.locked = true,",
+"                Level::Root => r.locked_until = Some(Instant::now() + Duration::from_millis(1)),"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if root_locked >= self.kill_switch_after {",
+"        if root_locked > self.kill_switch_after {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if let Some(r) = self.inner.lock().unwrap().0.get_mut(&(key.to_vec(), level)) {\n            r.fails = 0;\n        }",
+"        let _ = (key, level);"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if now >= self.expires {\n            return Err(CapError::Expired);\n        }",
+"        if false {\n            return Err(CapError::Expired);\n        }"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if self.session != session {\n            return Err(CapError::WrongSession);\n        }",
+"        if false {\n            return Err(CapError::WrongSession);\n        }"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if op.required() != Some(self.level) {\n            return Err(CapError::WrongLevel);\n        }",
+"        if false {\n            return Err(CapError::WrongLevel);\n        }"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if op.digest() != self.op_digest {\n            return Err(CapError::WrongOperation);\n        }",
+"        if false {\n            return Err(CapError::WrongOperation);\n        }"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if self.uses == 0 {\n            return Err(CapError::Used);\n        }\n        self.uses -= 1;",
+"        if self.uses == 0 {\n            return Err(CapError::Used);\n        }"
+],
+[
+"crates/yrl/src/stepup.rs",
+"    if op.required().is_some() {\n        cap.spend(op, session, Instant::now())?;\n    }",
+"    if false {\n        cap.spend(op, session, Instant::now())?;\n    }"
+],
+[
+"crates/yrl/src/executor.rs",
+"if !session_rights.iter().any(|r| r == level.right()) || op.required() != Some(level) || stepups.len() >= stepup::MAX_PENDING || stepups.contains_key(&rid) {",
+"if op.required() != Some(level) || stepups.len() >= stepup::MAX_PENDING || stepups.contains_key(&rid) {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"if !ctx.serves.contains(&level) || !ctx.session_rights",
+"if !ctx.session_rights"
+],
+[
+"crates/yrl/src/stepup.rs",
+"|| !ctx.session_rights.iter().any(|r| r == level.right()) || op.required() != Some(level) ||",
+"|| op.required() != Some(level) ||"
+],
+[
+"crates/yrl/src/stepup.rs",
+"|| !ctx.session_rights.iter().any(|r| r == level.right()) || op.required() != Some(level) ||",
+"|| !ctx.session_rights.iter().any(|r| r == level.right()) ||"
+],
+[
+"crates/yrl/src/stepup.rs",
+"|| self.pending.len() >= MAX_PENDING ||",
+"||"
+],
+[
+"crates/yrl/src/stepup.rs",
+"if ctx.lockouts.standing(ctx.device_key, level) == Standing::Locked {",
+"if false {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"        if p.born.elapsed() >= PENDING_LIFE {\n            return Ok(reply(R_EXPIRED, \"\"));",
+"        if false {\n            return Ok(reply(R_EXPIRED, \"\"));"
+],
+[
+"crates/yrl/src/stepup.rs",
+"if device != ctx.device_key || phrase.is_empty()",
+"if phrase.is_empty()"
+],
+[
+"crates/yrl/src/stepup.rs",
+"            ctx.lockouts.fail(ctx.device_key, p.level);\n",
+"            let _ = 0;\n"
+],
+[
+"crates/yrl/src/executor.rs",
+"                if is_root {",
+"                if false {"
+],
+[
+"crates/yrl/src/broker.rs",
+".and_then(|(key, account, wanted)| rights_for(&cfg.dir, &key, &account, &wanted).map(|(rights, _)| (key, rights)))",
+".map(|(key, _account, wanted)| (key, wanted))"
+],
+[
+"crates/yrl/src/broker.rs",
+"            _ => break, // the broker speaks of nothing else",
+"            _ => continue, // the broker speaks of nothing else"
+]
+]

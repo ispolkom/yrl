@@ -1,0 +1,117 @@
+[
+[
+"crates/yrl/src/install.rs",
+"    if st.is_dir != (item.kind == Kind::Dir) {",
+"    if false {"
+],
+[
+"crates/yrl/src/install.rs",
+"Some(u) if u != st.uid =>",
+"Some(u) if false =>"
+],
+[
+"crates/yrl/src/install.rs",
+"Some(g) if g != st.gid =>",
+"Some(g) if false =>"
+],
+[
+"crates/yrl/src/install.rs",
+"    if st.mode & 0o7777 != item.mode {",
+"    if false {"
+],
+[
+"crates/yrl/src/install.rs",
+"if item.required { vec![Problem::Missing(p)] } else { vec![] }",
+"vec![]"
+],
+[
+"crates/yrl/src/install.rs",
+"if m.file_type().is_symlink() {\n                    out.push",
+"if false {\n                    out.push"
+],
+[
+"crates/yrl/src/install.rs",
+"&& m.mode() & 0o007 != 0 && !r.starts_with",
+"&& m.mode() & 0o001 != 0 && !r.starts_with"
+],
+[
+"crates/yrl/src/install.rs",
+"if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {",
+"if false {"
+],
+[
+"crates/yrl/src/install.rs",
+"        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(item.mode))?;\n",
+"        let _ = item.mode;\n"
+],
+[
+"crates/yrl/src/install.rs",
+"it(\"authorized_keys\", File, \"root\", G_CONF, 0o640,",
+"it(\"authorized_keys\", File, \"root\", G_CONF, 0o644,"
+],
+[
+"crates/yrl/src/install.rs",
+"it(\"words\", File, EXEC, \"root\", 0o600,",
+"it(\"words\", File, GATE, \"root\", 0o600,"
+],
+[
+"crates/yrl/src/install.rs",
+"(GATE, &[G_CONF, G_TO_AUDIT, G_TO_EXEC, G_TO_FW]),",
+"(GATE, &[G_CONF, G_TO_AUDIT, G_TO_EXEC, G_TO_FW, G_TO_BROKER]),"
+],
+[
+"crates/yrl/src/install.rs",
+"        if *u == \"root\" {\n            continue;\n        }\n        s.push_str(&format!(\"getent passwd",
+"        if false {\n            continue;\n        }\n        s.push_str(&format!(\"getent passwd"
+],
+[
+"crates/yrl/src/install.rs",
+"it(\"enroll\", Dir, \"root\", GATE, 0o770,",
+"it(\"enroll\", Dir, \"root\", GATE, 0o777,"
+],
+[
+"crates/yrl/src/ipc.rs",
+"std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;",
+"std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;"
+],
+[
+"crates/yrl/src/ipc.rs",
+"                let _ = std::fs::remove_file(path);\n                return Err(e);",
+"                return Err(e);"
+],
+[
+"crates/yrl/src/ipc.rs",
+"    if p.is_dir() {\n        p\n    } else {",
+"    if true {\n        p\n    } else {"
+],
+[
+"crates/yrl/src/ipc.rs",
+"    if let Ok(n) = s.parse::<u32>() {\n        return Ok(n);\n    }\n    crate::identity::lookup_name",
+"    crate::identity::lookup_name"
+],
+[
+"crates/yrl/src/keys.rs",
+"    if dm.mode() & 0o022 != 0 {",
+"    if dm.mode() & 0o002 != 0 {"
+],
+[
+"crates/yrl/src/keys.rs",
+"    if m.mode() & 0o077 != 0 {\n        bail!(\"private key {} has mode {:o}; it must not be accessible by others\", path.display(), m.mode() & 0o777);",
+"    if m.mode() & 0o007 != 0 {\n        bail!(\"private key {} has mode {:o}; it must not be accessible by others\", path.display(), m.mode() & 0o777);"
+],
+[
+"crates/yrl/src/keys.rs",
+"    if m.uid() != unsafe { libc::geteuid() } {",
+"    if false {"
+],
+[
+"crates/yrl/src/stepup.rs",
+"                            if unsafe { libc::chown(c.as_ptr(), u, g) } != 0 && unsafe { libc::geteuid() } == 0 {",
+"                            if unsafe { libc::chown(c.as_ptr(), 0, 0) } != 0 && unsafe { libc::geteuid() } == 0 {"
+],
+[
+"crates/yrl/src/bin/yrld.rs",
+"        Some(\"-\") => None,",
+"        Some(\"-\") => std::env::current_exe().ok(),"
+]
+]

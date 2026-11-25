@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/yrl_link", "crates/key_root", "crates/yrl"]
+
+[workspace.package]
+edition = "2021"
+version = "0.0.1"
+
+# password hashing is deliberately heavy; unoptimised it takes seconds and makes the tests crawl
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+# the cryptography and hashing must be fast in tests too, or the transfer tests measure the debug build
+[profile.dev.package.snow]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.blake3]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
