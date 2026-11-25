@@ -175,7 +175,9 @@ async fn s3_a_broken_peer_is_cut_off() {
     for i in 0..4 {
         l.push(&frame(i, 5)).await.unwrap();
     }
-    let (_r, _w, _sec, h) = rude_peer(&k, &l, 2).await; // confirms 0 and 1
+    let (_r, mut w, sec, h) = rude_peer(&k, &l, 0).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_msg(&mut w, &sec.seal(&Frame::new(link::ACK, 0, 2u64.to_be_bytes().to_vec())).unwrap()).await.unwrap(); // confirms 0 and 1 after they were sent
     tokio::time::sleep(Duration::from_millis(100)).await;
     h.abort();
     let (_r, _w, _sec, h) = rude_peer(&k, &l, 0).await; // now claims to have nothing again
@@ -252,4 +254,34 @@ async fn s7_silence_means_a_dead_link_and_a_probe_keeps_an_idle_link_alive() {
     a.push(&frame(1, 10)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(b_got.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn s8_interactive_frames_pass_queued_file_data_without_losing_order() {
+    let k = keys();
+    let (a, b) = (Link::new(1 << 20), Link::new(1 << 20));
+    for i in 0..8u8 {
+        a.push(&Frame::new(yrl::filewire::FILE_DATA, 0, vec![i; 1024])).await.unwrap();
+    }
+    a.push(&Frame::new(yrl::wire::PTY_IN, 0, b"keypress".to_vec())).await.unwrap();
+
+    let (atx, _) = collector();
+    let (btx, b_got) = collector();
+    let ((ar, aw, asec), (br, bw, bsec)) = pipe(&k).await;
+    let (a2, b2) = (a.clone(), b.clone());
+    tokio::spawn(async move { drive(&a2, ar, aw, asec, atx, 0, &opt()).await });
+    tokio::spawn(async move { drive(&b2, br, bw, bsec, btx, 0, &opt()).await });
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while b_got.lock().unwrap().len() != 9 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let got = b_got.lock().unwrap();
+    assert_eq!(got[0].kind, yrl::wire::PTY_IN, "interactive input goes before an unsent bulk backlog");
+    assert_eq!(got[0].payload, b"keypress");
+    for (i, frame) in got[1..].iter().enumerate() {
+        assert_eq!(frame.kind, yrl::filewire::FILE_DATA);
+        assert_eq!(frame.payload[0], i as u8, "file chunks retain their original order");
+    }
 }

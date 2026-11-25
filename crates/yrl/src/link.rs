@@ -45,11 +45,56 @@ pub struct LinkClosed;
 struct St {
     next_seq: u64,
     unacked: VecDeque<(u64, Vec<u8>)>,
+    pending_interactive: VecDeque<Vec<u8>>,
+    pending_normal: VecDeque<Vec<u8>>,
+    pending_bulk: VecDeque<Vec<u8>>,
     bytes: usize,
     expected_in: u64,
     ack_told: u64,
     closed: bool,
     pong_due: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Priority {
+    Interactive,
+    Normal,
+    Bulk,
+}
+
+fn priority(f: &Frame) -> Priority {
+    if matches!(f.kind, crate::filewire::FILE_PUT | crate::filewire::FILE_GET | crate::filewire::FILE_DATA | crate::filewire::FILE_READY | crate::filewire::FILE_END | crate::filewire::FILE_ABORT) {
+        Priority::Bulk
+    } else if matches!(
+        f.kind,
+        crate::wire::PING
+            | crate::wire::PONG
+            | crate::wire::EXEC_REQ
+            | crate::wire::STDOUT
+            | crate::wire::STDERR
+            | crate::wire::EXIT
+            | crate::wire::ERROR
+            | crate::wire::CLOSE
+            | crate::wire::PTY_OPEN
+            | crate::wire::PTY_IN
+            | crate::wire::PTY_OUT
+            | crate::wire::PTY_RESIZE
+            | crate::wire::PTY_EXIT
+            | crate::wire::PTY_CLOSE
+            | crate::tunwire::TUN_OPEN
+            | crate::tunwire::TUN_READY
+            | crate::tunwire::TUN_DATA
+            | crate::tunwire::TUN_EOF
+            | crate::tunwire::TUN_CLOSE
+            | crate::stepup::STEPUP_BEGIN
+            | crate::stepup::STEPUP_CHALLENGE
+            | crate::stepup::STEPUP_PROOF
+            | crate::stepup::STEPUP_RESULT
+    ) {
+        Priority::Interactive
+    } else {
+        Priority::Normal
+    }
 }
 
 pub struct Link {
@@ -63,7 +108,7 @@ pub struct Link {
 impl Link {
     pub fn new(window: usize) -> Arc<Link> {
         Arc::new(Link {
-            st: Mutex::new(St { next_seq: 0, unacked: VecDeque::new(), bytes: 0, expected_in: 0, ack_told: 0, closed: false, pong_due: false }),
+            st: Mutex::new(St { next_seq: 0, unacked: VecDeque::new(), pending_interactive: VecDeque::new(), pending_normal: VecDeque::new(), pending_bulk: VecDeque::new(), bytes: 0, expected_in: 0, ack_told: 0, closed: false, pong_due: false }),
             wake: Notify::new(),
             space: Notify::new(),
             window,
@@ -74,6 +119,7 @@ impl Link {
     /// queue a frame for the other side; waits while too much is unconfirmed
     pub async fn push(&self, f: &Frame) -> Result<(), LinkClosed> {
         let inner = f.encode().map_err(|_| LinkClosed)?;
+        let priority = priority(f);
         loop {
             let notified = self.space.notified();
             tokio::pin!(notified);
@@ -83,11 +129,14 @@ impl Link {
                 if s.closed {
                     return Err(LinkClosed);
                 }
-                if s.unacked.is_empty() || s.bytes + inner.len() <= self.window {
-                    let seq = s.next_seq;
-                    s.next_seq += 1;
+                let empty = s.unacked.is_empty() && s.pending_interactive.is_empty() && s.pending_normal.is_empty() && s.pending_bulk.is_empty();
+                if empty || s.bytes + inner.len() <= self.window {
                     s.bytes += inner.len();
-                    s.unacked.push_back((seq, inner));
+                    match priority {
+                        Priority::Interactive => s.pending_interactive.push_back(inner),
+                        Priority::Normal => s.pending_normal.push_back(inner),
+                        Priority::Bulk => s.pending_bulk.push_back(inner),
+                    }
                     drop(s);
                     self.wake.notify_one();
                     return Ok(());
@@ -116,7 +165,7 @@ impl Link {
 
     pub fn unconfirmed(&self) -> (usize, usize) {
         let s = self.st.lock().unwrap();
-        (s.unacked.len(), s.bytes)
+        (s.unacked.len() + s.pending_interactive.len() + s.pending_normal.len() + s.pending_bulk.len(), s.bytes)
     }
 
     fn deliver(&self, seq: u64, inner: &[u8]) -> Result<Option<Frame>, ()> {
@@ -160,6 +209,11 @@ impl Link {
             s.pong_due = false;
             return Action::Pong;
         }
+        let owed = s.expected_in - s.ack_told;
+        if owed >= ACK_EVERY || (owed > 0 && idle_ack_due) {
+            s.ack_told = s.expected_in;
+            return Action::Ack(s.expected_in);
+        }
         if let Some((front, _)) = s.unacked.front() {
             if *cursor < *front {
                 return Action::Bad; // the peer went back on what it had confirmed
@@ -170,10 +224,13 @@ impl Link {
                 return Action::Send(*q, b.clone());
             }
         }
-        let owed = s.expected_in - s.ack_told;
-        if owed >= ACK_EVERY || (owed > 0 && idle_ack_due) {
-            s.ack_told = s.expected_in;
-            return Action::Ack(s.expected_in);
+        let inner = s.pending_interactive.pop_front().or_else(|| s.pending_normal.pop_front()).or_else(|| s.pending_bulk.pop_front());
+        if let Some(inner) = inner {
+            let seq = s.next_seq;
+            s.next_seq += 1;
+            *cursor += 1;
+            s.unacked.push_back((seq, inner.clone()));
+            return Action::Send(seq, inner);
         }
         Action::Idle
     }
