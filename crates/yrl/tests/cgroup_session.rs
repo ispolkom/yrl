@@ -23,6 +23,8 @@ async fn detached_descendant_dies_with_its_session_after_resume_without_touching
     let (mut a, mut b) = (first.pty_open(24, 80, "xterm").await.unwrap(), second.pty_open(24, 80, "xterm").await.unwrap());
     let marker_a = r.dir.path().join("detached-a");
     let marker_b = r.dir.path().join("detached-b");
+    a.write(b"cg=$(awk -F: '$1==\"0\" {print $3}' /proc/self/cgroup); printf 'limit-before-%s\\n' \"$(cat /sys/fs/cgroup$cg/memory.max)\"\n").await.unwrap();
+    a.read_until("limit-before-2147483648", T).await.unwrap();
     a.write(format!("setsid /bin/sh -c 'sleep 4; touch {}' </dev/null >/dev/null 2>&1 & echo first-$((2+2))ready\n", marker_a.display()).as_bytes()).await.unwrap();
     b.write(format!("setsid /bin/sh -c 'sleep 2; touch {}' </dev/null >/dev/null 2>&1 & echo second-$((2+2))ready\n", marker_b.display()).as_bytes()).await.unwrap();
     a.read_until("first-4ready", T).await.unwrap();
@@ -31,6 +33,8 @@ async fn detached_descendant_dies_with_its_session_after_resume_without_touching
     proxy.cut();
     a.write(b"echo resumed-$((3+3))session\n").await.unwrap();
     a.read_until("resumed-6session", T).await.unwrap();
+    a.write(b"printf 'limit-after-%s\\n' \"$(cat /sys/fs/cgroup$cg/memory.max)\"\n").await.unwrap();
+    a.read_until("limit-after-2147483648", T).await.unwrap();
     assert!(proxy.accepted() >= 2, "the transport did not reconnect");
     assert_eq!(r.sessions.len(), 2, "RESUME kept both server sessions");
     first.close().await;

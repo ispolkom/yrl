@@ -61,6 +61,7 @@ fn open_pair(rows: u16, cols: u16) -> std::io::Result<(OwnedFd, OwnedFd)> {
 }
 
 pub async fn run(id: u64, rows: u16, cols: u16, term: String, target: Target, mut cmds: mpsc::Receiver<PtyCmd>, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) {
+    let cgroup_before = cgroup.as_ref().map(|cg| cg.events());
     let shells = std::fs::read_to_string("/etc/shells").unwrap_or_default();
     if !usable_shell(&target.pw.shell, &shells) {
         let _ = tx.send(error_frame(id, 6, "no usable login shell for this account")).await;
@@ -97,8 +98,9 @@ pub async fn run(id: u64, rows: u16, cols: u16, term: String, target: Target, mu
     cmd.env("TERM", term).env("SHELL", &target.pw.shell);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(_) => {
-            let _ = tx.send(error_frame(id, 6, "cannot start the shell")).await;
+        Err(e) => {
+            let text = if cgroup.is_some() { crate::cgroup::SessionCgroup::spawn_error(&e) } else { "cannot start the shell" };
+            let _ = tx.send(error_frame(id, 6, text)).await;
             return;
         }
     };
@@ -161,6 +163,9 @@ pub async fn run(id: u64, rows: u16, cols: u16, term: String, target: Target, mu
     }
     group.kill(); // also stop descendants after a shell that has already exited
     let code = exited.map(|s| s.code().unwrap_or_else(|| 128 + std::os::unix::process::ExitStatusExt::signal(&s).unwrap_or(0))).unwrap_or(-1);
+    if cgroup_before.zip(cgroup.as_ref().map(|cg| cg.events())).is_some_and(|(before, after)| after.oom_kill > before.oom_kill) {
+        let _ = tx.send(error_frame(id, 7, "session memory limit exceeded")).await;
+    }
     let _ = tx.send(Frame::new(wire::PTY_EXIT, 0, with_id(id, &code.to_be_bytes()))).await;
 }
 

@@ -2,6 +2,8 @@
 Description=YRL broker (the only part that does typed privileged operations)
 After=yrl-audit.service
 Requires=yrl-audit.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -13,6 +15,16 @@ Environment=YRL_SOCKET_GROUP=yrl-to-broker
 ExecStart=/usr/local/bin/yrld broker /var/lib/yrl --exec-uid root --exec-exe -
 Restart=on-failure
 RestartSec=2
+OOMPolicy=stop
+MemoryHigh=128M
+MemoryMax=256M
+TasksMax=128
+CPUWeight=100
+IOWeight=100
+MemoryAccounting=yes
+TasksAccounting=yes
+CPUAccounting=yes
+IOAccounting=yes
 CapabilityBoundingSet=
 ReadWritePaths=/var/lib/yrl/broker /run/yrl/broker
 RestrictAddressFamilies=AF_UNIX

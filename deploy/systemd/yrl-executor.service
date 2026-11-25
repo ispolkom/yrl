@@ -2,6 +2,8 @@
 Description=YRL executor (acts for the logged-in person, as that person's system user)
 After=yrl-audit.service yrl-broker.service
 Requires=yrl-audit.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 # This part runs as root on purpose: it has to become the account's system user, which only root may do.
 # Its capability set holds nothing but that right. No file-system sandbox here: it works in the people's own directories.
@@ -13,9 +15,20 @@ SupplementaryGroups=yrl-conf yrl-to-audit yrl-to-broker yrl-to-exec
 Environment=YRL_RUN=/run/yrl
 Environment=YRL_SOCKET_GROUP=yrl-to-exec
 Environment=YRL_SESSION_CGROUPS=required
+EnvironmentFile=-/etc/yrl/yrl.env
 ExecStart=/usr/local/bin/yrld executor /var/lib/yrl --gate-uid yrl-gate --gate-exe -
 Restart=on-failure
 RestartSec=2
+OOMPolicy=continue
+MemoryHigh=4G
+MemoryMax=8G
+TasksMax=4096
+CPUWeight=100
+IOWeight=100
+MemoryAccounting=yes
+TasksAccounting=yes
+CPUAccounting=yes
+IOAccounting=yes
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 NoNewPrivileges=yes
 LimitCORE=0

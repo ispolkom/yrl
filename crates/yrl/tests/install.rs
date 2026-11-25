@@ -243,6 +243,30 @@ fn i5_the_unit_files_agree_with_the_table() {
     }
 }
 
+#[test]
+fn i5b_services_have_global_budgets_and_restart_storm_protection() {
+    for file in ["yrl-audit.service", "yrl-broker.service", "yrl-executor.service", "yrl-firewall.service", "yrl-gatekeeper.service"] {
+        let text = unit(file);
+        assert_eq!(val(&text, "StartLimitIntervalSec"), vec!["60s"], "{file}: restart window");
+        assert_eq!(val(&text, "StartLimitBurst"), vec!["5"], "{file}: restart burst");
+        assert_eq!(val(&text, "Restart"), vec!["on-failure"], "{file}");
+        assert!(!val(&text, "MemoryHigh").is_empty(), "{file}: soft memory budget");
+        assert!(!val(&text, "MemoryMax").is_empty(), "{file}: hard memory budget");
+        assert!(!val(&text, "TasksMax").is_empty(), "{file}: process budget");
+        assert_eq!(val(&text, "CPUWeight"), vec!["100"], "{file}: CPU fair share without a hard quota");
+        assert!(!val(&text, "IOWeight").is_empty(), "{file}: IO fair share without an implicit bandwidth cap");
+        for accounting in ["MemoryAccounting", "TasksAccounting", "CPUAccounting", "IOAccounting"] {
+            assert_eq!(val(&text, accounting), vec!["yes"], "{file}: {accounting}");
+        }
+    }
+    let executor = unit("yrl-executor.service");
+    assert_eq!(val(&executor, "OOMPolicy"), vec!["continue"], "a session OOM must not stop the Executor or its neighbors");
+    assert_eq!(val(&executor, "Delegate"), vec!["yes"], "per-session cgroups remain delegated");
+    assert!(val(&executor, "EnvironmentFile").iter().any(|v| v == "-/etc/yrl/yrl.env"), "session limits are configurable without editing the unit");
+    assert!(!executor.contains("CPUQuota="));
+    assert!(!executor.contains("IOReadBandwidthMax=") && !executor.contains("IOWriteBandwidthMax="), "no arbitrary service transfer-rate ceiling");
+}
+
 // ---------------------------------------------------------------- the small pieces
 
 fn a_second_group() -> Option<u32> {

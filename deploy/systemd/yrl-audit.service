@@ -1,6 +1,8 @@
 [Unit]
 Description=YRL audit journal (hash chain, signed checkpoints)
 Documentation=file:///usr/share/doc/yrl/INSTALL.md
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -12,6 +14,16 @@ Environment=YRL_SOCKET_GROUP=yrl-to-audit
 ExecStart=/usr/local/bin/yrld audit /var/lib/yrl
 Restart=on-failure
 RestartSec=2
+OOMPolicy=stop
+MemoryHigh=256M
+MemoryMax=512M
+TasksMax=256
+CPUWeight=100
+IOWeight=200
+MemoryAccounting=yes
+TasksAccounting=yes
+CPUAccounting=yes
+IOAccounting=yes
 CapabilityBoundingSet=
 ReadWritePaths=/var/lib/yrl/audit /run/yrl/audit
 RestrictAddressFamilies=AF_UNIX

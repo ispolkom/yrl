@@ -3,6 +3,8 @@ Description=YRL firewall program (the only one that changes the packet filter)
 After=yrl-audit.service network-pre.target
 Before=network.target
 Requires=yrl-audit.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -15,6 +17,16 @@ Environment=YRL_SOCKET_GROUP=yrl-to-fw
 ExecStart=/usr/local/bin/yrld firewall /var/lib/yrl --ports ${YRL_PORT} --gate-uid yrl-gate --gate-exe - --max-ttl 120
 Restart=on-failure
 RestartSec=2
+OOMPolicy=stop
+MemoryHigh=128M
+MemoryMax=256M
+TasksMax=128
+CPUWeight=100
+IOWeight=100
+MemoryAccounting=yes
+TasksAccounting=yes
+CPUAccounting=yes
+IOAccounting=yes
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN
 ReadWritePaths=/run/yrl/fw

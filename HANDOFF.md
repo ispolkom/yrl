@@ -4,7 +4,7 @@
 
 - Project: **YRL — YANDI Remote Link**, a Linux-first Rust remote-access prototype.
 - Repository: `https://github.com/ispolkom/yrl`, branch `main`.
-- Implementation baseline: Stage 4 was published in **`f69e4b7`** (`Harden secret handling and add offline key recovery lifecycle`). Stage 5 — failure and overload resilience — is now in progress; its first correction removes the Stage 4 file-throughput regression while preserving credential cleanup. Formal end-to-end deployment acceptance has not been recorded.
+- Implementation baseline: Stage 4 was published in **`f69e4b7`** (`Harden secret handling and add offline key recovery lifecycle`). Stage 5 — failure and overload resilience — is in progress: the throughput/liveness correction and substages 5.1–5.2 global admission plus cgroup/systemd containment are implemented. Formal end-to-end deployment acceptance has not been recorded.
 - Scope boundary: this repository is YRL. Do not modify the separate YANDI NODE source tree. Do not interpret the future desktop or other-OS design documents as implemented features.
 - This handoff records outcomes and verification at the baseline, not a development diary.
 
@@ -23,7 +23,7 @@ Executor ── typed ROOT step-up ──► Broker
   ├── account-identity commands and PTYs
   ├── file/directory helpers
   ├── restricted TCP tunnels
-  └── per-session cgroup v2 for child processes
+  └── per-session cgroup v2 with memory/process/CPU/I/O controls for child processes
 
 Gatekeeper, Executor, Broker and Firewall ── authenticated local events ──► Audit
 ```
@@ -41,7 +41,7 @@ Key code: `client.rs` (route manager), `link.rs` (SEQ/ACK, bounded buffers, prio
 | 2 — authority refresh and revocation | Implemented and accepted. Removing a device key, disabling an account or changing rights ends affected live sessions and prevents old RESUME. | `tests/revocation.rs`, `docs/STAGE2_ACCEPTANCE.md`. A new login is required for changed rights. |
 | 3 — component and process isolation | Implemented. Seccomp uses TSYNC for existing and future threads; systemd sets separate users/capabilities and filesystem policy. User processes join a per-session cgroup before `exec`; close/revocation invokes `cgroup.kill`. | `tests/cgroup_session.rs`, `STAGE3_ACCEPTANCE.md`. A deliberately privileged host-root command can alter delegated cgroups; root authority is outside that isolation boundary. |
 | 4 — key and secret lifecycle | Implemented in **`f69e4b7`**. Private-file checks, zeroizing buffers, separated role keys, offline encrypted recovery, Noise-key rotation, device revocation and migration. Services start without an interactive unlock. | `tests/keylife.rs`, `STAGE4_ACCEPTANCE.md`. Audit journal-signing-key rollover is not implemented. |
-| 5 — failure and overload resilience | In progress. Initial work restored file throughput and the final confirmation of a large upload through repeated cuts without increasing deadlines or weakening authentication, cryptography or Link delivery. | Focused `files`, `resume`, `login`, `stepup`, `auditlog`, `keylife` and G14/G15 checks passed. Final workspace and deployment acceptance are pending. |
+| 5 — failure and overload resilience | In progress. Throughput/liveness correction and substages 5.1–5.2 are implemented: hierarchical Link/operation budgets, per-session cgroup v2 controls, service budgets and restart-storm protection. | New focused resource/cgroup/unit tests are prepared but intentionally not run. Final workspace and installed-host acceptance are pending. |
 
 Stage 0 guarantees apply only while the Executor's server session remains alive. After a server-process restart or session-grace expiry, RESUME cannot recover it. Link retransmits stored logical frames after a fresh Noise handshake, so connection-local nonces are not reused. Confirmed frames are not re-executed, and control/interactive traffic has priority over unsent bulk file data within the bounded Link window. Stage 2 rechecks authority during a live session and before RESUME. Stages 3 and 4 must preserve these properties.
 
@@ -73,9 +73,17 @@ On the same host, the unchanged `f13_throughput_on_the_loopback_is_reported_and_
 
 Focused post-change verification passed: all 20 `auditlog`, 15 `files`, 23 `login`, 17 `stepup` and the `keylife` tests; the original resume R2 case; G14 and G15; and `cargo check -p yrl --all-targets`. The unsafe Audit signing-key test continues to reject mode 0644 but no longer depends on the obsolete pre-Stage-4 error text. Per owner direction, the comprehensive workspace rerun, deployed services, real nftables and recovery on a separate host remain for final acceptance.
 
+## Stage 5.1–5.2 resource containment
+
+Stage 5.1 introduced one Executor-wide resource manager. Link accounts for retained encoded bytes against global, device-key and account pools while preserving backpressure and a protected interactive reserve. Active EXEC, PTY, transfer, tunnel and filesystem work additionally holds global, session, key, account and operation-type permits. Default Link ceilings are 256 MiB globally and 64 MiB per principal; operation defaults are documented in `resources.rs`. Permits release on ACK/completion, error, cancellation, session close and revocation. There is no byte-rate limiter.
+
+Stage 5.2 extends the existing per-session cgroup rather than adding another lifecycle. The cgroup is created once with the authenticated Executor session and therefore survives transport loss and RESUME. Defaults are `memory.high=1 GiB`, `memory.max=2 GiB`, `pids.max=512`, unlimited `cpu.max`, neutral CPU/I/O weights and no `io.max`; all are typed and configurable through `SessionLimits` and the installed environment file. `memory.oom.group=1` confines a session OOM to that session's children. Executor observes memory/process-limit counters, audits overload, returns specific spawn/OOM errors where the operation protocol permits, and continues serving neighboring sessions. Close, grace expiry and authority revocation still invoke `cgroup.kill` before removal.
+
+The five systemd services have memory/task ceilings, accounting and CPU/I/O weights. Executor has a larger 4 GiB soft / 8 GiB hard envelope, contains delegated session children, and uses `OOMPolicy=continue`; the other single-purpose services use smaller budgets and `OOMPolicy=stop`. Five starts per 60 seconds stops crash loops. These limits do not add CPU quotas or I/O bandwidth caps. Focused tests cover typed cgroup controls/events, systemd policy, cgroup retention across RESUME and neighbor isolation; per owner direction they were compiled but not executed in this substage. Real delegated controllers, OOM behavior and service restart policy still require final installed-host acceptance.
+
 ## Remaining limits and pending checks
 
-1. Run the complete workspace suite and the cross-stage route/revocation scenarios at a final integration gate. Test the installed units with real Linux service users, seccomp/capability and mount inspection, delegated cgroup v2 and nftables. This development environment did not establish those deployment-wide properties.
+1. Run the complete workspace suite and the cross-stage route/revocation scenarios at a final integration gate. Test the installed units with real Linux service users, seccomp/capability and mount inspection, delegated cgroup v2 controllers, per-session OOM/pids exhaustion, systemd service budgets/restart storms and nftables. This development environment did not establish those deployment-wide properties.
 2. Test offline recovery on a separate host: GnuPG key availability, trusted origin and public fingerprints, ownership remapping, large journals, interrupted rotation, and service restart. Backup encryption does not supply sender authentication. Audit journal-signing-key rollover and a signed chain between journal eras remain open.
 3. Host-root operations deliberately retain broad host authority and can escape delegated cgroup containment. A compromised Gatekeeper or relay can deny service and expose metadata. The seccomp policy is a denylist. Sessions are in memory and do not survive Executor restart.
 4. OS-level disk encryption or a hardware-backed key store is needed to resist physical disk theft while keeping unattended service startup. The current code does not provide TPM-backed live key storage or a second-device approval flow.

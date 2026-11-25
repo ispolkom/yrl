@@ -149,10 +149,11 @@ async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let listener = yrl::ipc::bind_socket(&ipc.socket)?;
     let mut cfg = server::ServerConfig::new(dir.clone());
     cfg.exec_identity = Some(ipc.key.clone());
+    cfg.session_cgroup_limits = yrl::cgroup::SessionLimits::from_env()?;
     cfg.lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&yrl::ipc::state_dir(&dir, "exec"), "sudo"));
     cfg.broker = yrl::ipc::load_executor_to_broker(&dir).ok(); // without a broker every ROOT step-up is refused
     cfg.audit.exec = yrl::ipc::audit_client(&dir, "executor"); // reports to the audit process, if one has been set up
-    if std::env::var_os("YRL_SESSION_CGROUPS").is_some() { yrl::cgroup::verify_delegation()?; }
+    if std::env::var_os("YRL_SESSION_CGROUPS").is_some() { yrl::cgroup::verify_delegation_with(&cfg.session_cgroup_limits)?; }
     if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply_executor()?; }
     eprintln!("[yrld] executor ready on {}", ipc.socket.display());
     yrl::executor::serve_ipc(listener, cfg, ipc).await;

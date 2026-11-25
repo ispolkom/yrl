@@ -57,6 +57,8 @@ pub struct ServerConfig {
     pub max_tunnels_per_connection: usize,
     pub tunnel_connect_timeout: Duration,
     pub max_file_size: u64,
+    /// limits for the child-process cgroup owned by one authenticated session
+    pub session_cgroup_limits: crate::cgroup::SessionLimits,
     /// the program started as `<helper> fs-helper` for file work (by default this very executable)
     pub helper: PathBuf,
     pub max_login_attempts: u32,
@@ -112,6 +114,7 @@ impl ServerConfig {
             max_tunnels_per_connection: 32,
             tunnel_connect_timeout: Duration::from_secs(10),
             max_file_size: crate::fshelper::MAX_FILE_SIZE,
+            session_cgroup_limits: crate::cgroup::SessionLimits::default(),
             helper: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("yrld")),
             max_login_attempts: 3,
             throttle: Arc::new(Throttle::new(5, Duration::from_secs(30), Duration::from_secs(900))),

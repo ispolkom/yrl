@@ -39,6 +39,7 @@ pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>, cgroup: 
         Frame::new(wire::ERROR, 0, with_id(id, &p))
     };
     let prog = std::ffi::OsStr::from_bytes(&req.argv[0]);
+    let cgroup_before = cgroup.as_ref().map(|cg| cg.events());
     let mut cmd = Command::new(prog);
     cmd.args(req.argv[1..].iter().map(|a| std::ffi::OsStr::from_bytes(a))).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     if let Some(cg) = &cgroup { crate::cgroup::SessionCgroup::attach(&mut cmd, cg); }
@@ -51,8 +52,9 @@ pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>, cgroup: 
     prepare(&mut cmd, &target);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(_) => {
-            let _ = tx.send(err(2, "cannot start the program")).await;
+        Err(e) => {
+            let text = if cgroup.is_some() { crate::cgroup::SessionCgroup::spawn_error(&e) } else { "cannot start the program" };
+            let _ = tx.send(err(2, text)).await;
             return;
         }
     };
@@ -112,6 +114,9 @@ pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>, cgroup: 
     }
     if let Some((c, t)) = note {
         let _ = tx.send(err(c, t)).await;
+    }
+    if cgroup_before.zip(cgroup.as_ref().map(|cg| cg.events())).is_some_and(|(before, after)| after.oom_kill > before.oom_kill) {
+        let _ = tx.send(err(7, "session memory limit exceeded")).await;
     }
     let _ = tx.send(Frame::new(wire::EXIT, 0, with_id(id, &code.to_be_bytes()))).await;
 }

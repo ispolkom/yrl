@@ -2,6 +2,8 @@
 Description=YRL gatekeeper (the only part that talks to the network)
 After=yrl-audit.service yrl-executor.service yrl-firewall.service
 Requires=yrl-audit.service yrl-executor.service yrl-firewall.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -13,6 +15,16 @@ Environment=YRL_RUN=/run/yrl
 ExecStart=/usr/local/bin/yrld gatekeeper /var/lib/yrl ${YRL_BIND} --spa ${YRL_SPA} --work-port ${YRL_PORT} --knock-ttl ${YRL_KNOCK_TTL}
 Restart=on-failure
 RestartSec=2
+OOMPolicy=stop
+MemoryHigh=512M
+MemoryMax=1G
+TasksMax=1024
+CPUWeight=100
+IOWeight=100
+MemoryAccounting=yes
+TasksAccounting=yes
+CPUAccounting=yes
+IOAccounting=yes
 CapabilityBoundingSet=
 ReadWritePaths=/var/lib/yrl/enroll
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

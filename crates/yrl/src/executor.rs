@@ -54,7 +54,7 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
     static SESSION_NO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let session_no = SESSION_NO.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut session_cgroup = if std::env::var_os("YRL_SESSION_CGROUPS").is_some() {
-        match crate::cgroup::SessionCgroup::create(session_no) {
+        match crate::cgroup::SessionCgroup::create(session_no, &cfg.session_cgroup_limits) {
             Ok(cg) => Some(cg),
             Err(e) => { cfg.log(format!("session refused: cgroup isolation unavailable: {e}")); return; }
         }
@@ -62,6 +62,26 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
     use crate::auditlog::{Event, LEVEL_USER, RESULT_DENIED, RESULT_OK};
     let sess = session_no.to_be_bytes();
     let ev = |op: &str, result: u8| Event::new(op, LEVEL_USER, result).session(&sess).device(&who.public).user(&account);
+    let overload_monitor = session_cgroup.as_ref().map(|cg| {
+        let attachment = cg.attachment();
+        let mut last = attachment.events();
+        let (cfg, device, account) = (cfg.clone(), who.public.clone(), account.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let now = attachment.events();
+                if now.oom > last.oom || now.oom_kill > last.oom_kill {
+                    cfg.log(format!("session {session_no} reached its memory cgroup limit"));
+                    cfg.rec(1, Event::new("resource_limit", LEVEL_USER, RESULT_DENIED).session(&sess).device(&device).user(&account).target("memory"));
+                }
+                if now.pids_max > last.pids_max {
+                    cfg.log(format!("session {session_no} reached its process cgroup limit"));
+                    cfg.rec(1, Event::new("resource_limit", LEVEL_USER, RESULT_DENIED).session(&sess).device(&device).user(&account).target("pids"));
+                }
+                last = now;
+            }
+        })
+    });
     cfg.rec(1, ev("session_open", RESULT_OK));
     let mut step_server = stepup::StepServer::default();
     let mut root_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -363,6 +383,10 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
     drop(ptys); // every terminal gets its hangup
     drop(tunnels); // every tunnel is closed
     drop(transfers); // every transfer is stopped; partial files stay for a resume
+    if let Some(monitor) = overload_monitor {
+        monitor.abort();
+        let _ = monitor.await;
+    }
     if let Some(cg) = &mut session_cgroup {
         if let Err(e) = cg.kill() { cfg.log(format!("session cgroup kill failed: {e}")); }
     }
