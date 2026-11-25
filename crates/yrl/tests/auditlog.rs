@@ -325,7 +325,7 @@ fn a14_one_audit_process_per_directory_and_a_key_only_the_audit_holds() {
     let d2 = tempfile::tempdir().unwrap();
     drop(AuditService::open(d2.path(), 100).unwrap());
     std::fs::set_permissions(d2.path().join("audit/sign.key"), std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(AuditService::open(d2.path(), 100).err().unwrap().to_string().contains("read by others"));
+    assert!(AuditService::open(d2.path(), 100).is_err(), "an audit signing key readable by others was accepted");
 }
 
 #[test]

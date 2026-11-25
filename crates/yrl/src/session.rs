@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use zeroize::Zeroize;
 
 pub const HELLO: &[u8] = b"YRL1\x01";
 pub const REPLY: &[u8] = b"YRL1ok";
@@ -50,10 +51,17 @@ impl Secure {
         Secure { state: Mutex::new(state), sent: AtomicU64::new(0), received: AtomicU64::new(0), rekey_every, raw_mode: Default::default(), raw_out: AtomicU64::new(0), raw_in: AtomicU64::new(0) }
     }
     pub fn seal(&self, f: &Frame) -> Result<Vec<u8>> {
-        let plain = zeroize::Zeroizing::new(f.encode().map_err(|e| anyhow::anyhow!("{e:?}"))?);
+        let mut plain = f.encode().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let mut out = vec![0u8; plain.len() + 16];
         let mut st = self.state.lock().unwrap();
-        let n = st.write_message(&plain, &mut out)?;
+        let sealed = st.write_message(&plain, &mut out);
+        // LOGIN is the protocol frame carrying a reusable credential in its plaintext
+        // payload. Bulk frames remain retained by Link until ACK, so wiping this extra
+        // encoded copy did not shorten their lifetime and made debug transfers an order slower.
+        if f.kind == crate::wire::LOGIN {
+            plain.zeroize();
+        }
+        let n = sealed?;
         out.truncate(n);
         if self.sent.fetch_add(1, Ordering::SeqCst) + 1 == self.rekey_every {
             st.rekey_outgoing();
@@ -65,15 +73,27 @@ impl Secure {
         if msg.len() > MAX_FRAME + 16 {
             bail!("message too large");
         }
-        let mut plain = zeroize::Zeroizing::new(vec![0u8; msg.len()]);
+        let mut plain = vec![0u8; msg.len()];
         let mut st = self.state.lock().unwrap();
-        let n = st.read_message(msg, &mut plain)?;
+        let n = match st.read_message(msg, &mut plain) {
+            Ok(n) => n,
+            Err(e) => {
+                // Authentication failures may leave unspecified bytes in the output
+                // buffer, so clear it before returning even though its kind is unknown.
+                plain.zeroize();
+                return Err(e.into());
+            }
+        };
         plain.truncate(n);
         if self.received.fetch_add(1, Ordering::SeqCst) + 1 == self.rekey_every {
             st.rekey_incoming();
             self.received.store(0, Ordering::SeqCst);
         }
-        Frame::decode(&plain).map_err(|e| anyhow::anyhow!("{e:?}"))
+        let frame = Frame::decode(&plain).map_err(|e| anyhow::anyhow!("{e:?}"));
+        if plain.first() == Some(&crate::wire::LOGIN) {
+            plain.zeroize();
+        }
+        frame
     }
 }
 

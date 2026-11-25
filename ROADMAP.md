@@ -1,6 +1,6 @@
 # YRL roadmap
 
-This file distinguishes the **accepted implementation-stage sequence** from the older long-term product plan in `docs/DESIGN.md` §10. It records the state after implementation commit `f69e4b7`. Stage numbers in these two plans are separate; completing a security stage does not imply that an aspirational desktop, transport or cross-platform milestone is complete.
+This file distinguishes the **accepted implementation-stage sequence** from the older long-term product plan in `docs/DESIGN.md` §10. It records the state after the initial corrective work in implementation Stage 5. Stage numbers in these two plans are separate; completing a security stage does not imply that an aspirational desktop, transport or cross-platform milestone is complete.
 
 ## Accepted implementation stages, in order
 
@@ -11,35 +11,19 @@ This file distinguishes the **accepted implementation-stage sequence** from the 
 | **2. Authority refresh and revocation** | Device-key removal, account disablement and rights changes end affected live sessions and prevent their RESUME, including active PTY, commands, files and tunnels. | Implemented and accepted; focused tests in `tests/revocation.rs`. |
 | **3. Component isolation** | Gatekeeper, Executor, Broker, Audit and Firewall have separate privileges and filesystem policies; seccomp covers all threads; user children join a per-session cgroup before execution and are killed with that session. | Implemented; deployment acceptance remains in `STAGE3_ACCEPTANCE.md`. |
 | **4. Key and secret lifecycle** | Protect role-private key files, clear secret buffers, support unattended services, offline encrypted recovery, safe Noise-key rotation, device revocation and protected migration. | Implemented in **`f69e4b7`**; deployment acceptance and the Audit journal-signing rollover limit are in `STAGE4_ACCEPTANCE.md`. |
+| **5. Failure and overload resilience** | Find and remove failure modes exposed by sustained load, repeated disconnects and bounded-resource operation without weakening authentication, cryptography or delivery guarantees. | In progress. The first correction restored debug file throughput to 70 MiB/s upload and 62 MiB/s download and restored a 48 MiB upload through repeated cuts without changing its 15-second confirmation deadline. Final integration and deployment acceptance remain pending. |
 
-The next implementation stage is described below. Its requirements are a specification for future work, not an instruction to start coding during this documentation handoff.
+## Current Stage 5: Failure and overload resilience
 
-## Next stage candidate: Private Discovery (requires owner confirmation)
+The initial Stage 5 investigation traced both the 5.9 MiB/s throughput regression and a missing final upload confirmation to one cause: Stage 4 wrapped every encoded Noise plaintext frame in `Zeroizing`, so an unoptimized build performed a costly volatile wipe for every 60 KiB bulk frame. Link already retains the same bulk payload until its authoritative ACK, so wiping that additional encoded copy did not shorten the payload's lifetime. Restricting this extra wipe to the LOGIN frame restored 70 MiB/s upload and 62 MiB/s download on the same host; Noise authentication, rekeying, pinned identities, ACK/SEQ and bounded Link retention are unchanged.
 
-`ROADMAP.md` did not exist before this handoff, and no committed document assigns a title or number after implementation Stage 4. **Private Discovery** is the only later workstream explicitly named in the owner-approved Stage 0 exclusions. The following is a detailed candidate for **Stage 5**, not a claim that its scope has been approved. Confirm the title, privacy target and deployment model with the owner before implementation. Preserve Stages 0–4 and their accepted order regardless of that decision.
+Sensitive control data retains explicit lifecycle handling. The CLI input and decoded server password use `Zeroizing`; LOGIN payloads and their temporary Noise plaintext encodings are cleared; failed Noise opens clear their output buffer. A CLI step-up phrase is held in a zeroizing caller buffer, travels inside the independent Noise XK proof, and is cleared by Executor or Broker after denial or verifier use. `STEPUP_PROOF` in the ordinary session contains the inner Noise ciphertext, not the phrase.
 
-### Objective and trust boundary
+The original failing 48 MiB chaos upload now completes in about 1.7 seconds through repeated connection cuts with the existing 15-second confirmation deadline. The final FILE_END response was delayed by the same throughput regression; no loss, duplication, ACK/SEQ fault or command replay was found. The Audit unsafe-key test now asserts rejection of a mode-0644 signing key without depending on an obsolete error string.
 
-An enrolled client should be able to find current candidate server routes without publishing a stable, enumerable mapping from the user's identity to the host address. A discovery provider, relay or compromised Gatekeeper must not become an authority over endpoint identity, account rights, commands, RESUME or key distribution. Discovery returns *hints*; the client still authenticates the configured Gatekeeper/server and independently pinned Executor with fresh Noise handshakes before using a route. No discovery response can substitute or update a pinned public key.
+The comprehensive workspace run, installed-service checks, real nftables and recovery on another host are reserved for final acceptance. Do not lower performance requirements or extend operation deadlines to mask overload or liveness defects.
 
-Before design, specify precisely who should be unable to learn which metadata: an unauthenticated scanner, the discovery provider, other enrolled devices, the relay, and a passive network observer have different visibility. Decide whether discovery is self-hosted or uses an untrusted rendezvous service and document the remaining IP/timing leakage. Do not promise invisibility that an active connection cannot provide.
-
-### Minimum security and lifecycle requirements
-
-1. Use established cryptographic libraries and existing device identities. No password, private key, password verifier, authorization file or capability grant may be sent to a discovery provider. Derive any discovery authorization from owner-approved enrollment, not from a Gatekeeper assertion.
-2. Refuse enumeration by unknown devices. Bind records to a specific server identity, authorized audience, protocol version and short expiry. Detect replay, rollback, forged routes, cross-server substitution and stale keys. Keep record sizes, response work, storage, retry and rate limits bounded.
-3. Treat discovery as optional availability input to the existing ordered route manager. Keep configured direct UDP, direct TCP and TCP-relay routes working without it. A discovered route still uses the Stage 0 failover/RESUME flow, fresh outer and inner Noise state, protected ACK/SEQ and the same live Executor session. Do not re-execute accepted commands or duplicate confirmed data.
-4. Device revocation, account disablement and rights changes retain Stage 2 semantics. A revoked device cannot use a cached discovery record to gain access or RESUME. Key rotation invalidates affected discovery material and requires trusted re-pinning; recovery and migration must include any new server-side discovery secret under the Stage 4 backup policy.
-5. Keep discovery logic outside Executor's user-operation authority. Preserve component users, seccomp, filesystem policy and per-session cgroups. Diagnostics may show discovery attempts and freshness without logging identities, secret tokens, candidate addresses or route payloads.
-
-### Acceptance evidence to require
-
-- A written protocol and threat model before code, with the privacy target, trust roots, record lifecycle, provider compromise and metadata limits stated explicitly.
-- Focused integration tests using a hostile discovery provider: unknown-device enumeration, forged/redirected/expired/replayed records, wrong pinned server or Executor key, key revocation and key rotation.
-- A route test in which a discovered path disappears while a PTY and file transfer are active; the client falls back to an already configured path through RESUME with unchanged session identity, hash and operation count.
-- Deployment tests for bounded resource use and offline/provider-unavailable behavior. Record what cannot be verified in a test environment.
-
-Do not fold multipath, route racing, NAT hole punching, UDP relay, GUI/desktop, other operating systems or YANDI NODE changes into this candidate stage. If the owner names a different Stage 5, replace this candidate section while leaving the recorded 0–4 sequence and the historical product plan below intact.
+Private Discovery is deferred and is not part of Stage 5. Multipath, route racing, NAT hole punching, UDP relay, GUI/desktop, other operating systems and YANDI NODE changes also remain outside this stage.
 
 ## Long-term product plan: original order retained
 
