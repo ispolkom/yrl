@@ -307,7 +307,7 @@ fn parse_entry(line: &str) -> Option<DirEntry> {
     Some(DirEntry { name, kind, size: f[1].parse().ok()?, mtime: f[2].parse().ok()?, mode: (u32::from_str_radix(f[3], 8).ok()? & 0o7777) as u16 })
 }
 
-pub async fn run(req: FsReq, target: Target, helper: std::path::PathBuf, tx: mpsc::Sender<Frame>) {
+pub async fn run(req: FsReq, target: Target, helper: std::path::PathBuf, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) {
     let id = req.id;
     let hx = |b: &[u8]| hex::encode(b);
     let head = match req.op {
@@ -324,6 +324,7 @@ pub async fn run(req: FsReq, target: Target, helper: std::path::PathBuf, tx: mps
     };
     let mut cmd = Command::new(&helper);
     cmd.arg("fs-helper").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    if let Some(cg) = &cgroup { crate::cgroup::SessionCgroup::attach(&mut cmd, cg); }
     prepare(&mut cmd, &target);
     let Ok(mut child) = cmd.spawn() else {
         let _ = tx.send(err(id, E_IO, code_text(E_IO))).await;

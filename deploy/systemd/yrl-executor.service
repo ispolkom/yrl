@@ -12,16 +12,19 @@ Group=root
 SupplementaryGroups=yrl-conf yrl-to-audit yrl-to-broker yrl-to-exec
 Environment=YRL_RUN=/run/yrl
 Environment=YRL_SOCKET_GROUP=yrl-to-exec
+Environment=YRL_SESSION_CGROUPS=required
 ExecStart=/usr/local/bin/yrld executor /var/lib/yrl --gate-uid yrl-gate --gate-exe -
 Restart=on-failure
 RestartSec=2
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 NoNewPrivileges=yes
 KillMode=control-group
+Delegate=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
-ProtectControlGroups=yes
+# Executor must create per-session child cgroups and write cgroup.kill.
+ProtectControlGroups=no
 LockPersonality=yes
 RestrictRealtime=yes
 SystemCallArchitectures=native

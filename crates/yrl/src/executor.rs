@@ -52,6 +52,12 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
     let who = crate::keys::Authorized { public: key, label, rights: vec![] };
     static SESSION_NO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let session_no = SESSION_NO.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut session_cgroup = if std::env::var_os("YRL_SESSION_CGROUPS").is_some() {
+        match crate::cgroup::SessionCgroup::create(session_no) {
+            Ok(cg) => Some(cg),
+            Err(e) => { cfg.log(format!("session refused: cgroup isolation unavailable: {e}")); return; }
+        }
+    } else { None };
     use crate::auditlog::{Event, LEVEL_USER, RESULT_DENIED, RESULT_OK};
     let sess = session_no.to_be_bytes();
     let ev = |op: &str, result: u8| Event::new(op, LEVEL_USER, result).session(&sess).device(&who.public).user(&account);
@@ -96,8 +102,9 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 }
                 let tx2 = tx.clone();
                 let Some(t) = target.clone() else { break };
+                let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
                 jobs.spawn(async move {
-                    exec::run(req, t, tx2).await;
+                    exec::run(req, t, tx2, cgroup).await;
                     drop(permit);
                 });
             }
@@ -123,7 +130,8 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 cfg.log(format!("terminal started via '{}'", who.label));
                 cfg.rec(1, ev("pty", RESULT_OK).target("shell").request(pid));
                 let (term, tx2) = (pty::clean_term(term), tx.clone());
-                jobs.spawn(pty::run(pid, rows, cols, term, t, crx, tx2));
+                let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
+                jobs.spawn(pty::run(pid, rows, cols, term, t, crx, tx2, cgroup));
             }
             wire::PTY_IN => {
                 let Ok((pid, data)) = split_id(&frame.payload) else { break };
@@ -180,11 +188,13 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 let (tx2, helper) = (tx.clone(), cfg.helper.clone());
                 match put {
                     Some(r) => {
-                        jobs.spawn(files::put(r, t, helper, cfg.max_file_size, crx, tx2));
+                        let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
+                        jobs.spawn(files::put(r, t, helper, cfg.max_file_size, crx, tx2, cgroup));
                     }
                     None => {
                         let r = GetReq::decode(&frame.payload).expect("decoded above");
-                        jobs.spawn(files::get(r, t, helper, crx, tx2));
+                        let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
+                        jobs.spawn(files::get(r, t, helper, crx, tx2, cgroup));
                     }
                 }
             }
@@ -263,8 +273,9 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 };
                 let Some(t) = target.clone() else { break };
                 let (tx2, helper) = (tx.clone(), cfg.helper.clone());
+                let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
                 jobs.spawn(async move {
-                    fsops::run(req, t, helper, tx2).await;
+                    fsops::run(req, t, helper, tx2, cgroup).await;
                     drop(permit);
                 });
             }
@@ -314,11 +325,17 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
     drop(ptys); // every terminal gets its hangup
     drop(tunnels); // every tunnel is closed
     drop(transfers); // every transfer is stopped; partial files stay for a resume
+    if let Some(cg) = &mut session_cgroup {
+        if let Err(e) = cg.kill() { cfg.log(format!("session cgroup kill failed: {e}")); }
+    }
     // PTYs get a chance to deliver SIGHUP to the entire process group. Other jobs are then
     // cancelled; their child processes use kill_on_drop.
     if tokio::time::timeout(Duration::from_secs(3), async { while jobs.join_next().await.is_some() {} }).await.is_err() {
         jobs.abort_all();
         while jobs.join_next().await.is_some() {}
+    }
+    if let Some(cg) = &mut session_cgroup {
+        if let Err(e) = cg.finish().await { cfg.log(format!("session cgroup cleanup failed: {e}")); }
     }
     cfg.rec(1, ev("session_close", RESULT_OK));
     drop(tx);

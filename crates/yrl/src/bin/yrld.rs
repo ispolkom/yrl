@@ -132,6 +132,7 @@ async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
     cfg.lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&yrl::ipc::state_dir(&dir, "exec"), "sudo"));
     cfg.broker = yrl::ipc::load_executor_to_broker(&dir).ok(); // without a broker every ROOT step-up is refused
     cfg.audit.exec = yrl::ipc::audit_client(&dir, "executor"); // reports to the audit process, if one has been set up
+    if std::env::var_os("YRL_SESSION_CGROUPS").is_some() { yrl::cgroup::verify_delegation()?; }
     if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply_executor()?; }
     eprintln!("[yrld] executor ready on {}", ipc.socket.display());
     yrl::executor::serve_ipc(listener, cfg, ipc).await;

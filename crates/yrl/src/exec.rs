@@ -31,7 +31,7 @@ impl Drop for ProcessGroup {
     fn drop(&mut self) { self.kill(); }
 }
 
-pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>) {
+pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) {
     let id = req.request_id;
     let err = |code: u16, text: &str| {
         let mut p = code.to_be_bytes().to_vec();
@@ -41,6 +41,7 @@ pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>) {
     let prog = std::ffi::OsStr::from_bytes(&req.argv[0]);
     let mut cmd = Command::new(prog);
     cmd.args(req.argv[1..].iter().map(|a| std::ffi::OsStr::from_bytes(a))).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    if let Some(cg) = &cgroup { crate::cgroup::SessionCgroup::attach(&mut cmd, cg); }
     unsafe {
         cmd.pre_exec(|| {
             if libc::setpgid(0, 0) != 0 { return Err(std::io::Error::last_os_error()); }

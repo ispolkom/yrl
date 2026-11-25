@@ -22,6 +22,7 @@ pub mod pty;
 pub mod prompt;
 pub mod relay;
 pub mod sandbox;
+pub mod cgroup;
 pub mod server;
 pub mod spa;
 pub mod stepup;

@@ -32,9 +32,10 @@ fn code_text(code: u16) -> &'static str {
     }
 }
 
-async fn spawn_helper(helper: &Path, target: &Target) -> Option<(Child, ChildStdin, BufReader<ChildStdout>)> {
+async fn spawn_helper(helper: &Path, target: &Target, cgroup: Option<&crate::cgroup::Attachment>) -> Option<(Child, ChildStdin, BufReader<ChildStdout>)> {
     let mut cmd = Command::new(helper);
     cmd.arg("fs-helper").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    if let Some(cg) = cgroup { crate::cgroup::SessionCgroup::attach(&mut cmd, cg); }
     prepare(&mut cmd, target);
     let mut child = cmd.spawn().ok()?;
     let (i, o) = (child.stdin.take()?, child.stdout.take()?);
@@ -55,13 +56,13 @@ fn helper_error(line: &str) -> u16 {
     line.strip_prefix("ERR ").and_then(|c| c.parse().ok()).unwrap_or(E_IO)
 }
 
-pub async fn put(req: PutReq, target: Target, helper: std::path::PathBuf, max_size: u64, mut rx: mpsc::Receiver<FileIn>, tx: mpsc::Sender<Frame>) {
+pub async fn put(req: PutReq, target: Target, helper: std::path::PathBuf, max_size: u64, mut rx: mpsc::Receiver<FileIn>, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) {
     let id = req.id;
     if req.size > max_size {
         let _ = tx.send(err(id, E_TOO_BIG, code_text(E_TOO_BIG))).await;
         return;
     }
-    let Some((_child, mut stdin, mut out)) = spawn_helper(&helper, &target).await else {
+    let Some((_child, mut stdin, mut out)) = spawn_helper(&helper, &target, cgroup.as_ref()).await else {
         let _ = tx.send(err(id, E_IO, code_text(E_IO))).await;
         return;
     };
@@ -122,9 +123,9 @@ pub async fn put(req: PutReq, target: Target, helper: std::path::PathBuf, max_si
     }
 }
 
-pub async fn get(req: GetReq, target: Target, helper: std::path::PathBuf, mut rx: mpsc::Receiver<FileIn>, tx: mpsc::Sender<Frame>) {
+pub async fn get(req: GetReq, target: Target, helper: std::path::PathBuf, mut rx: mpsc::Receiver<FileIn>, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) {
     let id = req.id;
-    let Some((_child, mut stdin, mut out)) = spawn_helper(&helper, &target).await else {
+    let Some((_child, mut stdin, mut out)) = spawn_helper(&helper, &target, cgroup.as_ref()).await else {
         let _ = tx.send(err(id, E_IO, code_text(E_IO))).await;
         return;
     };

@@ -60,7 +60,7 @@ fn open_pair(rows: u16, cols: u16) -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok((m, s))
 }
 
-pub async fn run(id: u64, rows: u16, cols: u16, term: String, target: Target, mut cmds: mpsc::Receiver<PtyCmd>, tx: mpsc::Sender<Frame>) {
+pub async fn run(id: u64, rows: u16, cols: u16, term: String, target: Target, mut cmds: mpsc::Receiver<PtyCmd>, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) {
     let shells = std::fs::read_to_string("/etc/shells").unwrap_or_default();
     if !usable_shell(&target.pw.shell, &shells) {
         let _ = tx.send(error_frame(id, 6, "no usable login shell for this account")).await;
@@ -83,6 +83,7 @@ pub async fn run(id: u64, rows: u16, cols: u16, term: String, target: Target, mu
     let name = std::path::Path::new(&target.pw.shell).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut cmd = Command::new(&target.pw.shell);
     cmd.arg0(format!("-{name}")).stdin(i).stdout(o).stderr(e);
+    if let Some(cg) = &cgroup { crate::cgroup::SessionCgroup::attach(&mut cmd, cg); }
     // own session with the terminal as its controlling one: this is what makes Ctrl-C reach the foreground program
     unsafe {
         cmd.pre_exec(|| {
