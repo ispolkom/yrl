@@ -11,6 +11,7 @@ use crate::fsops::{self, FsReq};
 use crate::identity::{self, Target};
 use crate::keys::read_authorized;
 use crate::pty::{self, PtyCmd};
+use crate::resources::OperationKind;
 use crate::server::ServerConfig;
 use crate::stepup;
 use crate::session::{read_msg, server_handshake, write_msg, REKEY_EVERY};
@@ -95,6 +96,10 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     let _ = tx.send(denied(5, b"too many running requests", id)).await;
                     continue;
                 };
+                let Some(resource) = cfg.resources.try_operation(session_no, &who.public, &account, OperationKind::Exec) else {
+                    let _ = tx.send(denied(5, b"server operation budget exhausted", id)).await;
+                    continue;
+                };
                 cfg.log(format!("exec started via '{}'", who.label));
                 {
                     let name = req.argv.first().map(|a| String::from_utf8_lossy(a.rsplit(|c| *c == b'/').next().unwrap_or(a)).into_owned()).unwrap_or_default();
@@ -106,6 +111,7 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 jobs.spawn(async move {
                     exec::run(req, t, tx2, cgroup).await;
                     drop(permit);
+                    drop(resource);
                 });
             }
             wire::PTY_OPEN => {
@@ -124,6 +130,10 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     let _ = tx.send(denied(5, b"too many terminals or id in use", pid)).await;
                     continue;
                 }
+                let Some(resource) = cfg.resources.try_operation(session_no, &who.public, &account, OperationKind::Pty) else {
+                    let _ = tx.send(denied(5, b"server operation budget exhausted", pid)).await;
+                    continue;
+                };
                 let Some(t) = target.clone() else { break };
                 let (ctx, crx) = mpsc::channel(64);
                 ptys.insert(pid, ctx);
@@ -131,7 +141,10 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 cfg.rec(1, ev("pty", RESULT_OK).target("shell").request(pid));
                 let (term, tx2) = (pty::clean_term(term), tx.clone());
                 let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
-                jobs.spawn(pty::run(pid, rows, cols, term, t, crx, tx2, cgroup));
+                jobs.spawn(async move {
+                    pty::run(pid, rows, cols, term, t, crx, tx2, cgroup).await;
+                    drop(resource);
+                });
             }
             wire::PTY_IN => {
                 let Ok((pid, data)) = split_id(&frame.payload) else { break };
@@ -173,6 +186,10 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     let _ = tx.send(denied(5, b"too many transfers or id in use", fid)).await;
                     continue;
                 }
+                let Some(resource) = cfg.resources.try_operation(session_no, &who.public, &account, OperationKind::Transfer) else {
+                    let _ = tx.send(denied(5, b"server operation budget exhausted", fid)).await;
+                    continue;
+                };
                 let Some(t) = target.clone() else { break };
                 let (ctx, crx) = mpsc::channel(16);
                 transfers.insert(fid, ctx);
@@ -186,15 +203,22 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     }
                 }
                 let (tx2, helper) = (tx.clone(), cfg.helper.clone());
+                let max_file_size = cfg.max_file_size;
                 match put {
                     Some(r) => {
                         let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
-                        jobs.spawn(files::put(r, t, helper, cfg.max_file_size, crx, tx2, cgroup));
+                        jobs.spawn(async move {
+                            files::put(r, t, helper, max_file_size, crx, tx2, cgroup).await;
+                            drop(resource);
+                        });
                     }
                     None => {
                         let r = GetReq::decode(&frame.payload).expect("decoded above");
                         let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
-                        jobs.spawn(files::get(r, t, helper, crx, tx2, cgroup));
+                        jobs.spawn(async move {
+                            files::get(r, t, helper, crx, tx2, cgroup).await;
+                            drop(resource);
+                        });
                     }
                 }
             }
@@ -231,11 +255,20 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     let _ = tx.send(denied(5, b"too many tunnels or id in use", tid)).await;
                     continue;
                 }
+                let Some(resource) = cfg.resources.try_operation(session_no, &who.public, &account, OperationKind::Tunnel) else {
+                    let _ = tx.send(denied(5, b"server operation budget exhausted", tid)).await;
+                    continue;
+                };
                 let (ctx, crx) = mpsc::channel(64);
                 tunnels.insert(tid, ctx);
                 cfg.log(format!("tunnel opened via '{}'", who.label));
                 cfg.rec(1, ev("tunnel", RESULT_OK).named_hidden_target("open", format!("{host}:{port}").as_bytes()).request(tid));
-                jobs.spawn(tunnel::run(tid, host, port, cfg.tunnel_connect_timeout, crx, tx.clone()));
+                let timeout = cfg.tunnel_connect_timeout;
+                let tx2 = tx.clone();
+                jobs.spawn(async move {
+                    tunnel::run(tid, host, port, timeout, crx, tx2).await;
+                    drop(resource);
+                });
             }
             tw::TUN_DATA | tw::TUN_EOF | tw::TUN_CLOSE => {
                 let Ok((tid, data)) = split_id(&frame.payload) else { break };
@@ -271,12 +304,17 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     let _ = tx.send(denied(5, b"too many directory requests", req.id)).await;
                     continue;
                 };
+                let Some(resource) = cfg.resources.try_operation(session_no, &who.public, &account, OperationKind::Fs) else {
+                    let _ = tx.send(denied(5, b"server operation budget exhausted", req.id)).await;
+                    continue;
+                };
                 let Some(t) = target.clone() else { break };
                 let (tx2, helper) = (tx.clone(), cfg.helper.clone());
                 let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
                 jobs.spawn(async move {
                     fsops::run(req, t, helper, tx2, cgroup).await;
                     drop(permit);
+                    drop(resource);
                 });
             }
             stepup::STEPUP_BEGIN | stepup::STEPUP_PROOF => {

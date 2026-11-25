@@ -47,15 +47,20 @@ pub struct LinkClosed;
 
 struct St {
     next_seq: u64,
-    unacked: VecDeque<(u64, Vec<u8>)>,
-    pending_interactive: VecDeque<Vec<u8>>,
-    pending_normal: VecDeque<Vec<u8>>,
-    pending_bulk: VecDeque<Vec<u8>>,
+    unacked: VecDeque<(u64, HeldFrame)>,
+    pending_interactive: VecDeque<HeldFrame>,
+    pending_normal: VecDeque<HeldFrame>,
+    pending_bulk: VecDeque<HeldFrame>,
     bytes: usize,
     expected_in: u64,
     ack_told: u64,
     closed: bool,
     pong_due: bool,
+}
+
+struct HeldFrame {
+    data: Arc<[u8]>,
+    _memory: Option<crate::resources::LinkMemoryPermit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,23 +110,35 @@ pub struct Link {
     wake: Notify,
     space: Notify,
     window: usize,
+    budget: Option<crate::resources::LinkBudget>,
     epoch: watch::Sender<u64>,
+    closed: watch::Sender<bool>,
 }
 
 impl Link {
     pub fn new(window: usize) -> Arc<Link> {
+        Self::with_budget(window, None)
+    }
+
+    pub fn new_budgeted(window: usize, budget: crate::resources::LinkBudget) -> Arc<Link> {
+        Self::with_budget(window, Some(budget))
+    }
+
+    fn with_budget(window: usize, budget: Option<crate::resources::LinkBudget>) -> Arc<Link> {
         Arc::new(Link {
             st: Mutex::new(St { next_seq: 0, unacked: VecDeque::new(), pending_interactive: VecDeque::new(), pending_normal: VecDeque::new(), pending_bulk: VecDeque::new(), bytes: 0, expected_in: 0, ack_told: 0, closed: false, pong_due: false }),
             wake: Notify::new(),
             space: Notify::new(),
             window,
+            budget,
             epoch: watch::channel(0).0,
+            closed: watch::channel(false).0,
         })
     }
 
     /// queue a frame for the other side; waits while too much is unconfirmed
     pub async fn push(&self, f: &Frame) -> Result<(), LinkClosed> {
-        let inner = f.encode().map_err(|_| LinkClosed)?;
+        let inner: Arc<[u8]> = f.encode().map_err(|_| LinkClosed)?.into();
         let priority = priority(f);
         let reserve = (self.window / 8).min(MAX_INTERACTIVE_RESERVE);
         let limit = if priority == Priority::Interactive { self.window } else { self.window.saturating_sub(reserve) };
@@ -129,35 +146,69 @@ impl Link {
             let notified = self.space.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            {
-                let mut s = self.st.lock().unwrap();
+            let has_local_room = {
+                let s = self.st.lock().unwrap();
                 if s.closed {
                     return Err(LinkClosed);
                 }
                 let empty = s.unacked.is_empty() && s.pending_interactive.is_empty() && s.pending_normal.is_empty() && s.pending_bulk.is_empty();
                 // Keep the historical escape hatch for a configured window smaller than one legal frame.
                 // Otherwise every queue together remains within `window`, including the interactive reserve.
-                if s.bytes + inner.len() <= limit || (empty && inner.len() > self.window) {
-                    s.bytes += inner.len();
-                    match priority {
-                        Priority::Interactive => s.pending_interactive.push_back(inner),
-                        Priority::Normal => s.pending_normal.push_back(inner),
-                        Priority::Bulk => s.pending_bulk.push_back(inner),
-                    }
-                    drop(s);
-                    self.wake.notify_one();
-                    return Ok(());
-                }
+                s.bytes + inner.len() <= limit || (empty && inner.len() > self.window)
+            };
+            if !has_local_room {
+                notified.await;
+                continue;
             }
-            notified.await;
+            let memory = match &self.budget {
+                Some(budget) => {
+                    let mut closed = self.closed.subscribe();
+                    if *closed.borrow_and_update() {
+                        return Err(LinkClosed);
+                    }
+                    tokio::select! {
+                        p = budget.reserve(inner.len(), priority == Priority::Interactive) => Some(p.map_err(|_| LinkClosed)?),
+                        _ = closed.changed() => return Err(LinkClosed),
+                    }
+                }
+                None => None,
+            };
+            let mut s = self.st.lock().unwrap();
+            if s.closed {
+                return Err(LinkClosed);
+            }
+            let empty = s.unacked.is_empty() && s.pending_interactive.is_empty() && s.pending_normal.is_empty() && s.pending_bulk.is_empty();
+            if s.bytes + inner.len() > limit && !(empty && inner.len() > self.window) {
+                drop(s); // another producer used the local window while the global permit was awaited
+                drop(memory);
+                continue;
+            }
+            s.bytes += inner.len();
+            let held = HeldFrame { data: inner.clone(), _memory: memory };
+            match priority {
+                Priority::Interactive => s.pending_interactive.push_back(held),
+                Priority::Normal => s.pending_normal.push_back(held),
+                Priority::Bulk => s.pending_bulk.push_back(held),
+            }
+            drop(s);
+            self.wake.notify_one();
+            return Ok(());
         }
     }
 
     pub fn close(&self) {
-        self.st.lock().unwrap().closed = true;
+        let mut s = self.st.lock().unwrap();
+        s.closed = true;
+        s.unacked.clear();
+        s.pending_interactive.clear();
+        s.pending_normal.clear();
+        s.pending_bulk.clear();
+        s.bytes = 0;
+        drop(s);
         self.wake.notify_one();
         self.space.notify_waiters();
         self.epoch.send_modify(|e| *e += 1);
+        self.closed.send_replace(true);
     }
 
     pub fn is_closed(&self) -> bool {
@@ -197,7 +248,7 @@ impl Link {
         let mut freed = false;
         while s.unacked.front().is_some_and(|(q, _)| *q < n) {
             let (_, b) = s.unacked.pop_front().unwrap();
-            s.bytes -= b.len();
+            s.bytes -= b.data.len();
             freed = true;
         }
         drop(s);
@@ -228,7 +279,7 @@ impl Link {
             if let Some((q, b)) = s.unacked.get((*cursor - *front) as usize) {
                 debug_assert_eq!(*q, *cursor);
                 *cursor += 1;
-                return Action::Send(*q, b.clone());
+                return Action::Send(*q, b.data.clone());
             }
         }
         let inner = s.pending_interactive.pop_front().or_else(|| s.pending_normal.pop_front()).or_else(|| s.pending_bulk.pop_front());
@@ -236,15 +287,16 @@ impl Link {
             let seq = s.next_seq;
             s.next_seq += 1;
             *cursor += 1;
-            s.unacked.push_back((seq, inner.clone()));
-            return Action::Send(seq, inner);
+            let data = inner.data.clone();
+            s.unacked.push_back((seq, inner));
+            return Action::Send(seq, data);
         }
         Action::Idle
     }
 }
 
 enum Action {
-    Send(u64, Vec<u8>),
+    Send(u64, Arc<[u8]>),
     Ack(u64),
     Pong,
     Idle,
@@ -380,5 +432,32 @@ where
         e = writer => e,
         e = reader => e,
         e = superseded => e,
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use crate::resources::{ResourceLimits, ResourceManager};
+
+    #[tokio::test]
+    async fn acknowledged_and_closed_frames_release_their_exact_link_charge() {
+        let resources = Arc::new(ResourceManager::new(ResourceLimits::default()).unwrap());
+        let session = resources.try_session(b"device", "account", 1, 1, 1).unwrap();
+        let link = Link::new_budgeted(DEFAULT_WINDOW, session.link_budget());
+        let frame = Frame::new(crate::filewire::FILE_DATA, 0, vec![7; 4096]);
+        let encoded = frame.encode().unwrap().len();
+
+        link.push(&frame).await.unwrap();
+        let mut cursor = 0;
+        assert!(matches!(link.next_action(&mut cursor, false), Action::Send(0, _)));
+        assert_eq!(resources.usage().link_bytes, encoded);
+        link.on_ack(1).unwrap();
+        assert_eq!(resources.usage().link_bytes, 0, "an authoritative ACK releases the retained frame");
+
+        link.push(&frame).await.unwrap();
+        assert_eq!(resources.usage().link_bytes, encoded);
+        link.close();
+        assert_eq!(resources.usage().link_bytes, 0, "session teardown releases pending frames even without an ACK");
     }
 }

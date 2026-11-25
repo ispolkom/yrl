@@ -27,6 +27,9 @@ pub struct ServerConfig {
     pub link_window: usize,
     pub max_sessions: usize,
     pub max_sessions_per_key: usize,
+    pub max_sessions_per_account: usize,
+    /// shared Link-memory and active-operation admission for every session in this Executor
+    pub resources: Arc<crate::resources::ResourceManager>,
     pub sessions: Arc<Registry>,
     /// how this gatekeeper reaches its executor; None = start an executor inside this process on a private socket (single-process mode)
     pub gate: Option<crate::ipc::GatekeeperIpc>,
@@ -88,6 +91,8 @@ impl ServerConfig {
             link_window: link::DEFAULT_WINDOW,
             max_sessions: 1024,
             max_sessions_per_key: 16,
+            max_sessions_per_account: 16,
+            resources: Arc::new(crate::resources::ResourceManager::default()),
             sessions: Arc::new(Registry::default()),
             gate: None,
             lockouts: Arc::new(crate::stepup::Lockouts::default()),
@@ -118,6 +123,10 @@ impl ServerConfig {
     pub fn with_lock(mut self, after: u32, base: Duration, max: Duration) -> Self {
         self.throttle = Arc::new(Throttle::new(after, base, max));
         self
+    }
+    pub fn set_resource_limits(&mut self, limits: crate::resources::ResourceLimits) -> Result<(), &'static str> {
+        self.resources = Arc::new(crate::resources::ResourceManager::new(limits)?);
+        Ok(())
     }
     pub(crate) fn log(&self, line: String) {
         eprintln!("[yrld] {line}");
@@ -227,6 +236,7 @@ pub struct SessionEntry {
     key: Vec<u8>,
     account: String,
     auth: crate::executor::AuthSnapshot,
+    resources: Mutex<Option<crate::resources::SessionPermit>>,
     inbound: Mutex<Option<mpsc::Sender<Frame>>>,
     attach_gen: std::sync::atomic::AtomicU64,
 }
@@ -235,6 +245,7 @@ impl SessionEntry {
     fn end(&self) {
         self.link.close();
         self.inbound.lock().unwrap().take(); // the dispatcher sees the end of its input and tears everything down
+        self.resources.lock().unwrap().take();
     }
 }
 
@@ -260,10 +271,6 @@ impl Registry {
     }
     fn remove(&self, sid: &[u8; link::SID_LEN]) {
         self.map.lock().unwrap().remove(sid);
-    }
-    fn room_for(&self, key: &[u8], max: usize, max_key: usize) -> bool {
-        let m = self.map.lock().unwrap();
-        m.len() < max && m.values().filter(|e| e.key == key).count() < max_key
     }
 }
 
@@ -413,11 +420,17 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                     cfg.throttle.ok(&ip_id);
                     cfg.log(format!("login ok via '{}'", who.label));
                     cfg.rec(1, crate::auditlog::Event::new("login", crate::auditlog::LEVEL_USER, crate::auditlog::RESULT_OK).device(&who.public).user(&typed_login));
-                    if !cfg.sessions.room_for(&who.public, cfg.max_sessions, cfg.max_sessions_per_key) {
+                    let Some(resources) = cfg.resources.try_session(
+                        &who.public,
+                        &typed_login,
+                        cfg.max_sessions,
+                        cfg.max_sessions_per_key,
+                        cfg.max_sessions_per_account,
+                    ) else {
                         cfg.log(format!("login refused via '{}': too many sessions", who.label));
                         let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
                         return;
-                    }
+                    };
                     // This code runs in Executor. Identity and rights came from the authenticated
                     // inner channel and are checked against Executor-owned files here.
                     let Some(auth) = crate::executor::auth_snapshot(&cfg.dir, &who.public, &typed_login) else { return };
@@ -428,9 +441,17 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                     };
                     if crate::executor::auth_snapshot(&cfg.dir, &who.public, &typed_login).as_ref() != Some(&auth) { return }
                     let sid = new_sid();
-                    let link = Link::new(cfg.link_window);
+                    let link = Link::new_budgeted(cfg.link_window, resources.link_budget());
                     let (in_tx, mut in_rx) = mpsc::channel::<Frame>(64);
-                    let entry = Arc::new(SessionEntry { link: link.clone(), key: who.public.clone(), account: typed_login, auth, inbound: Mutex::new(Some(in_tx)), attach_gen: Default::default() });
+                    let entry = Arc::new(SessionEntry {
+                        link: link.clone(),
+                        key: who.public.clone(),
+                        account: typed_login,
+                        auth,
+                        resources: Mutex::new(Some(resources)),
+                        inbound: Mutex::new(Some(in_tx)),
+                        attach_gen: Default::default(),
+                    });
                     cfg.sessions.map.lock().unwrap().insert(sid, entry.clone());
                     let (watch, watch_cfg) = (entry.clone(), cfg.clone());
                     tokio::spawn(async move {
