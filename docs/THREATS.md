@@ -160,6 +160,17 @@ A server behind NAT **dials out** with `yrld serve <directory> - --relay host:po
 
 An untrusted relay can deny service by consuming wait slots or server spares; limits mitigate but cannot prevent this. The server does not know relayed client addresses, so address lockouts do not apply, while key lockouts do. Timing and volume metadata remain visible. UDP relay, hole punching, WebSocket-on-443, and multiple relays are not implemented.
 
+## Route failover (`tests/routes.rs`, `src/client.rs`)
+
+The client tries configured UDP, direct TCP, and TCP-relay routes in that order. Every replacement route performs Noise IK again and may only continue the existing server session through RESUME; route selection never bypasses key authorization or session rights.
+
+| Test | Requirement |
+|---|---|
+| `udp_to_tcp_*` | an active command and PTY survive UDP → TCP; the command side effect occurs once; one server session remains |
+| `direct_tcp_to_relay_*` | the same PTY, file transfer, tunnel, and server session survive direct TCP → relay |
+
+Attempts, route timeouts, queued bytes, recovery time, and retry intervals are bounded. Diagnostics expose transport type and counters, not endpoints, identities, or payloads. Fixed route order is availability policy, not an authentication decision.
+
 ## Directories and `visual` mode (sections D/V, `tests/fsops.rs`, `tests/visual*.rs`)
 
 With `files`, the account-identity helper lists/stat/canonicalizes, creates one directory level with a masked mode, removes files/symlinks/empty directories, and renames without replacement (`renameat2 NOREPLACE`).

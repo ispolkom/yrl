@@ -43,6 +43,7 @@ The relay and network-facing process are deliberately not trusted with machine p
 | **Directory operations** and a mouse-enabled terminal file browser (`yrl visual`) | works |
 | **Restricted forwarding and SOCKS5**, denied by default unless allowed by server policy | works |
 | **Resumable sessions** across repeated TCP disconnects without loss or duplication | works |
+| **Automatic route failover** from configured UDP to direct TCP to TCP relay, preserving the live session | works |
 | **Reliable ordered stream over UDP** with loss recovery, congestion windows, and silence for strangers | works; see [limits](docs/UDP.md#not-implemented) |
 | **Server behind NAT through `yrl-relay`**; relay sees ciphertext and metadata only | works |
 | **Privilege separation** between gatekeeper, executor, broker, firewall, and audit processes | works in tested deployments |
@@ -76,7 +77,7 @@ The relay and network-facing process are deliberately not trusted with machine p
 - The optional **firewall process** is the only component with `CAP_NET_ADMIN`; it opens a short-lived nftables path only after a valid SPA knock has been recorded.
 - An optional **relay** joins two byte streams. End-to-end Noise encryption remains between the client and server.
 
-The session layer sits above TCP, UDP, or relay transport. Numbered frames, cumulative acknowledgements, bounded retransmission buffers, and RESUME allow a live terminal, file transfer, or tunnel to continue after a connection is replaced.
+The session layer sits above TCP, UDP, or relay transport. The client selects configured routes in that order and moves to the next one when liveness fails. Numbered frames, cumulative acknowledgements, bounded retransmission buffers, and RESUME allow a live terminal, file transfer, or tunnel to continue after a connection is replaced. Control and interactive frames are scheduled ahead of unsent bulk file data.
 
 ## Quick start
 
@@ -148,7 +149,7 @@ Security rules are also checked with targeted source mutants listed under `tools
 
 - Real privileged broker operations are deliberately incomplete; current operations are typed test/restart primitives, not a general root shell.
 - Remote desktop, Windows, macOS, and Android clients are not implemented.
-- UDP lacks NAT hole punching, UDP relay, path-MTU discovery, address migration, pacing, and automatic TCP fallback.
+- UDP lacks NAT hole punching, UDP relay, path-MTU discovery, in-place address migration, and pacing. Automatic failover uses a fresh Noise-authenticated connection and RESUME; it does not race or score routes.
 - Sessions survive connection loss but not an `yrld` restart; active session state is currently in memory.
 - The transport does not yet include hybrid post-quantum key exchange (ML-KEM).
 - PAKE/OPAQUE, FIDO2/TPM-backed confirmation, and second-device approval are planned hardening steps.

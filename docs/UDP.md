@@ -28,7 +28,7 @@ A session can use a reliable stream over UDP (`crates/yrl/src/udp.rs`) instead o
 
 ## Not implemented
 
-NAT traversal (hole punching), UDP relay, migration to another address without a fresh handshake (a new connection currently resumes through `Link`), fallback to TCP when UDP receives no response, send pacing (the window can release bursts), and path-MTU discovery.
+NAT traversal (hole punching), UDP relay, migration to another address without a fresh handshake (the connection manager instead resumes the session through another configured route), send pacing (the window can release bursts), and path-MTU discovery. Configured UDP routes do automatically fall back to direct TCP and then TCP relay after the liveness deadline; routes are not raced or adaptively scored.
 
 ## Known limitation
 

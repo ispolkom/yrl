@@ -19,9 +19,15 @@ A session is not a connection. Session state lives on the server (permissions, i
 - Without a connection, a session lives for `session_grace` (10 minutes by default), then is destroyed: terminals receive hangup, tunnels and transfers close, and partial files remain resumable.
 - Failed RESUME attempts count toward the same per-key/per-address lockout as wrong passwords.
 
-## 2. Client
+## 2. Client and route selection
 
-`Client::connect_resilient(...)` manages the connection. It detects failure itself (no incoming traffic for 3 × `ping_every`, or a write error), reconnects with bounded exponential backoff and jitter, and performs RESUME. Application calls (`exec`, `pty`, `put_file`, `tunnel`) keep waiting and do not observe the outage. If the server has destroyed the session because its grace period expired, all pending calls receive `session lost`.
+`Client::connect_opts(...)` builds one ordered route set from the configured endpoints: UDP, direct TCP, then TCP relay. Initial connection and recovery use the first working route. A write error or the bounded liveness deadline ends the current connection; the manager immediately tries the next route, performs a fresh Noise IK handshake, and sends RESUME for the existing session. After a complete unsuccessful route cycle, retries use bounded exponential backoff with jitter.
+
+Application calls (`exec`, `pty`, `put_file`, `tunnel`) keep waiting and do not observe the replacement. Accepted requests remain in the same server session, so reconnecting does not submit or execute them again. If the server has destroyed the session because its grace period expired, all pending calls receive `session lost`.
+
+`connect_timeout` bounds initial establishment across all routes, `route_timeout` bounds each route attempt (including Noise and RESUME), `give_up_after` bounds recovery, and `window` bounds the combined queued and unacknowledged data. Unsent control, command, terminal, and tunnel frames are scheduled before bulk file frames; already-numbered frames retain strict order across reconnects.
+
+`Client::connection_diagnostics()` reports the selected transport, latest establishment/RESUME round-trip duration, attempts by transport, failures, disconnects, successful resumes, route switches, and the last link termination reason. It deliberately retains no addresses, keys, account names, or payloads.
 
 ## 3. Relay (`yrl-relay`)
 
@@ -32,8 +38,8 @@ For a server behind NAT, the server makes an **outbound** connection to the rela
 
 ## 4. Deliberately outside this stage
 
-Redundant UDP transport, NAT hole punching, WebSocket-on-443 camouflage, and multipath. They require real networks for validation; the test bench uses loopback and a chaos proxy that disconnects, delays, and fragments the byte stream. The session layer is deliberately transport-independent so UDP/WS can be connected below it without changes above.
+NAT hole punching, a UDP relay, WebSocket-on-443 camouflage, simultaneous multipath, route racing, and adaptive route scoring are not implemented. The manager uses configured endpoints in a fixed order and changes routes only after the current one fails. Session state is in memory and cannot survive an `yrld` restart or expiry of `session_grace`.
 
 ## 5. Verification
 
-A chaos proxy sits between client and server: disconnect during a file transfer (matching hash, no duplicated bytes), terminal output (no gaps or duplicates), a command response, or an active tunnel; repeated outages; replacement while the server has not noticed the old connection; RESUME with a foreign key, foreign sid, or expired session; a full window; overwritten/replayed SEQ; latency and fragmentation.
+A chaos proxy sits between client and server: disconnect during a file transfer (matching hash, no duplicated bytes), terminal output (no gaps or duplicates), a command response, or an active tunnel; repeated outages; replacement while the server has not noticed the old connection; RESUME with a foreign key, foreign sid, or expired session; a full window; overwritten/replayed SEQ; latency and fragmentation. `tests/routes.rs` additionally removes an active UDP path and verifies UDP → TCP recovery, then removes a direct TCP path and verifies direct → relay recovery while the same PTY, file transfer, tunnel, and server session remain alive. The UDP test starts a command before the cut and verifies its side effect occurred exactly once.
