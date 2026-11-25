@@ -4,6 +4,7 @@
 //! change an old record: the only way into the files is this process's append.
 use crate::auditlog::*;
 use crate::ipc::{exe_of_pid, judge_peer, ExecutorIpc, PeerVerdict};
+use crate::ipc_admission::{AdmissionLimits, IpcAdmission, IpcPermit};
 use crate::keys::{Authorized, KeyPair};
 use crate::session::{client_handshake, read_msg, server_handshake, write_msg, Secure, REKEY_EVERY};
 use crate::wire::Frame;
@@ -16,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Semaphore;
 
 pub const AUDIT_EVENT: u8 = 90;
 pub const AUDIT_ACK: u8 = 91;
@@ -208,42 +210,70 @@ pub fn decode_event(b: &[u8]) -> Result<Event> {
     Ok(r.ev)
 }
 
+pub const IPC_LIMITS: AdmissionLimits = AdmissionLimits { handshakes: 16, handshakes_per_peer: 4, active: 32, active_per_principal: 8 };
+const IPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const IPC_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const BACKGROUND_EVENTS: usize = 256;
+
 pub async fn serve_ipc(listener: UnixListener, svc: Arc<AuditService>, ipc: AuditIpc, log: Arc<dyn Fn(String) + Send + Sync>) {
+    serve_ipc_with_limits(listener, svc, ipc, log, IPC_LIMITS).await
+}
+
+pub async fn serve_ipc_with_limits(listener: UnixListener, svc: Arc<AuditService>, ipc: AuditIpc, log: Arc<dyn Fn(String) + Send + Sync>, limits: AdmissionLimits) {
+    let admission = IpcAdmission::new(limits);
     loop {
         let Ok((stream, _)) = listener.accept().await else { continue };
+        let Ok(cred) = stream.peer_cred() else { continue };
+        let Some(handshake) = admission.try_handshake(cred.uid()) else { continue };
         let (svc, ipc, log) = (svc.clone(), ipc.clone(), log.clone());
-        tokio::spawn(async move { handle(stream, svc, ipc, log).await });
+        let admission = admission.clone();
+        let peer = crate::ipc::Peer { uid: cred.uid(), pid: cred.pid() };
+        tokio::spawn(async move { handle(stream, peer, handshake, admission, svc, ipc, log).await });
     }
 }
 
-async fn handle(mut stream: UnixStream, svc: Arc<AuditService>, ipc: AuditIpc, log: Arc<dyn Fn(String) + Send + Sync>) {
-    let Ok(cred) = stream.peer_cred() else { return };
-    let as_exec = ExecutorIpc { socket: ipc.socket.clone(), key: ipc.key.clone(), gatekeeper_public: vec![], expected_uid: ipc.expected_uid, expected_exe: None };
-    let verdict = judge_peer(&as_exec, &crate::ipc::Peer { uid: cred.uid(), pid: cred.pid() }, exe_of_pid);
+async fn handle(mut stream: UnixStream, peer: crate::ipc::Peer, handshake: IpcPermit, admission: IpcAdmission, svc: Arc<AuditService>, ipc: AuditIpc, log: Arc<dyn Fn(String) + Send + Sync>) {
+    let as_exec = ExecutorIpc { socket: ipc.socket.clone(), key: ipc.key.clone(), gatekeeper_public: vec![], expected_uid: ipc.expected_uid, expected_exe: ipc.expected_exe.clone() };
+    let verdict = judge_peer(&as_exec, &peer, exe_of_pid);
     if verdict != PeerVerdict::Ok {
         log(format!("audit: connection refused: {verdict:?}"));
         return;
     }
     let authorized: Vec<Authorized> = ipc.sources.iter().map(|(s, k)| Authorized { public: k.clone(), label: s.name().into(), rights: vec![] }).collect();
-    let Ok(Ok((sec, who))) = tokio::time::timeout(Duration::from_secs(5), server_handshake(&mut stream, &ipc.key, &authorized, REKEY_EVERY)).await else {
+    let Ok(Ok((sec, who))) = tokio::time::timeout(IPC_HANDSHAKE_TIMEOUT, server_handshake(&mut stream, &ipc.key, &authorized, REKEY_EVERY)).await else {
         log("audit: connection refused: handshake".into());
         return;
     };
     // the source is the key that connected
     let Some((src, _)) = ipc.sources.iter().find(|(_, k)| *k == who.public) else { return };
     let src = *src;
+    let Some(_active) = admission.try_active(&who.public) else {
+        log(format!("audit: connection refused: {:?} source capacity exhausted", src));
+        return;
+    };
+    drop(handshake);
     let (mut rd, mut wr) = stream.into_split();
-    while let Ok(msg) = read_msg(&mut rd).await {
+    while let Ok(Ok(msg)) = tokio::time::timeout(IPC_IDLE_TIMEOUT, read_msg(&mut rd)).await {
         let Ok(f) = sec.open(&msg) else { break };
         if f.kind != AUDIT_EVENT {
             break;
         }
-        let out = match decode_event(&f.payload).and_then(|ev| svc.append(src, ev)) {
+        // Journal I/O and its process-wide chain lock must not occupy an async worker. Admission
+        // bounds the number of blocking jobs, and awaiting completion preserves the ACK contract.
+        let appended = match decode_event(&f.payload) {
+            Ok(ev) => {
+                let svc = svc.clone();
+                tokio::task::spawn_blocking(move || svc.append(src, ev)).await.unwrap_or_else(|_| Err(anyhow::anyhow!("audit append task failed")))
+            }
+            Err(e) => Err(e),
+        };
+        let out = match appended {
             Ok(seq) => Frame::new(AUDIT_ACK, 0, seq.to_be_bytes().to_vec()),
             Err(_) => Frame::new(AUDIT_REJECT, 0, vec![]),
         };
         let Ok(m) = sec.seal(&out) else { break };
-        if write_msg(&mut wr, &m).await.is_err() {
+        if !matches!(tokio::time::timeout(IPC_WRITE_TIMEOUT, write_msg(&mut wr, &m)).await, Ok(Ok(()))) {
             break;
         }
     }
@@ -256,18 +286,34 @@ pub struct AuditClient {
     key: KeyPair,
     audit_public: Vec<u8>,
     conn: tokio::sync::Mutex<Option<(Secure, tokio::net::unix::OwnedReadHalf, tokio::net::unix::OwnedWriteHalf)>>,
+    /// Critical records never wait behind the bounded ordinary-event backlog.
+    critical_conn: tokio::sync::Mutex<Option<(Secure, tokio::net::unix::OwnedReadHalf, tokio::net::unix::OwnedWriteHalf)>>,
     /// events that could not be delivered while the audit process was away
     lost: AtomicU64,
     timeout: Duration,
+    background: Arc<Semaphore>,
 }
 
 impl AuditClient {
     pub fn new(socket: PathBuf, key: KeyPair, audit_public: Vec<u8>) -> Arc<AuditClient> {
-        Arc::new(AuditClient { socket, key, audit_public, conn: tokio::sync::Mutex::new(None), lost: AtomicU64::new(0), timeout: Duration::from_secs(2) })
+        Arc::new(AuditClient {
+            socket,
+            key,
+            audit_public,
+            conn: tokio::sync::Mutex::new(None),
+            critical_conn: tokio::sync::Mutex::new(None),
+            lost: AtomicU64::new(0),
+            timeout: Duration::from_secs(2),
+            background: Arc::new(Semaphore::new(BACKGROUND_EVENTS)),
+        })
     }
 
-    async fn send_once(&self, ev: &Event) -> Result<u64> {
-        let mut g = self.conn.lock().await;
+    async fn send_once_on(
+        &self,
+        conn: &tokio::sync::Mutex<Option<(Secure, tokio::net::unix::OwnedReadHalf, tokio::net::unix::OwnedWriteHalf)>>,
+        ev: &Event,
+    ) -> Result<u64> {
+        let mut g = conn.lock().await;
         if g.is_none() {
             let mut s = tokio::time::timeout(self.timeout, UnixStream::connect(&self.socket)).await??;
             let sec = tokio::time::timeout(self.timeout, client_handshake(&mut s, &self.key, &self.audit_public, REKEY_EVERY)).await??;
@@ -276,7 +322,7 @@ impl AuditClient {
         }
         let (sec, rd, wr) = g.as_mut().unwrap();
         let r: Result<u64> = async {
-            write_msg(wr, &sec.seal(&Frame::new(AUDIT_EVENT, 0, encode_event(ev)?))?).await?;
+            tokio::time::timeout(self.timeout, write_msg(wr, &sec.seal(&Frame::new(AUDIT_EVENT, 0, encode_event(ev)?))?)).await??;
             let msg = tokio::time::timeout(self.timeout, read_msg(rd)).await??;
             let f = sec.open(&msg)?;
             if f.kind != AUDIT_ACK || f.payload.len() != 8 {
@@ -291,17 +337,25 @@ impl AuditClient {
         r
     }
 
+    async fn send_once(&self, ev: &Event) -> Result<u64> {
+        self.send_once_on(&self.conn, ev).await
+    }
+
     /// For things that must not happen unrecorded (SUDO and ROOT approvals, a new device): an error means "do not go on".
     pub async fn record_critical(&self, ev: Event) -> Result<u64> {
-        match self.send_once(&ev).await {
+        match self.send_once_on(&self.critical_conn, &ev).await {
             Ok(n) => Ok(n),
             Err(e) if e.to_string().contains("refused") => Err(e), // the audit process said no: it will say no again
-            Err(_) => self.send_once(&ev).await,
+            Err(_) => self.send_once_on(&self.critical_conn, &ev).await,
         }
     }
 
     /// For the ordinary course of things: delivered in the background; if the audit process is away the loss is counted, and reported once it is back
     pub fn record(self: &Arc<Self>, ev: Event) {
+        let Ok(slot) = self.background.clone().try_acquire_owned() else {
+            self.lost.fetch_add(1, SeqCst);
+            return;
+        };
         let me = self.clone();
         tokio::spawn(async move {
             let lost = me.lost.load(SeqCst);
@@ -315,6 +369,7 @@ impl AuditClient {
             if me.send_once(&ev).await.is_err() && me.send_once(&ev).await.is_err() {
                 me.lost.fetch_add(1, SeqCst);
             }
+            drop(slot);
         });
     }
 
@@ -335,6 +390,26 @@ pub struct AuditHandles {
 
 pub fn exists(dir: &Path) -> bool {
     dir.join("audit/sign.pub").exists()
+}
+
+#[cfg(test)]
+mod overload_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ordinary_backlog_is_bounded_and_critical_lane_is_reserved() {
+        let client = AuditClient::new(PathBuf::from("/does/not/exist"), crate::keys::generate(), vec![0; 32]);
+        let mut held = Vec::new();
+        for _ in 0..BACKGROUND_EVENTS {
+            held.push(client.background.clone().try_acquire_owned().unwrap());
+        }
+        client.record(Event::new("session", LEVEL_NONE, RESULT_OK));
+        assert_eq!(client.lost(), 1, "ordinary overload is explicit and counted");
+
+        let _ordinary_busy = client.conn.lock().await;
+        assert!(client.critical_conn.try_lock().is_ok(), "mandatory records have an independent connection lane");
+        drop(held);
+    }
 }
 
 /// the owner's repair after a damaged tail: only a partial record at the very end may be cut off, and the cut is written down. Anything else is not repaired here.

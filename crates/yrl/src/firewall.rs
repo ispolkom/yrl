@@ -7,6 +7,7 @@
 use crate::audit::AuditClient;
 use crate::auditlog::{Event, LEVEL_NONE, RESULT_DENIED, RESULT_OK};
 use crate::ipc::{exe_of_pid, judge_peer, ExecutorIpc, GatekeeperIpc, Peer, PeerVerdict};
+use crate::ipc_admission::{AdmissionLimits, IpcAdmission, IpcPermit};
 use crate::keys::Authorized;
 use crate::session::{client_handshake, read_msg, server_handshake, write_msg, REKEY_EVERY};
 use crate::wire::{Frame, WireError};
@@ -428,42 +429,59 @@ impl FirewallService {
 
 // ---------------------------------------------------------------- the door
 
+pub const IPC_LIMITS: AdmissionLimits = AdmissionLimits { handshakes: 16, handshakes_per_peer: 8, active: 64, active_per_principal: 64 };
+const IPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const IPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub async fn serve_ipc(listener: UnixListener, svc: Arc<FirewallService>, ipc: ExecutorIpc, log: Arc<dyn Fn(String) + Send + Sync>) {
+    serve_ipc_with_limits(listener, svc, ipc, log, IPC_LIMITS).await
+}
+
+pub async fn serve_ipc_with_limits(listener: UnixListener, svc: Arc<FirewallService>, ipc: ExecutorIpc, log: Arc<dyn Fn(String) + Send + Sync>, limits: AdmissionLimits) {
+    let admission = IpcAdmission::new(limits);
     loop {
         let Ok((stream, _)) = listener.accept().await else { continue };
+        let Ok(cred) = stream.peer_cred() else { continue };
+        let Some(handshake) = admission.try_handshake(cred.uid()) else { continue };
         let (svc, ipc, log) = (svc.clone(), ipc.clone(), log.clone());
-        tokio::spawn(async move { handle_conn(stream, svc, ipc, log).await });
+        let admission = admission.clone();
+        let peer = Peer { uid: cred.uid(), pid: cred.pid() };
+        tokio::spawn(async move { handle_conn(stream, peer, handshake, admission, svc, ipc, log).await });
     }
 }
 
-async fn handle_conn(mut stream: UnixStream, svc: Arc<FirewallService>, ipc: ExecutorIpc, log: Arc<dyn Fn(String) + Send + Sync>) {
-    let Ok(cred) = stream.peer_cred() else { return };
-    let verdict = judge_peer(&ipc, &Peer { uid: cred.uid(), pid: cred.pid() }, exe_of_pid);
+async fn handle_conn(mut stream: UnixStream, peer: Peer, handshake: IpcPermit, admission: IpcAdmission, svc: Arc<FirewallService>, ipc: ExecutorIpc, log: Arc<dyn Fn(String) + Send + Sync>) {
+    let verdict = judge_peer(&ipc, &peer, exe_of_pid);
     if verdict != PeerVerdict::Ok {
         log(format!("firewall: connection refused: {verdict:?}"));
         svc.note("peer_refused", RESULT_DENIED, &format!("{verdict:?}"));
         return;
     }
     let authorized = [Authorized { public: ipc.gatekeeper_public.clone(), label: "gatekeeper".into(), rights: vec![] }];
-    let Ok(Ok((sec, _))) = tokio::time::timeout(Duration::from_secs(5), server_handshake(&mut stream, &ipc.key, &authorized, REKEY_EVERY)).await else {
+    let Ok(Ok((sec, who))) = tokio::time::timeout(IPC_HANDSHAKE_TIMEOUT, server_handshake(&mut stream, &ipc.key, &authorized, REKEY_EVERY)).await else {
         log("firewall: connection refused: handshake".into());
         svc.note("peer_refused", RESULT_DENIED, "handshake");
         return;
     };
+    let Some(_active) = admission.try_active(&who.public) else {
+        log("firewall: connection refused: active IPC capacity exhausted".into());
+        return;
+    };
+    drop(handshake);
     let (mut rd, mut wr) = stream.into_split();
-    while let Ok(msg) = read_msg(&mut rd).await {
-        let Ok(f) = sec.open(&msg) else { break };
-        let Ok(req) = Request::decode(&f) else { break }; // not in the language: the conversation ends
-        let out = match svc.handle(req).await {
-            Ok(None) => Frame::new(FW_OK, 0, vec![]),
-            Ok(Some(b)) => Frame::new(FW_ANSWER, 0, vec![b as u8]),
-            Err(r) => Frame::new(FW_REFUSED, 0, vec![r as u8]),
-        };
-        let Ok(m) = sec.seal(&out) else { break };
-        if write_msg(&mut wr, &m).await.is_err() {
-            break;
-        }
-    }
+    // FirewallClient deliberately uses one authenticated connection per typed request. Serving one
+    // request prevents a compromised caller from retaining capacity with an idle keep-alive.
+    let Ok(Ok(msg)) = tokio::time::timeout(IPC_REQUEST_TIMEOUT, read_msg(&mut rd)).await else { return };
+    let Ok(f) = sec.open(&msg) else { return };
+    let Ok(req) = Request::decode(&f) else { return }; // not in the language: the conversation ends
+    let out = match svc.handle(req).await {
+        Ok(None) => Frame::new(FW_OK, 0, vec![]),
+        Ok(Some(b)) => Frame::new(FW_ANSWER, 0, vec![b as u8]),
+        Err(r) => Frame::new(FW_REFUSED, 0, vec![r as u8]),
+    };
+    let Ok(m) = sec.seal(&out) else { return };
+    let _ = tokio::time::timeout(IPC_WRITE_TIMEOUT, write_msg(&mut wr, &m)).await;
 }
 
 /// the gatekeeper's way to ask
@@ -482,7 +500,7 @@ impl FirewallClient {
         let mut s = tokio::time::timeout(t, UnixStream::connect(&self.ipc.socket)).await??;
         let sec = tokio::time::timeout(t, client_handshake(&mut s, &self.ipc.key, &self.ipc.executor_public, REKEY_EVERY)).await??;
         let (mut rd, mut wr) = s.into_split();
-        write_msg(&mut wr, &sec.seal(&req.encode())?).await?;
+        tokio::time::timeout(t, write_msg(&mut wr, &sec.seal(&req.encode())?)).await??;
         let msg = tokio::time::timeout(t, read_msg(&mut rd)).await??;
         let f = sec.open(&msg)?;
         match f.kind {

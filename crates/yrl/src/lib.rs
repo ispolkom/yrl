@@ -8,6 +8,7 @@ pub mod enroll;
 pub mod exec;
 pub mod executor;
 pub mod ipc;
+pub mod ipc_admission;
 pub mod filewire;
 pub mod firewall;
 pub mod fshelper;

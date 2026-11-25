@@ -344,20 +344,26 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     let rid = if frame.kind == stepup::STEPUP_BEGIN { stepup::decode_begin(&frame.payload).map(|b| b.0).unwrap_or(0) } else { stepup::decode_msg(&frame.payload).map(|m| m.0).unwrap_or(0) };
                     if frame.kind == stepup::STEPUP_BEGIN {
                         root_ids.insert(rid);
+                    } else {
+                        root_ids.remove(&rid);
                     }
-                    if broker_pipe.is_none() {
+                    if broker_pipe.as_ref().is_some_and(mpsc::Sender::is_closed) {
+                        broker_pipe = None;
+                    }
+                    if broker_pipe.is_none() && frame.kind == stepup::STEPUP_BEGIN {
                         broker_pipe = match &cfg.broker {
                             Some(b) => open_broker(b, &who.public, &account, &session_rights, tx.clone()).await,
                             None => None,
                         };
                     }
-                    match &broker_pipe {
-                        Some(to_broker) => {
-                            let _ = to_broker.send(frame).await;
-                        }
-                        None => {
-                            let _ = tx.send(Frame::new(stepup::STEPUP_RESULT, 0, stepup::encode_result(rid, stepup::R_DENIED, ""))).await;
-                        }
+                    let sent = match &broker_pipe {
+                        Some(to_broker) => to_broker.send(frame).await.is_ok(),
+                        None => false,
+                    };
+                    if !sent {
+                        broker_pipe = None;
+                        root_ids.remove(&rid);
+                        let _ = tx.send(Frame::new(stepup::STEPUP_RESULT, 0, stepup::encode_result(rid, stepup::R_DENIED, ""))).await;
                     }
                     continue;
                 }
@@ -478,7 +484,7 @@ pub async fn open_session(g: &crate::ipc::GatekeeperIpc, key: &[u8], account: &s
     let mut stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&g.socket)).await.ok()?.ok()?;
     let sec = tokio::time::timeout(Duration::from_secs(5), crate::session::client_handshake(&mut stream, &g.key, &g.executor_public, REKEY_EVERY)).await.ok()?.ok()?;
     let (mut rd, mut wr) = stream.into_split();
-    write_msg(&mut wr, &sec.seal(&open_frame(key, account, rights).ok()?).ok()?).await.ok()?;
+    tokio::time::timeout(Duration::from_secs(5), write_msg(&mut wr, &sec.seal(&open_frame(key, account, rights).ok()?).ok()?)).await.ok()?.ok()?;
     let msg = tokio::time::timeout(Duration::from_secs(5), read_msg(&mut rd)).await.ok()?.ok()?;
     if sec.open(&msg).ok()?.kind != IPC_OK {
         return None;
@@ -486,22 +492,27 @@ pub async fn open_session(g: &crate::ipc::GatekeeperIpc, key: &[u8], account: &s
     let sec = Arc::new(sec);
     let (to_exec, mut from_gate) = mpsc::channel::<Frame>(64);
     let (to_gate, from_exec) = mpsc::channel::<Frame>(64);
-    let sec_r = sec.clone();
     tokio::spawn(async move {
-        while let Ok(m) = read_msg(&mut rd).await {
-            let Ok(f) = sec_r.open(&m) else { break };
-            if to_gate.send(f).await.is_err() {
-                break;
+        let sec_r = sec.clone();
+        let incoming = async {
+            while let Ok(m) = read_msg(&mut rd).await {
+                let Ok(f) = sec_r.open(&m) else { break };
+                if to_gate.send(f).await.is_err() {
+                    break;
+                }
             }
-        }
-    });
-    tokio::spawn(async move {
-        while let Some(f) = from_gate.recv().await {
-            let Ok(m) = sec.seal(&f) else { break };
-            if write_msg(&mut wr, &m).await.is_err() {
-                break;
+        };
+        let outgoing = async {
+            while let Some(f) = from_gate.recv().await {
+                let Ok(m) = sec.seal(&f) else { break };
+                if !matches!(tokio::time::timeout(Duration::from_secs(5), write_msg(&mut wr, &m)).await, Ok(Ok(()))) {
+                    break;
+                }
             }
-        }
+        };
+        // EOF, a blocked writer or cancellation tears down the whole local pipe so callers can
+        // observe Sender::is_closed and reconnect instead of retaining a half-dead Broker channel.
+        tokio::select! { _ = incoming => {}, _ = outgoing => {} }
     });
     Some((to_exec, from_exec))
 }
