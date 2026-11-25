@@ -165,6 +165,8 @@ Do not treat a secret port, SPA, or an untrusted relay as authentication. Device
 
 | Document | Purpose |
 |---|---|
+| [ROADMAP.md](ROADMAP.md) | accepted stage order and long-term product sequence |
+| [HANDOFF.md](HANDOFF.md) | implementation snapshot, security guarantees, tests, limits, and continuation guidance |
 | [DESIGN.md](docs/DESIGN.md) | product goals, architecture, streams, operations, and roadmap |
 | [WIRE.md](docs/WIRE.md) | Noise handshake and the original wire framing |
 | [THREATS.md](docs/THREATS.md) | security requirements mapped to tests |
