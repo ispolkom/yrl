@@ -1,12 +1,14 @@
 //! The file side of a transfer runs in a small helper process that has been given the identity of the account (the same `prepare` as for commands),
 //! so the operating system, not our code, decides what may be read or written. `yrld fs-helper` is that process; it talks to the server over its pipes:
-//!   in : `PUT <mode octal> <size> <hex blake3> <hex path>\n` then exactly (size - offset) bytes     out: `OFFSET <n>\n` ... `OK\n` | `ERR <code>\n`
+//!   in : `PUT <mode octal> <size> <hex blake3> <reservation token> <hex path>\n` then exactly (size - offset) bytes
+//!        out: `OFFSET <n>\n` ... `OK\n` | `ERR <code>\n`
 //!   in : `GET <offset> <hex path>\n`                                                                 out: `SIZE <n>\n` + (n - offset) bytes + `HASH <hex>\n` | `ERR <code>\n`
 //! The final file appears only by rename of `<path>.yrl-part` after the hash of the whole part file matched; the part file is opened without following symbolic links.
-use crate::filewire::{CHUNK, E_IO, E_OFFSET, E_OPEN, E_REQUEST, E_TOO_BIG, E_VERIFY};
+use crate::filewire::{CHUNK, E_IO, E_NO_SPACE, E_OFFSET, E_OPEN, E_REQUEST, E_TOO_BIG, E_VERIFY};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStringExt;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
@@ -52,7 +54,7 @@ pub fn main() -> i32 {
     let f: Vec<&str> = line.trim_end().split(' ').collect();
     let mut out = std::io::stdout().lock();
     let code = match (f.first().copied(), f.len()) {
-        (Some("PUT"), 5) => put(&f, &mut input, &mut out),
+        (Some("PUT"), 6) => put(&f, &mut input, &mut out),
         (Some("GET"), 3) => get(&f, &mut out),
         (Some("LS" | "STAT" | "RM" | "REAL"), 2) | (Some("MKDIR" | "MV"), 3) => crate::fsops::helper_command(&f, &mut out),
         _ => Err(E_REQUEST),
@@ -68,23 +70,34 @@ fn put(f: &[&str], input: &mut impl Read, out: &mut impl Write) -> Result<(), u1
     let mode = u32::from_str_radix(f[1], 8).map_err(|_| E_REQUEST)? & 0o777; // no setuid, setgid or sticky bit from the network
     let size: u64 = f[2].parse().map_err(|_| E_REQUEST)?;
     let want: [u8; 32] = hex::decode(f[3]).ok().and_then(|v| v.try_into().ok()).ok_or(E_REQUEST)?;
-    let path = hex_path(f[4]).ok_or(E_REQUEST)?;
+    let token: [u8; 16] = hex::decode(f[4]).ok().and_then(|v| v.try_into().ok()).ok_or(E_REQUEST)?;
+    let path = hex_path(f[5]).ok_or(E_REQUEST)?;
     if size > MAX_FILE_SIZE {
         return Err(E_TOO_BIG);
     }
     let part = part_of(&path);
-    let mut file = match OpenOptions::new().read(true).write(true).create(true).custom_flags(libc::O_NOFOLLOW).mode(0o600).open(&part) {
-        Ok(f) => f,
-        Err(_) => return Err(E_OPEN),
+    let (mut file, fresh) = match OpenOptions::new().read(true).write(true).create_new(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).mode(0o600).open(&part) {
+        Ok(f) => (f, true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&part).map_err(|_| E_OPEN)?, false),
+        Err(e) => return Err(io_code(&e)),
     };
     let meta = file.metadata().map_err(|_| E_IO)?;
-    // only a regular file of ours is resumed: not a device, not somebody else's file
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } {
+    // A private reservation tag prevents pathname aliases from sharing one quota. Requiring one
+    // link also prevents a hard link from turning cleanup/truncation into a write to another name.
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 {
         return Err(E_OPEN);
     }
+    if fresh {
+        if let Err(e) = set_tag(&file, &token) {
+            drop(file);
+            let _ = fs::remove_file(&part); // the file was just created exclusively and contains no user bytes
+            return Err(io_code(&e));
+        }
+    }
+    else if get_tag(&file).as_deref() != Some(token.as_slice()) { return Err(E_OPEN) }
     let have = if meta.len() > size { 0 } else { meta.len() };
     if have == 0 {
-        file.set_len(0).map_err(|_| E_IO)?;
+        file.set_len(0).map_err(|e| io_code(&e))?;
     }
     file.seek(SeekFrom::Start(have)).map_err(|_| E_IO)?;
     writeln!(out, "OFFSET {have}").and_then(|_| out.flush()).map_err(|_| E_IO)?;
@@ -95,10 +108,10 @@ fn put(f: &[&str], input: &mut impl Read, out: &mut impl Write) -> Result<(), u1
         if n == 0 {
             return Err(E_VERIFY); // the sender went away: what arrived stays for a resume
         }
-        file.write_all(&buf[..n]).map_err(|_| E_IO)?;
+        file.write_all(&buf[..n]).map_err(|e| io_code(&e))?;
         left -= n as u64;
     }
-    file.sync_data().map_err(|_| E_IO)?;
+    file.sync_data().map_err(|e| io_code(&e))?;
     let mut h = blake3::Hasher::new();
     hash_prefix(&mut file, size, &mut h).map_err(|_| E_IO)?;
     if *h.finalize().as_bytes() != want {
@@ -106,8 +119,31 @@ fn put(f: &[&str], input: &mut impl Read, out: &mut impl Write) -> Result<(), u1
         return Err(E_VERIFY);
     }
     file.set_permissions(fs::Permissions::from_mode(mode)).map_err(|_| E_IO)?;
-    fs::rename(&part, &path).map_err(|_| E_IO)?;
+    fs::rename(&part, &path).map_err(|e| io_code(&e))?;
+    remove_tag(&file).map_err(|_| E_IO)?;
     writeln!(out, "OK").map_err(|_| E_IO)
+}
+
+const TAG: &[u8] = b"user.yrl.partial\0";
+
+fn io_code(e: &std::io::Error) -> u16 {
+    if e.raw_os_error() == Some(libc::ENOSPC) || e.raw_os_error() == Some(libc::EDQUOT) { E_NO_SPACE } else { E_IO }
+}
+
+fn set_tag(file: &File, token: &[u8; 16]) -> std::io::Result<()> {
+    let r = unsafe { libc::fsetxattr(file.as_raw_fd(), TAG.as_ptr().cast(), token.as_ptr().cast(), token.len(), 0) };
+    if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+fn get_tag(file: &File) -> Option<Vec<u8>> {
+    let mut b = [0u8; 64];
+    let n = unsafe { libc::fgetxattr(file.as_raw_fd(), TAG.as_ptr().cast(), b.as_mut_ptr().cast(), b.len()) };
+    (n >= 0).then(|| b[..n as usize].to_vec())
+}
+
+fn remove_tag(file: &File) -> std::io::Result<()> {
+    let r = unsafe { libc::fremovexattr(file.as_raw_fd(), TAG.as_ptr().cast()) };
+    if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
 fn get(f: &[&str], out: &mut impl Write) -> Result<(), u16> {

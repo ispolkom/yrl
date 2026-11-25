@@ -30,6 +30,8 @@ pub struct ServerConfig {
     pub max_sessions_per_account: usize,
     /// shared Link-memory and active-operation admission for every session in this Executor
     pub resources: Arc<crate::resources::ResourceManager>,
+    /// persistent FILE_PUT reservations shared by every Executor session
+    pub disk: Option<Arc<crate::disk::DiskManager>>,
     pub sessions: Arc<Registry>,
     /// how this gatekeeper reaches its executor; None = start an executor inside this process on a private socket (single-process mode)
     pub gate: Option<crate::ipc::GatekeeperIpc>,
@@ -95,6 +97,9 @@ impl ServerConfig {
             max_sessions_per_key: 16,
             max_sessions_per_account: 16,
             resources: Arc::new(crate::resources::ResourceManager::default()),
+            // Opened only by Executor (or by single-process `ensure_executor`); Gatekeeper must not
+            // need read or write access to the persistent reservation ledger.
+            disk: None,
             sessions: Arc::new(Registry::default()),
             gate: None,
             lockouts: Arc::new(crate::stepup::Lockouts::default()),
@@ -129,6 +134,11 @@ impl ServerConfig {
     }
     pub fn set_resource_limits(&mut self, limits: crate::resources::ResourceLimits) -> Result<(), &'static str> {
         self.resources = Arc::new(crate::resources::ResourceManager::new(limits)?);
+        Ok(())
+    }
+    pub fn set_disk_limits(&mut self, limits: crate::disk::DiskLimits) -> anyhow::Result<()> {
+        let ledger = crate::ipc::state_dir(&self.dir, "exec").join("disk-reservations");
+        self.disk = Some(Arc::new(crate::disk::DiskManager::open(ledger, limits)?));
         Ok(())
     }
     pub(crate) fn log(&self, line: String) {
@@ -607,6 +617,9 @@ pub async fn serve_via_relay(relay_addr: String, me: KeyPair, mut cfg: ServerCon
 pub async fn ensure_executor(cfg: &mut ServerConfig) {
     if cfg.gate.is_some() {
         return;
+    }
+    if cfg.disk.is_none() {
+        cfg.set_disk_limits(crate::disk::DiskLimits::default()).expect("cannot open the Executor disk reservation ledger");
     }
     // the broker first (the executor is its client), then the executor
     let exec_key = cfg.exec_identity.clone().unwrap_or_else(crate::keys::generate);

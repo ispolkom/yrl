@@ -227,8 +227,13 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 match put {
                     Some(r) => {
                         let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
+                        let Some(disk) = cfg.disk.clone() else {
+                            let _ = tx.send(denied(fw::E_IO, b"disk admission unavailable", fid)).await;
+                            continue;
+                        };
+                        let (key, account) = (who.public.clone(), account.clone());
                         jobs.spawn(async move {
-                            files::put(r, t, helper, max_file_size, crx, tx2, cgroup).await;
+                            files::put(r, t, helper, max_file_size, disk, key, account, crx, tx2, cgroup).await;
                             drop(resource);
                         });
                     }
@@ -388,7 +393,7 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
     }
     drop(ptys); // every terminal gets its hangup
     drop(tunnels); // every tunnel is closed
-    drop(transfers); // every transfer is stopped; partial files stay for a resume
+    drop(transfers); // session end stops transfers; their RAII reservations safely remove managed partials
     if let Some(monitor) = overload_monitor {
         monitor.abort();
         let _ = monitor.await;

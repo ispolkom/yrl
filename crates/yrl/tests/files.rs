@@ -182,6 +182,15 @@ async fn f7_symbolic_links_cannot_be_used_to_write_elsewhere() {
     assert_eq!(code(&e), Some(fw::E_OPEN));
     assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
     std::fs::remove_file(part(&dst)).unwrap();
+    // A hard-linked partial is refused as well: cleanup/truncation must never affect its alias.
+    std::fs::write(part(&dst), b"precious partial").unwrap();
+    let alias = d.join("partial-alias");
+    std::fs::hard_link(part(&dst), &alias).unwrap();
+    let e = c.put_file(&src, &path_bytes(&dst), 0o600, W).await.unwrap_err();
+    assert_eq!(code(&e), Some(fw::E_OPEN));
+    assert_eq!(std::fs::read(&alias).unwrap(), b"precious partial");
+    std::fs::remove_file(part(&dst)).unwrap();
+    std::fs::remove_file(alias).unwrap();
     // the target is a link to the victim: the link is replaced, the victim is not written
     std::os::unix::fs::symlink(&victim, &dst).unwrap();
     c.put_file(&src, &path_bytes(&dst), 0o600, W).await.unwrap();
@@ -369,7 +378,8 @@ fn f15_the_helper_defends_itself_even_if_the_server_did_not() {
     let d = tempfile::tempdir().unwrap();
     let hexp = hex::encode(d.path().join("x").to_str().unwrap());
     let zero = "0".repeat(64);
-    assert_eq!(run(format!("PUT 600 {} {zero} {hexp}\n", (1u64 << 40) + 1).as_bytes()), (Some(0), format!("ERR {}", fw::E_TOO_BIG)));
+    let token = "00".repeat(16);
+    assert_eq!(run(format!("PUT 600 {} {zero} {token} {hexp}\n", (1u64 << 40) + 1).as_bytes()), (Some(0), format!("ERR {}", fw::E_TOO_BIG)));
     assert!(!d.path().join("x.yrl-part").exists(), "refused before anything was created");
     for bad in ["", "\n", "HELLO\n", "PUT\n", "PUT 600 1 zz 00\n", "PUT 9 1 00 00\n", "GET x y\n", "GET 0 \n", "GET 0 00\n", "GET 0 zz\n", "PUT 600 -1 aa bb\n"] {
         let (code, out) = run(bad.as_bytes());

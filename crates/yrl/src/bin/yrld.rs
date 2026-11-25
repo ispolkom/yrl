@@ -70,6 +70,7 @@ async fn serve(dir: &str, bind: &str, relay: Option<String>) -> anyhow::Result<(
     let me = keys::load(&dir)?;
     let mut cfg = server::ServerConfig::new(dir);
     cfg.set_resource_limits(yrl::resources::ResourceLimits::from_env()?).map_err(|e| anyhow::anyhow!(e))?;
+    cfg.set_disk_limits(yrl::disk::DiskLimits::from_env()?)?;
     match relay {
         // behind NAT: only dial out; the address `-` means no listening port at all
         Some(r) => {
@@ -150,6 +151,7 @@ async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let listener = yrl::ipc::bind_socket(&ipc.socket)?;
     let mut cfg = server::ServerConfig::new(dir.clone());
     cfg.set_resource_limits(yrl::resources::ResourceLimits::from_env()?).map_err(|e| anyhow::anyhow!(e))?;
+    cfg.set_disk_limits(yrl::disk::DiskLimits::from_env()?)?;
     cfg.exec_identity = Some(ipc.key.clone());
     cfg.session_cgroup_limits = yrl::cgroup::SessionLimits::from_env()?;
     cfg.lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&yrl::ipc::state_dir(&dir, "exec"), "sudo"));

@@ -23,6 +23,8 @@ pub const E_TOO_BIG: u16 = 10;
 pub const E_REQUEST: u16 = 11;
 pub const E_OFFSET: u16 = 12;
 pub const E_IO: u16 = 13;
+pub const E_QUOTA: u16 = 14;
+pub const E_NO_SPACE: u16 = 15;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PutReq {

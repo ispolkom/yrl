@@ -7,6 +7,7 @@ pub mod client_tun;
 pub mod enroll;
 pub mod exec;
 pub mod executor;
+pub mod disk;
 pub mod ipc;
 pub mod ipc_admission;
 pub mod filewire;

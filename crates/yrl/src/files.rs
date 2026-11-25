@@ -28,6 +28,8 @@ fn code_text(code: u16) -> &'static str {
         E_TOO_BIG => "the file is too big",
         E_REQUEST => "bad request",
         E_OFFSET => "offset beyond the end of the file",
+        E_QUOTA => "disk quota exhausted",
+        E_NO_SPACE => "not enough free disk space",
         _ => "input/output error",
     }
 }
@@ -56,17 +58,30 @@ fn helper_error(line: &str) -> u16 {
     line.strip_prefix("ERR ").and_then(|c| c.parse().ok()).unwrap_or(E_IO)
 }
 
-pub async fn put(req: PutReq, target: Target, helper: std::path::PathBuf, max_size: u64, mut rx: mpsc::Receiver<FileIn>, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) {
+#[allow(clippy::too_many_arguments)]
+pub async fn put(req: PutReq, target: Target, helper: std::path::PathBuf, max_size: u64, disk: std::sync::Arc<crate::disk::DiskManager>, key: Vec<u8>, account: String, mut rx: mpsc::Receiver<FileIn>, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) {
     let id = req.id;
     if req.size > max_size {
         let _ = tx.send(err(id, E_TOO_BIG, code_text(E_TOO_BIG))).await;
         return;
     }
+    let reservation = match disk.reserve(&key, &account, &target, &req.path, req.size) {
+        Ok(r) => r,
+        Err(crate::disk::Refusal::Quota | crate::disk::Refusal::Busy) => {
+            let _ = tx.send(err(id, E_QUOTA, code_text(E_QUOTA))).await; return;
+        }
+        Err(crate::disk::Refusal::NoSpace) => {
+            let _ = tx.send(err(id, E_NO_SPACE, code_text(E_NO_SPACE))).await; return;
+        }
+        Err(crate::disk::Refusal::State) => {
+            let _ = tx.send(err(id, E_IO, code_text(E_IO))).await; return;
+        }
+    };
     let Some((_child, mut stdin, mut out)) = spawn_helper(&helper, &target, cgroup.as_ref()).await else {
         let _ = tx.send(err(id, E_IO, code_text(E_IO))).await;
         return;
     };
-    let head = format!("PUT {:o} {} {} {}\n", req.mode, req.size, hex::encode(req.hash), hex::encode(&req.path));
+    let head = format!("PUT {:o} {} {} {} {}\n", req.mode, req.size, hex::encode(req.hash), reservation.token_hex(), hex::encode(&req.path));
     if stdin.write_all(head.as_bytes()).await.is_err() {
         let _ = tx.send(err(id, E_IO, code_text(E_IO))).await;
         return;
@@ -89,6 +104,7 @@ pub async fn put(req: PutReq, target: Target, helper: std::path::PathBuf, max_si
     loop {
         match rx.recv().await {
             Some(FileIn::Data(d)) => {
+                reservation.touch();
                 got += d.len() as u64;
                 if got > expected {
                     let _ = tx.send(err(id, E_VERIFY, "more data than announced")).await;
@@ -111,6 +127,7 @@ pub async fn put(req: PutReq, target: Target, helper: std::path::PathBuf, max_si
     drop(stdin);
     match read_line(&mut out).await.as_deref() {
         Some("OK") => {
+            reservation.complete();
             let _ = tx.send(Frame::new(FILE_END, 0, with_id(id, &[]))).await;
         }
         Some(l) => {
