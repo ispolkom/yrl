@@ -285,3 +285,26 @@ async fn s8_interactive_frames_pass_queued_file_data_without_losing_order() {
         assert_eq!(frame.payload[0], i as u8, "file chunks retain their original order");
     }
 }
+
+#[tokio::test]
+async fn s9_a_file_saturated_window_still_admits_interactive_input_within_the_same_memory_limit() {
+    let link = Link::new(4096);
+    for i in 0..3u8 {
+        link.push(&Frame::new(yrl::filewire::FILE_DATA, 0, vec![i; 1000])).await.unwrap();
+    }
+
+    let l2 = link.clone();
+    let blocked_file = tokio::spawn(async move { l2.push(&Frame::new(yrl::filewire::FILE_DATA, 0, vec![3; 1000])).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!blocked_file.is_finished(), "bulk data must stop before consuming the interactive reserve");
+
+    let l3 = link.clone();
+    let interactive = tokio::spawn(async move { l3.push(&Frame::new(yrl::wire::PTY_IN, 0, b"keypress".to_vec())).await });
+    tokio::time::timeout(Duration::from_millis(500), interactive).await.expect("interactive input must enter a bulk-saturated window").unwrap().unwrap();
+    let (frames, bytes) = link.unconfirmed();
+    assert_eq!(frames, 4);
+    assert!(bytes <= 4096, "the reserve must not increase the total memory bound: {bytes}");
+
+    link.close();
+    assert!(blocked_file.await.unwrap().is_err());
+}

@@ -119,7 +119,7 @@ async fn echo_server() -> (u16, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
-async fn direct_tcp_to_relay_preserves_terminal_file_transfer_and_tunnel() {
+async fn direct_tcp_to_relay_during_file_transfer_preserves_session_and_streams() {
     let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay_addr = relay_listener.local_addr().unwrap().to_string();
     let _relay = relay::serve(relay_listener, RelayConfig::default()).await;
@@ -151,12 +151,31 @@ async fn direct_tcp_to_relay_preserves_terminal_file_transfer_and_tunnel() {
 
     let source = r.dir.path().join("source");
     let target = r.dir.path().join("target");
-    let bytes = vec![0x5au8; 6 << 20];
+    let part = r.dir.path().join("target.yrl-part");
+    let bytes: Vec<u8> = (0..24 << 20).map(|i| (i as u32).wrapping_mul(2654435761) as u8).collect();
     std::fs::write(&source, &bytes).unwrap();
-    direct.refuse(true);
-    direct.cut();
-    c.put_file(&source, target.to_str().unwrap().as_bytes(), 0o600, W).await.unwrap();
-    assert_eq!(std::fs::read(target).unwrap(), bytes);
+    direct.set_delay(2);
+    let upload = c.put_file(&source, target.to_str().unwrap().as_bytes(), 0o600, W);
+    let interrupt = async {
+        let partial = tokio::time::timeout(W, async {
+            loop {
+                if let Ok(meta) = std::fs::metadata(&part) {
+                    if meta.len() >= 512 << 10 && meta.len() < bytes.len() as u64 {
+                        break meta.len();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("the server must receive part of the file over direct TCP before the cut");
+        direct.refuse(true);
+        direct.cut();
+        partial
+    };
+    let (transfer, partial_before_cut) = tokio::join!(upload, interrupt);
+    transfer.unwrap();
+    assert!(partial_before_cut > 0 && partial_before_cut < bytes.len() as u64);
+    let received = std::fs::read(target).unwrap();
+    assert_eq!(blake3::hash(&received), blake3::hash(&bytes), "the resumed transfer must finish with the source hash");
 
     pty.write(b"printf '\\120\\111\\104=%s \\115\\101\\122\\113=%s\\n' $$ \"$ROUTE_MARK\"\n").await.unwrap();
     let after = pty.read_until("MARK=relay-kept", W).await.unwrap();

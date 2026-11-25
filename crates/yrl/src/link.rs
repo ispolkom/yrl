@@ -24,6 +24,9 @@ pub const DEFAULT_WINDOW: usize = 8 << 20;
 /// the receiver confirms after this many frames, or after `ACK_DELAY` when it is idle
 const ACK_EVERY: u64 = 16;
 const ACK_DELAY: Duration = Duration::from_millis(20);
+/// Space that bulk/normal producers cannot consume, so one saturated file transfer cannot prevent
+/// control and interactive frames from entering the same globally bounded window.
+const MAX_INTERACTIVE_RESERVE: usize = 256 << 10;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum End {
@@ -120,6 +123,8 @@ impl Link {
     pub async fn push(&self, f: &Frame) -> Result<(), LinkClosed> {
         let inner = f.encode().map_err(|_| LinkClosed)?;
         let priority = priority(f);
+        let reserve = (self.window / 8).min(MAX_INTERACTIVE_RESERVE);
+        let limit = if priority == Priority::Interactive { self.window } else { self.window.saturating_sub(reserve) };
         loop {
             let notified = self.space.notified();
             tokio::pin!(notified);
@@ -130,7 +135,9 @@ impl Link {
                     return Err(LinkClosed);
                 }
                 let empty = s.unacked.is_empty() && s.pending_interactive.is_empty() && s.pending_normal.is_empty() && s.pending_bulk.is_empty();
-                if empty || s.bytes + inner.len() <= self.window {
+                // Keep the historical escape hatch for a configured window smaller than one legal frame.
+                // Otherwise every queue together remains within `window`, including the interactive reserve.
+                if s.bytes + inner.len() <= limit || (empty && inner.len() > self.window) {
                     s.bytes += inner.len();
                     match priority {
                         Priority::Interactive => s.pending_interactive.push_back(inner),
