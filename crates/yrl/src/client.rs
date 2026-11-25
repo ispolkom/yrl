@@ -6,7 +6,7 @@ use crate::session::{client_handshake, read_msg, write_msg, Secure, REKEY_EVERY}
 use crate::wire::{self, split_id, with_id, ExecReq, Frame};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
@@ -18,6 +18,45 @@ pub type BoxIo = Box<dyn Io>;
 type OwnedReadHalf = ReadHalf<BoxIo>;
 type OwnedWriteHalf = WriteHalf<BoxIo>;
 use tokio::sync::{mpsc, Mutex};
+
+/// A byte-stream route below Noise and the resumable session layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Udp,
+    Tcp,
+    Relay,
+}
+
+/// Bounded connection-manager counters. No addresses, keys, or account names are retained.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConnectionDiagnostics {
+    pub current: Option<Transport>,
+    pub last_rtt: Option<Duration>,
+    pub attempts_udp: u64,
+    pub attempts_tcp: u64,
+    pub attempts_relay: u64,
+    pub failures: u64,
+    pub disconnects: u64,
+    pub resumes: u64,
+    pub switches: u64,
+    pub last_end: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct Route {
+    transport: Transport,
+    address: String,
+}
+
+impl ConnectionDiagnostics {
+    fn attempted(&mut self, transport: Transport) {
+        match transport {
+            Transport::Udp => self.attempts_udp += 1,
+            Transport::Tcp => self.attempts_tcp += 1,
+            Transport::Relay => self.attempts_relay += 1,
+        }
+    }
+}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ExecResult {
@@ -41,8 +80,11 @@ pub struct ClientOptions {
     /// if the session cannot be resumed for this long it is considered lost
     pub give_up_after: Duration,
     pub window: usize,
+    /// total time allowed to establish the initial session over all configured routes
     pub connect_timeout: Duration,
-    /// reach the server through this relay (host:port) instead of directly; `addr` is then only a label
+    /// maximum time for one route attempt, including Noise and RESUME
+    pub route_timeout: Duration,
+    /// optional TCP relay route; direct routes remain available and are preferred
     pub relay: Option<String>,
     /// before every direct connection (and every reconnection) send the one datagram that asks the machine's firewall to let this address in
     pub knock: Option<Knock>,
@@ -69,6 +111,7 @@ impl Default for ClientOptions {
             give_up_after: Duration::from_secs(900),
             window: link::DEFAULT_WINDOW,
             connect_timeout: Duration::from_secs(10),
+            route_timeout: Duration::from_secs(3),
             relay: None,
             knock: None,
             udp: None,
@@ -76,27 +119,39 @@ impl Default for ClientOptions {
     }
 }
 
-/// a TCP connection to the server: direct, or to the relay with the meeting header in front (the key handshake then runs over it exactly as over a direct one)
-async fn open_stream(addr: &str, me: &KeyPair, server_public: &[u8], opts: &ClientOptions) -> Result<BoxIo> {
-    if opts.relay.is_none() {
-        if let Some(u) = &opts.udp {
-            if let Some(k) = &opts.knock {
-                knock(k, me, server_public, crate::spa::SERVICE_WORK).await?;
-            }
-            let sa = tokio::net::lookup_host(u.as_str()).await?.next().ok_or_else(|| anyhow::anyhow!("no such address"))?;
-            return Ok(Box::new(crate::udp::connect(sa).await?));
-        }
+fn configured_routes(addr: &str, opts: &ClientOptions) -> Vec<Route> {
+    let mut routes = Vec::with_capacity(3);
+    if let Some(udp) = &opts.udp {
+        routes.push(Route { transport: Transport::Udp, address: udp.clone() });
     }
-    match &opts.relay {
-        None => {
+    if !addr.is_empty() {
+        routes.push(Route { transport: Transport::Tcp, address: addr.to_string() });
+    }
+    if let Some(relay) = &opts.relay {
+        routes.push(Route { transport: Transport::Relay, address: relay.clone() });
+    }
+    routes
+}
+
+/// Opens one configured byte-stream route. Noise authentication is deliberately performed by the caller on every route.
+async fn open_stream(route: &Route, me: &KeyPair, server_public: &[u8], opts: &ClientOptions) -> Result<BoxIo> {
+    match route.transport {
+        Transport::Udp => {
             if let Some(k) = &opts.knock {
                 knock(k, me, server_public, crate::spa::SERVICE_WORK).await?;
             }
-            Ok(Box::new(tokio::time::timeout(opts.connect_timeout, TcpStream::connect(addr)).await??))
+            let sa = tokio::net::lookup_host(route.address.as_str()).await?.next().ok_or_else(|| anyhow::anyhow!("no such address"))?;
+            Ok(Box::new(crate::udp::connect(sa).await?))
         }
-        Some(relay) => {
+        Transport::Tcp => {
+            if let Some(k) = &opts.knock {
+                knock(k, me, server_public, crate::spa::SERVICE_WORK).await?;
+            }
+            Ok(Box::new(TcpStream::connect(&route.address).await?))
+        }
+        Transport::Relay => {
             use tokio::io::AsyncWriteExt;
-            let mut s = tokio::time::timeout(opts.connect_timeout, TcpStream::connect(relay)).await??;
+            let mut s = TcpStream::connect(&route.address).await?;
             s.write_all(&crate::relay::header(crate::relay::ROLE_CLIENT, &crate::relay::rendezvous_id(server_public))).await?;
             Ok(Box::new(s))
         }
@@ -116,14 +171,16 @@ struct Pre {
     rd: OwnedReadHalf,
     wr: OwnedWriteHalf,
     sec: Arc<Secure>,
+    route: usize,
 }
 
 #[derive(Clone)]
 struct Ident {
-    addr: String,
     me: KeyPair,
     server_public: Vec<u8>,
     opts: ClientOptions,
+    routes: Vec<Route>,
+    diagnostics: Arc<StdMutex<ConnectionDiagnostics>>,
 }
 
 pub struct Client {
@@ -136,6 +193,7 @@ pub struct Client {
     ident: Ident,
     running: std::sync::atomic::AtomicBool,
     lost: Arc<std::sync::atomic::AtomicBool>,
+    diagnostics: Arc<StdMutex<ConnectionDiagnostics>>,
 }
 
 enum Resume {
@@ -144,23 +202,37 @@ enum Resume {
     Transient,
 }
 
-async fn try_resume(id: &Ident, sid: &[u8], link: &link::Link) -> Resume {
+async fn try_resume(id: &Ident, route: usize, sid: &[u8], link: &link::Link, diagnostics: &StdMutex<ConnectionDiagnostics>) -> Resume {
     let o = &id.opts;
-    let Ok(mut stream) = open_stream(&id.addr, &id.me, &id.server_public, o).await else { return Resume::Transient };
-    let Ok(Ok(sec)) = tokio::time::timeout(o.connect_timeout, client_handshake(&mut stream, &id.me, &id.server_public, o.rekey_every)).await else { return Resume::Transient };
-    let sec = Arc::new(sec);
-    let (mut rd, mut wr) = tokio::io::split(stream);
-    let mut p = sid.to_vec();
-    p.extend_from_slice(&link.positions().1.to_be_bytes());
-    let Ok(m) = sec.seal(&Frame::new(link::RESUME, 0, p)) else { return Resume::Transient };
-    if write_msg(&mut wr, &m).await.is_err() {
+    let Some(selected) = id.routes.get(route) else { return Resume::Transient };
+    diagnostics.lock().unwrap().attempted(selected.transport);
+    let started = std::time::Instant::now();
+    let attempt = async {
+        let mut stream = open_stream(selected, &id.me, &id.server_public, o).await?;
+        let sec = client_handshake(&mut stream, &id.me, &id.server_public, o.rekey_every).await?;
+        let sec = Arc::new(sec);
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        let mut p = sid.to_vec();
+        p.extend_from_slice(&link.positions().1.to_be_bytes());
+        let m = sec.seal(&Frame::new(link::RESUME, 0, p))?;
+        write_msg(&mut wr, &m).await?;
+        let msg = read_msg(&mut rd).await?;
+        let f = sec.open(&msg)?;
+        Ok::<_, anyhow::Error>((rd, wr, sec, f))
+    };
+    let Ok(Ok((rd, wr, sec, f))) = tokio::time::timeout(o.route_timeout, attempt).await else {
+        let mut d = diagnostics.lock().unwrap();
+        d.failures += 1;
         return Resume::Transient;
-    }
-    let Ok(Ok(msg)) = tokio::time::timeout(o.connect_timeout, read_msg(&mut rd)).await else { return Resume::Transient };
-    let Ok(f) = sec.open(&msg) else { return Resume::Transient };
+    };
     match f.kind {
         link::RESUMED => match <[u8; 8]>::try_from(f.payload.as_slice()) {
-            Ok(b) => Resume::Ok(rd, wr, sec, u64::from_be_bytes(b)),
+            Ok(b) => {
+                let mut d = diagnostics.lock().unwrap();
+                d.current = Some(selected.transport);
+                d.last_rtt = Some(started.elapsed());
+                Resume::Ok(rd, wr, sec, u64::from_be_bytes(b))
+            }
             Err(_) => Resume::Transient,
         },
         link::RESUME_REFUSED => Resume::Refused,
@@ -172,32 +244,61 @@ async fn try_resume(id: &Ident, sid: &[u8], link: &link::Link) -> Resume {
 async fn manage(link: Arc<link::Link>, id: Ident, sid: Vec<u8>, first: Pre, sink: mpsc::Sender<Frame>, lost: Arc<std::sync::atomic::AtomicBool>) {
     let o = id.opts.clone();
     let dopt = link::DriveOptions { dead_after: o.dead_after, ping_every: Some(o.ping_every) };
-    let mut conn = Some((first.rd, first.wr, first.sec, 0u64));
+    let diagnostics = id.diagnostics.clone();
+    let first_route = first.route;
+    let mut conn = Some((first.rd, first.wr, first.sec, 0u64, first.route));
     let mut last_ok = std::time::Instant::now();
     let mut backoff = o.retry_min;
+    let mut next_route = (first_route + 1) % id.routes.len();
+    let mut failed_in_cycle = 0usize;
+    let mut previous_route = first_route;
     loop {
-        if let Some((rd, wr, sec, peer_expected)) = conn.take() {
+        if let Some((rd, wr, sec, peer_expected, route)) = conn.take() {
             let end = link::drive(&link, rd, wr, sec, sink.clone(), peer_expected, &dopt).await;
             if end == link::End::Closed || link.is_closed() {
                 break;
             }
+            {
+                let mut d = diagnostics.lock().unwrap();
+                d.current = None;
+                d.disconnects += 1;
+                d.last_end = Some(format!("{end:?}"));
+            }
+            previous_route = route;
+            next_route = (route + 1) % id.routes.len();
             last_ok = std::time::Instant::now();
             backoff = o.retry_min;
+            failed_in_cycle = 0;
         }
         if last_ok.elapsed() > o.give_up_after {
             lost.store(true, std::sync::atomic::Ordering::SeqCst);
             break;
         }
-        let jitter = Duration::from_millis(rand_ms(backoff.as_millis() as u64 / 4 + 1));
-        tokio::time::sleep(backoff + jitter).await;
-        backoff = (backoff * 2).min(o.retry_max);
-        match try_resume(&id, &sid, &link).await {
-            Resume::Ok(rd, wr, sec, e) => conn = Some((rd, wr, sec, e)),
+        if failed_in_cycle >= id.routes.len() {
+            let jitter = Duration::from_millis(rand_ms(backoff.as_millis() as u64 / 4 + 1));
+            tokio::time::sleep(backoff + jitter).await;
+            backoff = (backoff * 2).min(o.retry_max);
+            failed_in_cycle = 0;
+        }
+        let route = next_route;
+        next_route = (next_route + 1) % id.routes.len();
+        match try_resume(&id, route, &sid, &link, &diagnostics).await {
+            Resume::Ok(rd, wr, sec, e) => {
+                let mut d = diagnostics.lock().unwrap();
+                d.resumes += 1;
+                if route != previous_route {
+                    d.switches += 1;
+                }
+                drop(d);
+                conn = Some((rd, wr, sec, e, route));
+                backoff = o.retry_min;
+                failed_in_cycle = 0;
+            }
             Resume::Refused => {
                 lost.store(true, std::sync::atomic::Ordering::SeqCst); // the server no longer has this session
                 break;
             }
-            Resume::Transient => {}
+            Resume::Transient => failed_in_cycle += 1,
         }
     }
     link.close();
@@ -219,36 +320,69 @@ impl Client {
 
     /// connects and does the key handshake; the session starts with `login`
     pub async fn connect_opts(addr: &str, me: &KeyPair, server_public: &[u8], opts: ClientOptions) -> Result<Client> {
-        // through a relay the server may not be waiting yet: try again for a few seconds
+        let routes = configured_routes(addr, &opts);
+        if routes.is_empty() {
+            bail!("no connection routes configured");
+        }
+        let diagnostics = Arc::new(StdMutex::new(ConnectionDiagnostics::default()));
         let started = std::time::Instant::now();
-        let (stream, sec) = loop {
-            let attempt = async {
-                let mut stream = open_stream(addr, me, server_public, &opts).await?;
-                let sec = tokio::time::timeout(opts.connect_timeout, client_handshake(&mut stream, me, server_public, opts.rekey_every)).await??;
-                Ok::<_, anyhow::Error>((stream, sec))
+        let mut route = 0usize;
+        let mut last_error = None;
+        let (stream, sec, selected, rtt) = loop {
+            let selected = route;
+            let spec = &routes[selected];
+            diagnostics.lock().unwrap().attempted(spec.transport);
+            let attempt_started = std::time::Instant::now();
+            let remaining = opts.connect_timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("all connection routes timed out")));
             }
-            .await;
+            let attempt = async {
+                let mut stream = open_stream(spec, me, server_public, &opts).await?;
+                let sec = client_handshake(&mut stream, me, server_public, opts.rekey_every).await?;
+                Ok::<_, anyhow::Error>((stream, sec))
+            };
+            let attempt = tokio::time::timeout(opts.route_timeout.min(remaining), attempt).await;
             match attempt {
-                Ok(x) => break x,
-                Err(e) if (opts.relay.is_some() || opts.knock.is_some()) && started.elapsed() < opts.connect_timeout => {
-                    let _ = e;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(Ok((stream, sec))) => break (stream, sec, selected, attempt_started.elapsed()),
+                Ok(Err(e)) => last_error = Some(e),
+                Err(_) => last_error = Some(anyhow::anyhow!("route {:?} timed out", spec.transport)),
+            }
+            diagnostics.lock().unwrap().failures += 1;
+            route = (route + 1) % routes.len();
+            if route == 0 {
+                let remaining = opts.connect_timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Err(last_error.unwrap());
                 }
-                Err(e) => return Err(e),
+                tokio::time::sleep(Duration::from_millis(100).min(remaining)).await;
             }
         };
+        {
+            let mut d = diagnostics.lock().unwrap();
+            d.current = Some(routes[selected].transport);
+            d.last_rtt = Some(rtt);
+        }
         let (rd, wr) = tokio::io::split(stream);
         let (pong_tx, pong_rx) = mpsc::channel(16);
+        let ident = Ident {
+            me: me.clone(),
+            server_public: server_public.to_vec(),
+            opts: opts.clone(),
+            routes,
+            diagnostics: diagnostics.clone(),
+        };
         Ok(Client {
             link: link::Link::new(opts.window),
             waiting: Arc::new(Mutex::new(HashMap::new())),
             pongs: Mutex::new(pong_rx),
             pong_tx,
             next_id: std::sync::atomic::AtomicU64::new(1),
-            pre: Mutex::new(Some(Pre { rd, wr, sec: Arc::new(sec) })),
-            ident: Ident { addr: addr.to_string(), me: me.clone(), server_public: server_public.to_vec(), opts },
+            pre: Mutex::new(Some(Pre { rd, wr, sec: Arc::new(sec), route: selected })),
+            ident,
             running: std::sync::atomic::AtomicBool::new(false),
             lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            diagnostics,
         })
     }
 
@@ -259,7 +393,12 @@ impl Client {
 
     /// (next to send, next expected) and (unconfirmed frames, bytes) of this side - for diagnostics
     pub fn link_state(&self) -> String {
-        format!("pos={:?} unconfirmed={:?} closed={}", self.link.positions(), self.link.unconfirmed(), self.link.is_closed())
+        format!("transport={:?} pos={:?} unconfirmed={:?} closed={}", self.connection_diagnostics().current, self.link.positions(), self.link.unconfirmed(), self.link.is_closed())
+    }
+
+    /// Current route and bounded recovery counters. The snapshot contains no peer address or identity data.
+    pub fn connection_diagnostics(&self) -> ConnectionDiagnostics {
+        self.diagnostics.lock().unwrap().clone()
     }
 
     /// true once the server no longer has the session (it expired, or the link was impossible to restore for too long)
