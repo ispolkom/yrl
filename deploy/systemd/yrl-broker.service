@@ -17,6 +17,7 @@ CapabilityBoundingSet=
 ReadWritePaths=/var/lib/yrl/broker /run/yrl/broker
 RestrictAddressFamilies=AF_UNIX
 NoNewPrivileges=yes
+KillMode=control-group
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

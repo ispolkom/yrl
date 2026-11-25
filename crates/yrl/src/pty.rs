@@ -1,6 +1,6 @@
 //! An interactive terminal: the user's own login shell on a pseudo-terminal. Input and output are plain bytes (the terminal's own line discipline handles Ctrl-C, Ctrl-Z, echo),
 //! window size changes are separate frames. When the link or the session ends the shell gets a hangup and, if it ignores it, a kill.
-use crate::exec::prepare;
+use crate::exec::{prepare, ProcessGroup};
 use crate::identity::{usable_shell, Target};
 use crate::wire::{self, with_id, Frame};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -104,6 +104,7 @@ pub async fn run(id: u64, rows: u16, cols: u16, term: String, target: Target, mu
     drop(slave);
     drop(cmd);
     let pid = child.id().unwrap_or(0) as i32;
+    let mut group = ProcessGroup::new(child.id());
     let Ok(fd) = AsyncFd::new(Master(master)) else { return };
     let mut buf = vec![0u8; CHUNK];
     let mut exited: Option<std::process::ExitStatus> = None;
@@ -150,13 +151,14 @@ pub async fn run(id: u64, rows: u16, cols: u16, term: String, target: Target, mu
         match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
             Ok(st) => exited = st.ok(),
             Err(_) => {
-                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                group.kill();
                 exited = child.wait().await.ok();
             }
         }
     } else if pid > 0 {
         unsafe { libc::kill(-pid, libc::SIGHUP) }; // background jobs of an ended shell
     }
+    group.kill(); // also stop descendants after a shell that has already exited
     let code = exited.map(|s| s.code().unwrap_or_else(|| 128 + std::os::unix::process::ExitStatusExt::signal(&s).unwrap_or(0))).unwrap_or(-1);
     let _ = tx.send(Frame::new(wire::PTY_EXIT, 0, with_id(id, &code.to_be_bytes()))).await;
 }

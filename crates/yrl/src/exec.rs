@@ -13,6 +13,24 @@ pub const MAX_TIMEOUT_MS: u32 = 3_600_000;
 pub const MAX_OUTPUT: usize = 64 << 20;
 const CHUNK: usize = 16 * 1024;
 
+/// The child is the leader of its own process group. Killing the group on drop also covers
+/// cancellation of the async task when a session is closed or its authority is revoked.
+pub(crate) struct ProcessGroup(i32);
+
+impl ProcessGroup {
+    pub(crate) fn new(pid: Option<u32>) -> Self { Self(pid.unwrap_or(0) as i32) }
+    pub(crate) fn kill(&mut self) {
+        if self.0 > 0 {
+            unsafe { libc::kill(-self.0, libc::SIGKILL) };
+            self.0 = 0;
+        }
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) { self.kill(); }
+}
+
 pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>) {
     let id = req.request_id;
     let err = |code: u16, text: &str| {
@@ -23,6 +41,12 @@ pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>) {
     let prog = std::ffi::OsStr::from_bytes(&req.argv[0]);
     let mut cmd = Command::new(prog);
     cmd.args(req.argv[1..].iter().map(|a| std::ffi::OsStr::from_bytes(a))).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 { return Err(std::io::Error::last_os_error()); }
+            Ok(())
+        });
+    }
     prepare(&mut cmd, &target);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -31,6 +55,7 @@ pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>) {
             return;
         }
     };
+    let mut group = ProcessGroup::new(child.id());
     let (so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     let budget = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let pump = |mut r: tokio::process::ChildStdout, kind: u8, tx: mpsc::Sender<Frame>, budget: std::sync::Arc<std::sync::atomic::AtomicUsize>| async move {
@@ -74,14 +99,14 @@ pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>) {
     let (code, note) = match waited {
         Ok(Ok(status)) => (status.code().unwrap_or(-1), None),
         _ => {
-            let _ = child.start_kill();
+            group.kill();
             let _ = child.wait().await;
             (-1, Some((3u16, "timed out and killed")))
         }
     };
+    group.kill(); // descendants may still hold stdout/stderr after the leader exits
     let over = out_task.await.unwrap_or(false) | err_task.await.unwrap_or(false);
     if over {
-        let _ = child.start_kill();
         let _ = tx.send(err(4, "output limit exceeded")).await;
     }
     if let Some((c, t)) = note {

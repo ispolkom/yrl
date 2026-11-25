@@ -205,6 +205,7 @@ fn i5_the_unit_files_agree_with_the_table() {
         assert_eq!(exec.len(), 1);
         assert!(exec[0].starts_with(&format!("/usr/local/bin/yrld {prog} /var/lib/yrl")), "{file}: {}", exec[0]);
         assert_eq!(val(&t, "NoNewPrivileges"), vec!["yes"], "{file}");
+        assert_eq!(val(&t, "KillMode"), vec!["control-group"], "{file}: stop must include descendants");
         let rw: BTreeSet<String> = words(val(&t, "ReadWritePaths"));
         assert_eq!(rw, writes.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>(), "{file}: where it may write");
         if file != "yrl-executor.service" {

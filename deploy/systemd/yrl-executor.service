@@ -17,6 +17,7 @@ Restart=on-failure
 RestartSec=2
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 NoNewPrivileges=yes
+KillMode=control-group
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

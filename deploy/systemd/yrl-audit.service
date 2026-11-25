@@ -16,6 +16,7 @@ CapabilityBoundingSet=
 ReadWritePaths=/var/lib/yrl/audit /run/yrl/audit
 RestrictAddressFamilies=AF_UNIX
 NoNewPrivileges=yes
+KillMode=control-group
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

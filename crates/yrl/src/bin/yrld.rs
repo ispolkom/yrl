@@ -132,6 +132,7 @@ async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
     cfg.lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&yrl::ipc::state_dir(&dir, "exec"), "sudo"));
     cfg.broker = yrl::ipc::load_executor_to_broker(&dir).ok(); // without a broker every ROOT step-up is refused
     cfg.audit.exec = yrl::ipc::audit_client(&dir, "executor"); // reports to the audit process, if one has been set up
+    if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply_executor()?; }
     eprintln!("[yrld] executor ready on {}", ipc.socket.display());
     yrl::executor::serve_ipc(listener, cfg, ipc).await;
     Ok(())
@@ -191,6 +192,14 @@ async fn gatekeeper(dir: &str, bind: &str, relay: Option<String>, a: &[String]) 
 
 fn sandbox_selftest() -> i32 {
     let before = std::process::Command::new("/bin/true").status().is_ok();
+    let (go, ready) = std::sync::mpsc::channel();
+    let (report, checked) = std::sync::mpsc::channel();
+    let existing = std::thread::spawn(move || {
+        if ready.recv().is_ok() {
+            let (_, mode) = yrl::sandbox::status();
+            let _ = report.send(mode == 2 && std::process::Command::new("/bin/true").status().is_err());
+        }
+    });
     if let Err(e) = yrl::sandbox::apply() {
         println!("apply failed: {e}");
         return 2;
@@ -200,9 +209,15 @@ fn sandbox_selftest() -> i32 {
     let read_ok = std::fs::read_to_string("/proc/self/status").is_ok();
     let sock_ok = std::os::unix::net::UnixListener::bind("/tmp/.yrl-selftest.sock").map(|_| { let _ = std::fs::remove_file("/tmp/.yrl-selftest.sock"); }).is_ok();
     let tcp_ok = std::net::TcpListener::bind("127.0.0.1:0").is_ok();
-    let thread_ok = std::thread::spawn(|| 7).join().ok() == Some(7);
+    let thread_ok = std::thread::spawn(|| {
+        let (_, mode) = yrl::sandbox::status();
+        mode == 2 && std::process::Command::new("/bin/true").status().is_err()
+    }).join().unwrap_or(false);
+    let _ = go.send(());
+    let existing_thread_ok = checked.recv().unwrap_or(false);
+    let _ = existing.join();
     let setuid_blocked = unsafe { libc::setuid(12345) } != 0;
-    println!("before_exec={before} nnp={nnp} seccomp={mode} exec_after_ok={} read={read_ok} unix={sock_ok} tcp={tcp_ok} thread={thread_ok} setuid_blocked={setuid_blocked}", exec_after.is_ok());
+    println!("before_exec={before} nnp={nnp} seccomp={mode} exec_after_ok={} read={read_ok} unix={sock_ok} tcp={tcp_ok} thread={thread_ok} existing_thread={existing_thread_ok} setuid_blocked={setuid_blocked}", exec_after.is_ok());
     0
 }
 
@@ -218,6 +233,7 @@ async fn broker(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let mut cfg = server::ServerConfig::new(dir.clone());
     cfg.root_lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&yrl::ipc::state_dir(&dir, "broker"), "root"));
     cfg.audit.broker = yrl::ipc::audit_client(&dir, "broker");
+    if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply()?; }
     yrl::broker::serve_ipc(listener, cfg, ipc).await;
     Ok(())
 }
@@ -269,6 +285,7 @@ async fn audit(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let svc = yrl::audit::AuditService::open(&dir, every)?; // refuses to start on a journal that does not verify
     let ipc = yrl::ipc::load_audit(&dir, uid)?;
     let listener = yrl::ipc::bind_socket(&ipc.socket)?;
+    if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply()?; }
     eprintln!("[yrld] audit ready on {}", ipc.socket.display());
     let s2 = svc.clone();
     tokio::spawn(async move {
@@ -366,6 +383,7 @@ async fn firewall(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let ipc = yrl::ipc::load_firewall(&dir, opt("--gate-uid").map(|u| yrl::ipc::uid_arg(&u)).transpose()?, peer_exe(&opt("--gate-exe"))?)?;
     let listener = yrl::ipc::bind_socket(&ipc.socket)?;
     eprintln!("[yrld] firewall ready on {}", ipc.socket.display());
+    if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply_firewall()?; }
     yrl::firewall::serve_ipc(listener, svc, ipc, std::sync::Arc::new(|m| eprintln!("[yrld] {m}"))).await;
     Ok(())
 }

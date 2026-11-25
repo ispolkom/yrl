@@ -18,7 +18,9 @@ async fn device_revocation_ends_a_live_terminal_and_running_command() {
     pty.write(b"echo ready\n").await.unwrap();
     pty.read_until("ready", T).await.unwrap();
     let marker = r.dir.path().join("revoked-command-ran");
-    let script = format!("sleep 8; touch {}", marker.display());
+    // The background child must die as well, even though killing only /bin/sh would make the
+    // request fail and could otherwise leave this child running after the revoked session.
+    let script = format!("(sleep 4; touch {}) & wait", marker.display());
     let args: [&[u8]; 3] = [b"/bin/sh", b"-c", script.as_bytes()];
     let pending = c.exec(&args, 15_000, Duration::from_secs(12));
     tokio::pin!(pending);
@@ -30,8 +32,8 @@ async fn device_revocation_ends_a_live_terminal_and_running_command() {
     gone(&r).await;
     assert!(tokio::time::timeout(Duration::from_secs(6), &mut pending).await.unwrap().is_err());
     assert!(tokio::time::timeout(Duration::from_secs(6), pty.next()).await.is_ok());
-    tokio::time::sleep(Duration::from_secs(9)).await;
-    assert!(!marker.exists(), "a command kept running after its device was revoked");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(!marker.exists(), "a command descendant kept running after its device was revoked");
 }
 
 #[tokio::test]

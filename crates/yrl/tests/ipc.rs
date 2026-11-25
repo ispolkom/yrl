@@ -265,7 +265,7 @@ async fn g11_the_gatekeeper_and_the_executor_as_two_separate_programs() {
     let status = std::fs::read_to_string(format!("/proc/{}/status", procs.0[1].id())).unwrap();
     assert!(status.contains("NoNewPrivs:\t1") && status.contains("Seccomp:\t2"), "{status}");
     let exec_status = std::fs::read_to_string(format!("/proc/{}/status", procs.0[0].id())).unwrap();
-    assert!(exec_status.contains("Seccomp:\t0"), "the executor must NOT be walled in: it has to start programs");
+    assert!(exec_status.contains("NoNewPrivs:\t1") && exec_status.contains("Seccomp:\t2"), "the executor must have its command-capable seccomp policy: {exec_status}");
     let addr = format!("127.0.0.1:{port}");
     let c = yrl::client::Client::connect_pinned(&addr, &client, &server_pub, &executor_pub, T).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
@@ -284,8 +284,34 @@ fn g12_the_wall_around_the_gatekeeper_stops_what_it_never_needs_and_nothing_else
     let o = std::process::Command::new(env!("CARGO_BIN_EXE_yrld")).arg("sandbox-selftest").output().unwrap();
     let out = String::from_utf8_lossy(&o.stdout).to_string();
     assert!(o.status.success(), "{out}");
-    for want in ["before_exec=true", "nnp=true", "seccomp=2", "exec_after_ok=false", "read=true", "unix=true", "tcp=true", "thread=true", "setuid_blocked=true"] {
+    for want in ["before_exec=true", "nnp=true", "seccomp=2", "exec_after_ok=false", "read=true", "unix=true", "tcp=true", "thread=true", "existing_thread=true", "setuid_blocked=true"] {
         assert!(out.contains(want), "{want} missing in: {out}");
+    }
+}
+
+#[test]
+fn g16_the_firewall_process_has_a_thread_wide_syscall_wall() {
+    use std::process::{Command, Stdio};
+    let dir = tempfile::tempdir().unwrap();
+    let sd = dir.path().join("srv");
+    let yrld = env!("CARGO_BIN_EXE_yrld");
+    assert!(Command::new(yrld).args(["init", sd.to_str().unwrap()]).stdout(Stdio::null()).status().unwrap().success());
+    let mut procs = Procs(vec![Command::new(yrld).args(["firewall", sd.to_str().unwrap(), "--ports", "23001", "--backend", "mock"])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()]);
+    for _ in 0..100 {
+        if sd.join("firewall.sock").exists() { break; }
+        assert!(procs.0[0].try_wait().unwrap().is_none(), "firewall stopped during startup");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(sd.join("firewall.sock").exists(), "firewall did not start");
+    let status_path = format!("/proc/{}/status", procs.0[0].id());
+    for _ in 0..100 {
+        if std::fs::read_to_string(&status_path).unwrap().contains("Seccomp:\t2") { break; }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for task in std::fs::read_dir(format!("/proc/{}/task", procs.0[0].id())).unwrap() {
+        let status = std::fs::read_to_string(task.unwrap().path().join("status")).unwrap();
+        assert!(status.contains("NoNewPrivs:\t1") && status.contains("Seccomp:\t2"), "{status}");
     }
 }
 
