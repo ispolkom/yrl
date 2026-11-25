@@ -360,3 +360,43 @@ async fn g13_a_recorded_conversation_played_back_opens_nothing() {
     let _ = tokio::time::timeout(Duration::from_secs(2), s.read_to_end(&mut got)).await;
     assert!(got.len() <= first_reply_len, "after the handshake answer the executor said nothing ({} bytes, the handshake answer is {})", got.len(), first_reply_len);
 }
+
+// These two tests describe the required Client <-> Executor boundary. They are ignored until the
+// end-to-end channel exists because both deliberately fail against the current IPC_OPEN protocol.
+// Run them explicitly with: cargo test -p yrl --test ipc gatekeeper_impersonation -- --ignored
+
+#[tokio::test]
+#[ignore = "known vulnerability: IPC_OPEN trusts the gatekeeper's claim about the client key and account"]
+async fn g14_gatekeeper_impersonation_without_the_client_private_key_or_password_is_refused() {
+    let r = rig("exec").await;
+    let (gate, _executor) = executor_of(&r, |_| {}).await;
+
+    // A captured gatekeeper needs only public configuration. It neither performs a client Noise
+    // handshake nor knows the account password, yet the current Executor accepts its assertion.
+    let claimed_public = yrl::keys::read_authorized(&r.server_dir().join("authorized_keys"))[0].public.clone();
+    let forged = open_session(&gate, &claimed_public, "anna", &rights(&["exec"])).await;
+    assert!(forged.is_none(), "Executor accepted an asserted identity without end-to-end proof of the client private key or password");
+}
+
+#[tokio::test]
+#[ignore = "known vulnerability: a gatekeeper-authenticated IPC peer can inject ordinary user operations"]
+async fn g15_gatekeeper_impersonation_cannot_inject_an_exec_operation() {
+    let r = rig("exec").await;
+    let (gate, _executor) = executor_of(&r, |_| {}).await;
+    let claimed_public = yrl::keys::read_authorized(&r.server_dir().join("authorized_keys"))[0].public.clone();
+    let (to_executor, mut from_executor) = open_session(&gate, &claimed_public, "anna", &rights(&["exec"])).await.expect("current architecture accepts the forged session");
+
+    let marker = r.dir.path().join("injected-by-gatekeeper");
+    let path = marker.as_os_str().as_encoded_bytes().to_vec();
+    let request = yrl::wire::ExecReq { request_id: 91, timeout_ms: 5_000, argv: vec![b"/usr/bin/touch".to_vec(), path] };
+    to_executor.send(Frame::new(wire::EXEC_REQ, 0, request.encode().unwrap())).await.unwrap();
+    tokio::time::timeout(W, async {
+        while let Some(frame) = from_executor.recv().await {
+            if frame.kind == wire::EXIT || frame.kind == wire::ERROR {
+                break;
+            }
+        }
+    }).await.unwrap();
+
+    assert!(!marker.exists(), "Executor ran an operation created by Gatekeeper rather than authenticated end-to-end from Client");
+}
