@@ -226,6 +226,8 @@ async fn check_password(cfg: &ServerConfig, login: Vec<u8>, mut password: Vec<u8
 pub struct SessionEntry {
     link: Arc<Link>,
     key: Vec<u8>,
+    account: String,
+    auth: crate::executor::AuthSnapshot,
     inbound: Mutex<Option<mpsc::Sender<Frame>>>,
     attach_gen: std::sync::atomic::AtomicU64,
 }
@@ -368,7 +370,7 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                 let sid: [u8; link::SID_LEN] = b[..link::SID_LEN].try_into().unwrap();
                 let client_expected = u64::from_be_bytes(b[link::SID_LEN..].try_into().unwrap());
                 match cfg.sessions.get(&sid) {
-                    Some(e) if e.key == who.public && !e.link.is_closed() && client_expected <= e.link.positions().0 => {
+                    Some(e) if e.key == who.public && !e.link.is_closed() && client_expected <= e.link.positions().0 && crate::executor::auth_snapshot(&cfg.dir, &e.key, &e.account).as_ref() == Some(&e.auth) => {
                         let reply = e.link.positions().1.to_be_bytes().to_vec();
                         if !send_plain(&mut wr, &sec, Frame::new(link::RESUMED, 0, reply)).await {
                             return;
@@ -418,16 +420,37 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                     }
                     // This code runs in Executor. Identity and rights came from the authenticated
                     // inner channel and are checked against Executor-owned files here.
+                    let Some(auth) = crate::executor::auth_snapshot(&cfg.dir, &who.public, &typed_login) else { return };
                     let Some((to_exec, mut from_exec)) = crate::executor::direct_session(&cfg, &who.public, &typed_login, &eff).await else {
                         cfg.log(format!("login refused via '{}': executor authorization failed", who.label));
                         let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
                         return;
                     };
+                    if crate::executor::auth_snapshot(&cfg.dir, &who.public, &typed_login).as_ref() != Some(&auth) { return }
                     let sid = new_sid();
                     let link = Link::new(cfg.link_window);
                     let (in_tx, mut in_rx) = mpsc::channel::<Frame>(64);
-                    let entry = Arc::new(SessionEntry { link: link.clone(), key: who.public.clone(), inbound: Mutex::new(Some(in_tx)), attach_gen: Default::default() });
+                    let entry = Arc::new(SessionEntry { link: link.clone(), key: who.public.clone(), account: typed_login, auth, inbound: Mutex::new(Some(in_tx)), attach_gen: Default::default() });
                     cfg.sessions.map.lock().unwrap().insert(sid, entry.clone());
+                    let (watch, watch_cfg) = (entry.clone(), cfg.clone());
+                    tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(Duration::from_millis(200));
+                        loop {
+                            tick.tick().await;
+                            if watch.link.is_closed() { break }
+                            if crate::executor::auth_snapshot(&watch_cfg.dir, &watch.key, &watch.account).as_ref() != Some(&watch.auth) {
+                                watch_cfg.log("session ended: device or account authorization changed".into());
+                                let _ = tokio::time::timeout(Duration::from_millis(200), watch.link.push(&Frame::new(wire::CLOSE, 0, vec![]))).await;
+                                for _ in 0..10 {
+                                    if watch.link.unconfirmed().0 == 0 { break }
+                                    tokio::time::sleep(Duration::from_millis(20)).await;
+                                }
+                                watch.end();
+                                watch_cfg.sessions.remove(&sid);
+                                break;
+                            }
+                        }
+                    });
                     // what the client sends goes to the executor, what the executor says goes to the client; when either end of the pipe is gone the session is over
                     let l2 = link.clone();
                     let (e2, cfg2) = (entry.clone(), cfg.clone());

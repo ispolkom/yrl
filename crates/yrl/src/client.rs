@@ -482,10 +482,15 @@ impl Client {
         }
         let pre = guard.take().unwrap();
         let (sink, mut inbound) = mpsc::channel::<Frame>(256);
-        let (waiting, pong_tx) = (self.waiting.clone(), self.pong_tx.clone());
+        let (waiting, pong_tx, lost, link) = (self.waiting.clone(), self.pong_tx.clone(), self.lost.clone(), self.link.clone());
         tokio::spawn(async move {
             while let Some(f) = inbound.recv().await {
                 match f.kind {
+                    wire::CLOSE => {
+                        lost.store(true, std::sync::atomic::Ordering::SeqCst);
+                        link.close();
+                        break;
+                    }
                     wire::PONG => {
                         let _ = pong_tx.send(f).await;
                     }

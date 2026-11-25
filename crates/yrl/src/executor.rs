@@ -23,6 +23,24 @@ use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Semaphore};
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AuthSnapshot {
+    key_rights: Vec<String>,
+    account_rights: Vec<String>,
+    password_hash: String,
+    os_user: Option<String>,
+}
+
+pub(crate) fn auth_snapshot(dir: &std::path::Path, key: &[u8], account: &str) -> Option<AuthSnapshot> {
+    let k = read_authorized(&dir.join("authorized_keys")).into_iter().find(|a| a.public == key)?;
+    let u = read_users(&dir.join("users")).into_iter().find(|u| u.login == account)?;
+    let mut key_rights = k.rights;
+    let mut account_rights = u.rights;
+    key_rights.sort();
+    account_rights.sort();
+    Some(AuthSnapshot { key_rights, account_rights, password_hash: u.phc, os_user: u.os_user })
+}
+
 fn denied(code: u16, text: &[u8], id: u64) -> Frame {
     let mut p = code.to_be_bytes().to_vec();
     p.extend_from_slice(text);
@@ -30,7 +48,7 @@ fn denied(code: u16, text: &[u8], id: u64) -> Frame {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: String, key: Vec<u8>, exec_key: crate::keys::KeyPair, session_rights: Vec<String>, target: Target, mut inbound: mpsc::Receiver<Frame>, tx: mpsc::Sender<Frame>) {
+pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: String, key: Vec<u8>, exec_key: crate::keys::KeyPair, session_rights: Vec<String>, target: Target, auth: AuthSnapshot, mut inbound: mpsc::Receiver<Frame>, tx: mpsc::Sender<Frame>) {
     let who = crate::keys::Authorized { public: key, label, rights: vec![] };
     static SESSION_NO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let session_no = SESSION_NO.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -47,7 +65,10 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
     let mut ptys: std::collections::HashMap<u64, mpsc::Sender<PtyCmd>> = std::collections::HashMap::new();
     let mut transfers: std::collections::HashMap<u64, mpsc::Sender<FileIn>> = std::collections::HashMap::new();
     let mut tunnels: std::collections::HashMap<u64, mpsc::Sender<TunIn>> = std::collections::HashMap::new();
+    let mut jobs = tokio::task::JoinSet::new();
     while let Some(frame) = inbound.recv().await {
+        while jobs.try_join_next().is_some() {}
+        if auth_snapshot(&cfg.dir, &who.public, &account).as_ref() != Some(&auth) { break }
         match frame.kind {
             wire::PING => {
                 let _ = tx.send(Frame::new(wire::PONG, frame.stream, frame.payload)).await;
@@ -75,7 +96,7 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 }
                 let tx2 = tx.clone();
                 let Some(t) = target.clone() else { break };
-                tokio::spawn(async move {
+                jobs.spawn(async move {
                     exec::run(req, t, tx2).await;
                     drop(permit);
                 });
@@ -102,7 +123,7 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 cfg.log(format!("terminal started via '{}'", who.label));
                 cfg.rec(1, ev("pty", RESULT_OK).target("shell").request(pid));
                 let (term, tx2) = (pty::clean_term(term), tx.clone());
-                tokio::spawn(pty::run(pid, rows, cols, term, t, crx, tx2));
+                jobs.spawn(pty::run(pid, rows, cols, term, t, crx, tx2));
             }
             wire::PTY_IN => {
                 let Ok((pid, data)) = split_id(&frame.payload) else { break };
@@ -159,11 +180,11 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 let (tx2, helper) = (tx.clone(), cfg.helper.clone());
                 match put {
                     Some(r) => {
-                        tokio::spawn(files::put(r, t, helper, cfg.max_file_size, crx, tx2));
+                        jobs.spawn(files::put(r, t, helper, cfg.max_file_size, crx, tx2));
                     }
                     None => {
                         let r = GetReq::decode(&frame.payload).expect("decoded above");
-                        tokio::spawn(files::get(r, t, helper, crx, tx2));
+                        jobs.spawn(files::get(r, t, helper, crx, tx2));
                     }
                 }
             }
@@ -204,7 +225,7 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 tunnels.insert(tid, ctx);
                 cfg.log(format!("tunnel opened via '{}'", who.label));
                 cfg.rec(1, ev("tunnel", RESULT_OK).named_hidden_target("open", format!("{host}:{port}").as_bytes()).request(tid));
-                tokio::spawn(tunnel::run(tid, host, port, cfg.tunnel_connect_timeout, crx, tx.clone()));
+                jobs.spawn(tunnel::run(tid, host, port, cfg.tunnel_connect_timeout, crx, tx.clone()));
             }
             tw::TUN_DATA | tw::TUN_EOF | tw::TUN_CLOSE => {
                 let Ok((tid, data)) = split_id(&frame.payload) else { break };
@@ -242,7 +263,7 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 };
                 let Some(t) = target.clone() else { break };
                 let (tx2, helper) = (tx.clone(), cfg.helper.clone());
-                tokio::spawn(async move {
+                jobs.spawn(async move {
                     fsops::run(req, t, helper, tx2).await;
                     drop(permit);
                 });
@@ -293,6 +314,12 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
     drop(ptys); // every terminal gets its hangup
     drop(tunnels); // every tunnel is closed
     drop(transfers); // every transfer is stopped; partial files stay for a resume
+    // PTYs get a chance to deliver SIGHUP to the entire process group. Other jobs are then
+    // cancelled; their child processes use kill_on_drop.
+    if tokio::time::timeout(Duration::from_secs(3), async { while jobs.join_next().await.is_some() {} }).await.is_err() {
+        jobs.abort_all();
+        while jobs.join_next().await.is_some() {}
+    }
     cfg.rec(1, ev("session_close", RESULT_OK));
     drop(tx);
     cfg.log(format!("session closed via '{}'", who.label));
@@ -434,12 +461,13 @@ pub(crate) async fn direct_session(cfg: &ServerConfig, key: &[u8], account: &str
         }
     };
     let exec_key = cfg.exec_identity.clone()?;
+    let auth = auth_snapshot(&cfg.dir, key, account)?;
     let (to_exec, in_rx) = mpsc::channel::<Frame>(64);
     let (out_tx, from_exec) = mpsc::channel::<Frame>(64);
     let cfg = cfg.clone();
     let key = key.to_vec();
     let account = account.to_string();
-    tokio::spawn(session_main(cfg, "end-to-end client".into(), account, key, exec_key, rights, target, in_rx, out_tx));
+    tokio::spawn(session_main(cfg, "end-to-end client".into(), account, key, exec_key, rights, target, auth, in_rx, out_tx));
     Some((to_exec, from_exec))
 }
 
