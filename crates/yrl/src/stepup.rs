@@ -214,18 +214,20 @@ impl Verifier {
         lines.push(format!("{} {}", level.right(), hash_password(phrase)?));
         let tmp = path.with_extension("tmp");
         let _ = std::fs::remove_file(&tmp);
-        let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp)?;
+        let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&tmp)?;
         std::io::Write::write_all(&mut f, (lines.join("\n") + "\n").as_bytes())?;
         crate::keys::inherit(&path, &tmp)?;
+        f.sync_all()?;
         std::fs::rename(&tmp, &path)?;
+        std::fs::File::open(dir)?.sync_all()?;
         Ok(())
     }
     /// true only if a verifier for this level exists, the file is private, and the phrase fits it
     pub fn check(dir: &Path, level: Level, phrase: &[u8]) -> bool {
         use std::os::unix::fs::MetadataExt;
         let path = Self::file(dir, level);
-        let Ok(meta) = std::fs::metadata(&path) else { return false };
-        if !crate::keys::mode_ok_for_reading(meta.mode()) {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { return false };
+        if !meta.is_file() || meta.nlink() != 1 || !crate::keys::mode_ok_for_reading(meta.mode()) {
             return false;
         }
         let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -286,22 +288,23 @@ impl Store {
     fn mac(key: &[u8; 32], body: &str) -> String {
         hex::encode(blake3::keyed_hash(key, body.as_bytes()).as_bytes())
     }
-    fn read_key(&self) -> Option<[u8; 32]> {
-        use std::os::unix::fs::MetadataExt;
-        let m = std::fs::metadata(&self.key_path).ok()?;
-        if m.mode() & 0o077 != 0 || m.len() != 64 {
-            return None;
-        }
-        hex::decode(std::fs::read_to_string(&self.key_path).ok()?.trim()).ok()?.try_into().ok()
+    fn read_key(&self) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        let bytes = crate::keys::read_secret_hex(&self.key_path, 32).ok()?;
+        Some(zeroize::Zeroizing::new(bytes.as_slice().try_into().ok()?))
     }
-    fn make_key(&self) -> Option<[u8; 32]> {
+    fn make_key(&self) -> Option<zeroize::Zeroizing<[u8; 32]>> {
         use argon2::password_hash::rand_core::{OsRng, RngCore};
         use std::os::unix::fs::OpenOptionsExt;
         let mut k = [0u8; 32];
         OsRng.fill_bytes(&mut k);
-        let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&self.key_path).ok()?;
-        std::io::Write::write_all(&mut f, hex::encode(k).as_bytes()).ok()?;
-        Some(k)
+        let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&self.key_path).ok()?;
+        let key = zeroize::Zeroizing::new(k);
+        use zeroize::Zeroize;
+        k.zeroize();
+        let text = zeroize::Zeroizing::new(hex::encode(&*key));
+        std::io::Write::write_all(&mut f, text.as_bytes()).ok()?;
+        f.sync_all().ok()?;
+        Some(key)
     }
     /// the stored state, or None if it cannot be trusted
     fn load(&self) -> Option<State> {

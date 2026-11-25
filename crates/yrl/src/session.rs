@@ -50,7 +50,7 @@ impl Secure {
         Secure { state: Mutex::new(state), sent: AtomicU64::new(0), received: AtomicU64::new(0), rekey_every, raw_mode: Default::default(), raw_out: AtomicU64::new(0), raw_in: AtomicU64::new(0) }
     }
     pub fn seal(&self, f: &Frame) -> Result<Vec<u8>> {
-        let plain = f.encode().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let plain = zeroize::Zeroizing::new(f.encode().map_err(|e| anyhow::anyhow!("{e:?}"))?);
         let mut out = vec![0u8; plain.len() + 16];
         let mut st = self.state.lock().unwrap();
         let n = st.write_message(&plain, &mut out)?;
@@ -65,7 +65,7 @@ impl Secure {
         if msg.len() > MAX_FRAME + 16 {
             bail!("message too large");
         }
-        let mut plain = vec![0u8; msg.len()];
+        let mut plain = zeroize::Zeroizing::new(vec![0u8; msg.len()]);
         let mut st = self.state.lock().unwrap();
         let n = st.read_message(msg, &mut plain)?;
         plain.truncate(n);

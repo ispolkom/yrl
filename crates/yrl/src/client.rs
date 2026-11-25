@@ -463,9 +463,10 @@ impl Client {
         }
         let mut guard = self.pre.lock().await;
         let Some(pre) = guard.as_mut() else { bail!("already logged in") };
-        let mut payload = wire::encode_login(login.as_bytes(), password).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        let m = pre.sec.seal(&Frame::new(wire::LOGIN, 0, payload.clone()));
-        zeroize::Zeroize::zeroize(&mut payload);
+        let payload = wire::encode_login(login.as_bytes(), password).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let mut frame = Frame::new(wire::LOGIN, 0, payload);
+        let m = pre.sec.seal(&frame);
+        zeroize::Zeroize::zeroize(&mut frame.payload);
         write_msg(&mut pre.wr, &m?).await?;
         let mut next = async || -> Result<Frame> {
             let msg = tokio::time::timeout(timeout, read_msg(&mut pre.rd)).await.map_err(|_| anyhow::anyhow!("no answer to the login"))??;

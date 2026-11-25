@@ -28,8 +28,8 @@ anyhow = "1.0"
 argon2 = "0.5"
 libc = "0.2"
 blake3 = "1.5"
-x25519-dalek = { version = "2.0", features = ["static_secrets"] }
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core", "zeroize"] }
 zeroize = "1"
 
 [dev-dependencies]

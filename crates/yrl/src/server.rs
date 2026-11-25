@@ -202,7 +202,7 @@ pub async fn serve_udp(sock: Arc<tokio::net::UdpSocket>, me: KeyPair, mut cfg: S
 }
 
 /// one password check; an unknown login is checked against a dummy hash so it costs the same
-async fn check_password(cfg: &ServerConfig, login: Vec<u8>, mut password: Vec<u8>) -> Option<(Vec<String>, Option<String>)> {
+async fn check_password(cfg: &ServerConfig, login: Vec<u8>, password: zeroize::Zeroizing<Vec<u8>>) -> Option<(Vec<String>, Option<String>)> {
     let _slot = cfg.hash_slots.acquire().await.ok()?;
     let path = cfg.dir.join("users");
     let res = tokio::task::spawn_blocking(move || {
@@ -214,7 +214,6 @@ async fn check_password(cfg: &ServerConfig, login: Vec<u8>, mut password: Vec<u8
                 false
             }
         };
-        password.zeroize();
         if ok { user.map(|u| (u.rights, u.os_user)) } else { None }
     })
     .await;
@@ -397,6 +396,7 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                 cfg.log("session closed (bad login frame)".into());
                 break;
             };
+            let password = zeroize::Zeroizing::new(password);
             attempts += 1;
             let typed_login = String::from_utf8_lossy(&login).into_owned();
             let locked = cfg.throttle.locked(&key_id) || cfg.throttle.locked(&ip_id);

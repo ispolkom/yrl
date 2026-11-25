@@ -17,6 +17,7 @@ CapabilityBoundingSet=
 ReadWritePaths=/var/lib/yrl/enroll
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 NoNewPrivileges=yes
+LimitCORE=0
 KillMode=control-group
 ProtectSystem=strict
 ProtectHome=yes

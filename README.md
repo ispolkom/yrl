@@ -133,6 +133,8 @@ Important properties:
 
 The complete threat-to-test traceability matrix is in [docs/THREATS.md](docs/THREATS.md).
 
+Private keys are owner-only files under separate service accounts. The services start unattended; protect the host's disk with operating-system encryption. For offline encrypted backups, recovery, Noise-key rotation, device revocation, and migration, see [STAGE4_ACCEPTANCE.md](STAGE4_ACCEPTANCE.md). Keep the backup decryption key off the server and verify restored public fingerprints through a trusted channel.
+
 ## Verification
 
 The workspace contains more than 150 integration tests covering happy paths, malformed frames, replay, lockouts, privilege boundaries, audit integrity, network interruption, file safety, terminal behavior, tunnels, SPA, nftables, relay attacks, and UDP loss/reordering.
@@ -154,6 +156,7 @@ Security rules are also checked with targeted source mutants listed under `tools
 - The transport does not yet include hybrid post-quantum key exchange (ML-KEM).
 - PAKE/OPAQUE, FIDO2/TPM-backed confirmation, and second-device approval are planned hardening steps.
 - Audit logs need deployment-level append-only protection, off-host checkpoint retention, and rotation.
+- Audit journal signing-key rollover is not implemented; preserve that key with its journal when backing up or restoring.
 - Metadata such as IP addresses, timing, and traffic volume remains visible to the network or relay.
 
 Do not treat a secret port, SPA, or an untrusted relay as authentication. Device keys, passwords, explicit rights, and end-to-end cryptography remain mandatory.

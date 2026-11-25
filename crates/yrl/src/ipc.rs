@@ -271,7 +271,7 @@ pub fn ephemeral(socket: PathBuf, executor_key: Option<KeyPair>) -> (ExecutorIpc
     let (e, g) = (executor_key.unwrap_or_else(keys::generate), keys::generate());
     (
         ExecutorIpc { socket: socket.clone(), key: e.clone(), gatekeeper_public: g.public.clone(), expected_uid: Some(unsafe { libc::geteuid() }), expected_exe: std::env::current_exe().ok().and_then(|p| std::fs::canonicalize(p).ok()) },
-        GatekeeperIpc { socket, key: g, executor_public: e.public },
+        GatekeeperIpc { socket, key: g, executor_public: e.public.clone() },
     )
 }
 
@@ -284,7 +284,7 @@ pub fn ephemeral_pair(socket: PathBuf, broker_key: Option<KeyPair>, executor_key
     let b = broker_key.unwrap_or_else(keys::generate);
     (
         ExecutorIpc { socket: socket.clone(), key: b.clone(), gatekeeper_public: executor_key.public.clone(), expected_uid: Some(unsafe { libc::geteuid() }), expected_exe: std::env::current_exe().ok().and_then(|p| std::fs::canonicalize(p).ok()) },
-        GatekeeperIpc { socket, key: executor_key, executor_public: b.public },
+        GatekeeperIpc { socket, key: executor_key, executor_public: b.public.clone() },
     )
 }
 

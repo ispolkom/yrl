@@ -66,16 +66,13 @@ impl AuditService {
         }
         let key_path = base.join("sign.key");
         let key = if key_path.exists() {
-            let m = std::fs::metadata(&key_path)?;
-            if std::os::unix::fs::MetadataExt::mode(&m) & 0o077 != 0 {
-                bail!("the signing key can be read by others");
-            }
-            let seed: [u8; 32] = hex::decode(std::fs::read_to_string(&key_path)?.trim())?.try_into().map_err(|_| anyhow::anyhow!("damaged signing key"))?;
-            SigningKey::from_bytes(&seed)
+            let seed = crate::keys::read_secret_hex(&key_path, 32)?;
+            SigningKey::from_bytes(seed.as_slice().try_into().map_err(|_| anyhow::anyhow!("damaged signing key"))?)
         } else {
             let k = SigningKey::generate(&mut argon2::password_hash::rand_core::OsRng);
-            let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&key_path)?;
+            let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&key_path)?;
             f.write_all_hex(&k.to_bytes())?;
+            f.sync_all()?;
             std::fs::write(base.join("sign.pub"), hex::encode(k.verifying_key().to_bytes()))?;
             std::fs::set_permissions(base.join("sign.pub"), std::fs::Permissions::from_mode(0o644))?;
             k
@@ -182,7 +179,8 @@ trait WriteHex {
 }
 impl WriteHex for std::fs::File {
     fn write_all_hex(&mut self, b: &[u8]) -> std::io::Result<()> {
-        std::io::Write::write_all(self, hex::encode(b).as_bytes())
+        let text = zeroize::Zeroizing::new(hex::encode(b));
+        std::io::Write::write_all(self, text.as_bytes())
     }
 }
 

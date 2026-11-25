@@ -14,23 +14,41 @@ async fn main() {
     let r = match a.get(1).map(String::as_str) {
         Some("init") => keys::init(&PathBuf::from(&a[2])).and_then(|k| {
             yrl::ipc::init_keys(&PathBuf::from(&a[2]))?; // the keys of the local door between the gatekeeper and the executor
-            println!("server public key (give it to the client): {}", hex::encode(k.public));
+            println!("server public key (give it to the client): {}", hex::encode(&k.public));
             let e = std::fs::read_to_string(PathBuf::from(&a[2]).join("ipc/executor.pub"))?;
             println!("executor public key (pin it on every client for the end-to-end channel): {}", e.trim());
             let b = std::fs::read_to_string(PathBuf::from(&a[2]).join("ipc/broker.pub"))?;
             println!("broker public key (give it to the client for ROOT step-up): {}", b.trim());
             Ok(())
         }),
-        Some("authorize") => keys::authorize(&PathBuf::from(&a[2]).join("authorized_keys"), &a[3], &a[4], &a[5]).map(|_| println!("authorized")),
+        Some("authorize") => {
+            let dir = PathBuf::from(&a[2]);
+            yrl::keylife::service_guard(&dir).and_then(|_key_guard| keys::authorize(&dir.join("authorized_keys"), &a[3], &a[4], &a[5]).map(|_| println!("authorized")))
+        },
+        Some("keys") => match a.get(2).map(String::as_str) {
+            Some("backup") if a.len() == 6 => yrl::keylife::backup(&PathBuf::from(&a[3]), &PathBuf::from(&a[4]), &a[5]),
+            Some("restore") if a.len() == 5 => yrl::keylife::restore(&PathBuf::from(&a[3]), &PathBuf::from(&a[4])),
+            Some("rotate") if a.len() == 7 => yrl::keylife::rotate(&PathBuf::from(&a[3]), &a[4], &PathBuf::from(&a[5]), &a[6]).map(|p| println!("new {role} public key: {}", hex::encode(p), role = a[4])),
+            Some("migrate") if a.len() == 6 => yrl::keylife::migrate(&PathBuf::from(&a[3]), &PathBuf::from(&a[4]), &a[5]),
+            Some("revoke-device") if a.len() == 5 => revoke_device_cmd(&a[3], &a[4]).await,
+            _ => Err(anyhow::anyhow!("usage: yrld keys backup <state-dir> <encrypted-output> <GnuPG-recipient-fingerprint> | keys restore <encrypted-input> <new-state-dir> | keys rotate <state-dir> <server|role> <encrypted-backup> <recipient> | keys migrate <state-dir> <encrypted-backup> <recipient> | keys revoke-device <state-dir> <device-public-hex>")),
+        },
         Some("passwd") => {
-            let pw = yrl::prompt::read_password("new password: ").map_err(anyhow::Error::from);
-            pw.and_then(|pw| yrl::users::set_user_os(&PathBuf::from(&a[2]).join("users"), &a[3], &a[4], a.get(5).map(String::as_str), &pw)).map(|_| println!("account saved"))
+            let pw = yrl::prompt::read_password("new password: ").map(zeroize::Zeroizing::new).map_err(anyhow::Error::from);
+            pw.and_then(|pw| {
+                let dir = PathBuf::from(&a[2]);
+                let _key_guard = yrl::keylife::service_guard(&dir)?;
+                yrl::users::set_user_os(&dir.join("users"), &a[3], &a[4], a.get(5).map(String::as_str), &pw)
+            }).map(|_| println!("account saved"))
         }
         Some("word") => word_set(&a).await,
         Some("unlock") => unlock(&a).await,
         Some("enroll") if a.get(2).map(String::as_str) == Some("enable") => enroll_enable(&a[3], &a).await,
         Some("audit") if a.get(2).map(String::as_str) == Some("verify") => audit_verify(&a[3]),
-        Some("audit") if a.get(2).map(String::as_str) == Some("repair") => yrl::audit::repair(&PathBuf::from(&a[3])).map(|t| print!("{t}")),
+        Some("audit") if a.get(2).map(String::as_str) == Some("repair") => {
+            let dir = PathBuf::from(&a[3]);
+            yrl::keylife::service_guard(&dir).and_then(|_key_guard| yrl::audit::repair(&dir).map(|t| print!("{t}")))
+        },
         Some("audit") => audit(&a[2], &a).await,
         Some("firewall") => firewall(&a[2], &a).await,
         Some("install") => install_cmd(&a),
@@ -38,7 +56,7 @@ async fn main() {
         Some("broker") => broker(&a[2], &a).await,
         Some("gatekeeper") => gatekeeper(&a[2], &a[3], a.iter().position(|x| x == "--relay").and_then(|i| a.get(i + 1)).cloned(), &a).await,
         Some("serve") => serve(&a[2], &a[3], a.iter().position(|x| x == "--relay").and_then(|i| a.get(i + 1)).cloned()).await,
-        _ => Err(anyhow::anyhow!("usage: yrld firewall <dir> --ports 2222[,..] [--backend mock|nft] [--max-ttl N] [--allow-loopback] | install accounts|tmpfiles [run-dir]|layout <dir> [run-dir]|check <dir> [run-dir] | gatekeeper … [--spa udp-addr --work-port P] | audit <dir> | audit verify <dir> | audit repair <dir> | enroll enable <dir> [--ttl N] [--rights csv] | broker <dir> [--exec-uid N] [--exec-exe PATH] | executor <dir> [--gate-uid N] [--gate-exe PATH] | gatekeeper <dir> <addr:port|-> [--relay host:port] | init <dir> | authorize <dir> <client-public-hex> <label> <rights> | passwd <dir> <login> <rights|-> [system-user] (password from the terminal or stdin) | serve <dir> <addr:port|-> [--relay host:port]")),
+        _ => Err(anyhow::anyhow!("usage: yrld keys backup|restore|rotate|migrate|revoke-device ... | firewall <dir> --ports 2222[,..] [--backend mock|nft] [--max-ttl N] [--allow-loopback] | install accounts|tmpfiles [run-dir]|layout <dir> [run-dir]|check <dir> [run-dir] | gatekeeper … [--spa udp-addr --work-port P] | audit <dir> | audit verify <dir> | audit repair <dir> | enroll enable <dir> [--ttl N] [--rights csv] | broker <dir> [--exec-uid N] [--exec-exe PATH] | executor <dir> [--gate-uid N] [--gate-exe PATH] | gatekeeper <dir> <addr:port|-> [--relay host:port] | init <dir> | authorize <dir> <client-public-hex> <label> <rights> | passwd <dir> <login> <rights|-> [system-user] (password from the terminal or stdin) | serve <dir> <addr:port|-> [--relay host:port]")),
     };
     if let Err(e) = r {
         eprintln!("error: {e}");
@@ -48,6 +66,7 @@ async fn main() {
 
 async fn serve(dir: &str, bind: &str, relay: Option<String>) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
     let me = keys::load(&dir)?;
     let cfg = server::ServerConfig::new(dir);
     match relay {
@@ -122,6 +141,7 @@ fn peer_exe(opt: &Option<String>) -> anyhow::Result<Option<PathBuf>> {
 
 async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
     let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
     let uid = opt("--gate-uid").map(|u| yrl::ipc::uid_arg(&u)).transpose()?;
     let exe = peer_exe(&opt("--gate-exe"))?;
@@ -143,6 +163,7 @@ async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
 async fn gatekeeper(dir: &str, bind: &str, relay: Option<String>, a: &[String]) -> anyhow::Result<()> {
     let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
     let dir = PathBuf::from(dir);
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
     let me = keys::load_shared(&dir)?; // the state directory is shared with the other parts: the file must be ours and private
     let mut cfg = server::ServerConfig::new(dir.clone());
     cfg.gate = Some(yrl::ipc::load_gatekeeper(&dir)?);
@@ -225,6 +246,7 @@ fn sandbox_selftest() -> i32 {
 /// the smallest part: answers the ROOT step-up and does the few typed things ROOT may ask for; listens only on its local socket
 async fn broker(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
     let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
     let uid = opt("--exec-uid").map(|u| yrl::ipc::uid_arg(&u)).transpose()?;
     let exe = peer_exe(&opt("--exec-exe"))?;
@@ -243,6 +265,7 @@ async fn broker(dir: &str, a: &[String]) -> anyhow::Result<()> {
 async fn enroll_enable(dir: &str, a: &[String]) -> anyhow::Result<()> {
     use std::io::BufRead;
     let dir = PathBuf::from(dir);
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
     let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
     let ttl: u64 = opt("--ttl").map(|t| t.parse()).transpose()?.unwrap_or(120);
     let rights: Vec<String> = opt("--rights").unwrap_or_else(|| "exec".into()).split(',').filter(|s| !s.is_empty()).map(String::from).collect();
@@ -280,6 +303,7 @@ async fn enroll_enable(dir: &str, a: &[String]) -> anyhow::Result<()> {
 /// the audit process: keeps the journals; listens only on its local socket
 async fn audit(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
     let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
     let every: u64 = opt("--checkpoint-every").map(|n| n.parse()).transpose()?.unwrap_or(100);
     let uid = opt("--parts-uid").map(|u| yrl::ipc::uid_arg(&u)).transpose()?;
@@ -332,6 +356,13 @@ async fn owner_note(dir: &std::path::Path, ev: yrl::auditlog::Event, critical: b
     }
 }
 
+async fn revoke_device_cmd(dir: &str, public: &str) -> anyhow::Result<()> {
+    let dir = PathBuf::from(dir);
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
+    owner_note(&dir, yrl::auditlog::Event::new("device_revoke", yrl::auditlog::LEVEL_NONE, yrl::auditlog::RESULT_OK).target(public), true).await?;
+    yrl::keylife::revoke_device(&dir, public)
+}
+
 async fn word_set(a: &[String]) -> anyhow::Result<()> {
     // yrld word set <dir> <sudo|root>   (the phrase from the terminal or standard input)
     let level = match a.get(4).map(String::as_str) {
@@ -340,7 +371,8 @@ async fn word_set(a: &[String]) -> anyhow::Result<()> {
         _ => anyhow::bail!("usage: yrld word set <dir> <sudo|root>"),
     };
     let dir = PathBuf::from(&a[3]);
-    let phrase = yrl::prompt::read_password(&format!("phrase for {}: ", level.right()))?;
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
+    let phrase = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("phrase for {}: ", level.right()))?);
     // the fact is recorded first, the phrase never is
     owner_note(&dir, yrl::auditlog::Event::new("word_set", yrl::auditlog::LEVEL_NONE, yrl::auditlog::RESULT_OK).target(level.right()), true).await?;
     yrl::stepup::Verifier::set(&dir, level, &phrase)?;
@@ -351,6 +383,7 @@ async fn word_set(a: &[String]) -> anyhow::Result<()> {
 async fn unlock(a: &[String]) -> anyhow::Result<()> {
     // yrld unlock <dir> <sudo|root|all>: the owner, on the machine (run as the user of the executor / of the broker). Nothing here can be done over the network.
     let dir = PathBuf::from(&a[2]);
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
     let names: Vec<&str> = match a.get(3).map(String::as_str) {
         Some("sudo") => vec!["sudo"],
         Some("root") => vec!["root"],
@@ -368,6 +401,7 @@ async fn unlock(a: &[String]) -> anyhow::Result<()> {
 /// the only part that changes the firewall
 async fn firewall(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
+    let _key_guard = yrl::keylife::service_guard(&dir)?;
     let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
     let ports: Vec<u16> = opt("--ports").ok_or_else(|| anyhow::anyhow!("--ports is needed: the work ports that stay closed until a knock"))?.split(',').map(|p| p.parse()).collect::<Result<_, _>>()?;
     let policy = yrl::firewall::Policy { work_ports: ports.clone(), max_ttl_secs: opt("--max-ttl").map(|t| t.parse()).transpose()?.unwrap_or(120), allow_loopback: a.iter().any(|x| x == "--allow-loopback"), ..Default::default() };

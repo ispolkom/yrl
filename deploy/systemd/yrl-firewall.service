@@ -20,6 +20,7 @@ AmbientCapabilities=CAP_NET_ADMIN
 ReadWritePaths=/run/yrl/fw
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 NoNewPrivileges=yes
+LimitCORE=0
 KillMode=control-group
 ProtectSystem=strict
 ProtectHome=yes

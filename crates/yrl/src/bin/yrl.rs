@@ -44,7 +44,7 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
     match a.get(1).map(String::as_str) {
         Some("keygen") => {
             let k = keys::init(&PathBuf::from(&a[2]))?;
-            println!("client public key (authorize it on the server): {}", hex::encode(k.public));
+            println!("client public key (authorize it on the server): {}", hex::encode(&k.public));
         }
         Some("ping") => {
             let c = connect(a).await?;
@@ -101,7 +101,7 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
                 _ => anyhow::bail!("operation: test | restart <service>"),
             };
             let c = connect(a).await?;
-            let phrase = yrl::prompt::read_password(&format!("{} phrase: ", level.right()))?;
+            let phrase = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("{} phrase: ", level.right()))?);
             println!("{}", c.elevate(level, &op, &phrase, &exec_pub, Duration::from_secs(30)).await?);
         }
         Some("enroll") => {
@@ -152,7 +152,7 @@ async fn connect(a: &[String]) -> anyhow::Result<Client> {
     let knock = std::env::var("YRL_KNOCK").ok().map(|udp| yrl::client::Knock { udp, settle: Duration::from_millis(300) });
     let opts = yrl::client::ClientOptions { executor_public: Some(executor_public), connect_timeout: Duration::from_secs(if relay.is_some() || knock.is_some() { 15 } else { 5 }), relay, knock, udp: std::env::var("YRL_UDP").ok(), ..Default::default() };
     let c = Client::connect_opts(&a[3], &me, &server, opts).await?;
-    let pw = yrl::prompt::read_password(&format!("password for {}: ", a[5]))?;
+    let pw = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("password for {}: ", a[5]))?);
     c.login(&a[5], &pw, Duration::from_secs(10)).await?;
     Ok(c)
 }

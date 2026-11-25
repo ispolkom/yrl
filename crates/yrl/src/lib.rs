@@ -17,6 +17,7 @@ pub mod fsops;
 pub mod identity;
 pub mod install;
 pub mod keys;
+pub mod keylife;
 pub mod link;
 pub mod pty;
 pub mod prompt;

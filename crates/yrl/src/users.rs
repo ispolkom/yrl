@@ -35,15 +35,18 @@ pub fn dummy_hash() -> &'static str {
     D.get_or_init(|| {
         let mut b = [0u8; 32];
         OsRng.fill_bytes(&mut b);
-        hash_password(&b).expect("hash")
+        let hash = hash_password(&b).expect("hash");
+        use zeroize::Zeroize;
+        b.zeroize();
+        hash
     })
 }
 
 /// a users file that others can read or write is refused as a whole (no accounts at all)
 /// Why `read_users` would give an empty list for this file, in words for the owner's own log (None = nothing is wrong with the file itself).
 pub fn why_unreadable(path: &Path) -> Option<&'static str> {
-    let Ok(meta) = fs::metadata(path) else { return Some("the accounts file is missing, or this part may not look at it") };
-    if !crate::keys::mode_ok_for_reading(meta.mode()) {
+    let Ok(meta) = fs::symlink_metadata(path) else { return Some("the accounts file is missing, or this part may not look at it") };
+    if !meta.is_file() || meta.nlink() != 1 || !crate::keys::mode_ok_for_reading(meta.mode()) {
         return Some("the accounts file is writable by its group or open to others, so it is refused");
     }
     if fs::read_to_string(path).is_err() {
@@ -53,8 +56,8 @@ pub fn why_unreadable(path: &Path) -> Option<&'static str> {
 }
 
 pub fn read_users(path: &Path) -> Vec<User> {
-    let Ok(meta) = fs::metadata(path) else { return vec![] };
-    if !crate::keys::mode_ok_for_reading(meta.mode()) {
+    let Ok(meta) = fs::symlink_metadata(path) else { return vec![] };
+    if !meta.is_file() || meta.nlink() != 1 || !crate::keys::mode_ok_for_reading(meta.mode()) {
         return vec![];
     }
     let Ok(text) = fs::read_to_string(path) else { return vec![] };
@@ -107,9 +110,11 @@ pub fn set_user_os(path: &Path, login: &str, rights: &str, os_user: Option<&str>
     lines.push(format!("{login} {rights} {}{os}", hash_password(password)?));
     let tmp = path.with_extension("tmp");
     let _ = fs::remove_file(&tmp);
-    let mut f = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp).context("cannot write the users file")?;
+    let mut f = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&tmp).context("cannot write the users file")?;
     std::io::Write::write_all(&mut f, (lines.join("\n") + "\n").as_bytes())?;
     crate::keys::inherit(path, &tmp)?;
+    f.sync_all()?;
     fs::rename(&tmp, path)?;
+    fs::File::open(path.parent().unwrap())?.sync_all()?;
     Ok(())
 }
