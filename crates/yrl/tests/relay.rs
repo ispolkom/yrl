@@ -171,6 +171,36 @@ async fn rl6_limits_hold() {
 }
 
 #[tokio::test]
+async fn rl6b_active_pair_budget_uses_observed_ips_and_releases_on_disconnect() {
+    let cfg = RelayConfig { max_active_pairs: 1, max_active_pairs_per_ip: 1, idle_timeout: Duration::from_secs(30), ..Default::default() };
+    let (ra, stats) = start_relay(cfg).await;
+    let open_pair = |rid: [u8; 16]| {
+        let ra = ra.clone();
+        async move {
+            let mut server = TcpStream::connect(&ra).await.unwrap();
+            server.write_all(&header(ROLE_SERVER, &rid)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut client = TcpStream::connect(&ra).await.unwrap();
+            client.write_all(&header(ROLE_CLIENT, &rid)).await.unwrap();
+            (server, client)
+        }
+    };
+    let (first_server, first_client) = open_pair([21; 16]).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(stats.stats.active_pairs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let (mut refused_server, refused_client) = open_pair([22; 16]).await;
+    let mut byte = [0u8; 1];
+    let refused = tokio::time::timeout(Duration::from_secs(1), refused_server.read(&mut byte)).await;
+    assert!(matches!(refused, Ok(Ok(0)) | Ok(Err(_))), "a second pair from the observed IP is refused without trusting its rendezvous id");
+    drop(refused_client);
+    drop((first_server, first_client));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (_next_server, _next_client) = open_pair([23; 16]).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(stats.stats.active_pairs.load(std::sync::atomic::Ordering::SeqCst), 1, "pair capacity is RAII-released after disconnect");
+}
+
+#[tokio::test]
 async fn rl7_a_server_that_vanished_is_not_matched_with_a_client() {
     let (ra, _s) = start_relay(RelayConfig::default()).await;
     let rid = [5u8; 16];

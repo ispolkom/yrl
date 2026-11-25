@@ -81,8 +81,8 @@ async fn s1_exactly_once_in_order_through_many_broken_connections() {
         let ((ar, aw, asec), (br, bw, bsec)) = pipe(&k).await;
         let (a_exp, b_exp) = (a.positions().1, b.positions().1);
         let (a2, b2, atx2, btx2) = (a.clone(), b.clone(), atx.clone(), btx.clone());
-        let ta = tokio::spawn(async move { drive(&a2, ar, aw, asec, atx2, b_exp, &opt()).await });
-        let tb = tokio::spawn(async move { drive(&b2, br, bw, bsec, btx2, a_exp, &opt()).await });
+        let ta = tokio::spawn(async move { drive(&a2, ar, aw, asec, atx2, b_exp, &opt(), None).await });
+        let tb = tokio::spawn(async move { drive(&b2, br, bw, bsec, btx2, a_exp, &opt(), None).await });
         x ^= x << 13; x ^= x >> 7; x ^= x << 17;
         tokio::time::sleep(Duration::from_millis(2 + x % 9)).await;
         ta.abort();
@@ -115,8 +115,8 @@ async fn s2_the_window_holds_producers_back_and_nothing_is_lost() {
     let (atx, _a_got) = collector();
     let ((ar, aw, asec), (br, bw, bsec)) = pipe(&k).await;
     let (a3, b3) = (a.clone(), b.clone());
-    tokio::spawn(async move { drive(&a3, ar, aw, asec, atx, 0, &opt()).await });
-    tokio::spawn(async move { drive(&b3, br, bw, bsec, btx, 0, &opt()).await });
+    tokio::spawn(async move { drive(&a3, ar, aw, asec, atx, 0, &opt(), None).await });
+    tokio::spawn(async move { drive(&b3, br, bw, bsec, btx, 0, &opt(), None).await });
     third.await.unwrap().unwrap();
     for _ in 0..100 {
         if b_got.lock().unwrap().len() == 3 {
@@ -139,7 +139,7 @@ async fn rude_peer(k: &Keys, link: &Arc<Link>, peer_expected: u64) -> (impl toki
     let ((ar, aw, asec), (br, bw, bsec)) = pipe(k).await;
     let (tx, _) = collector();
     let l = link.clone();
-    let h = tokio::spawn(async move { drive(&l, br, bw, bsec, tx, peer_expected, &opt()).await });
+    let h = tokio::spawn(async move { drive(&l, br, bw, bsec, tx, peer_expected, &opt(), None).await });
     (ar, aw, asec, h)
 }
 
@@ -191,7 +191,7 @@ async fn s4_a_repeated_frame_is_ignored_and_the_rest_goes_on() {
     let (tx, got) = collector();
     let ((_ar, mut aw, asec), (br, bw, bsec)) = pipe(&k).await;
     let l2 = l.clone();
-    tokio::spawn(async move { drive(&l2, br, bw, bsec, tx, 0, &opt()).await });
+    tokio::spawn(async move { drive(&l2, br, bw, bsec, tx, 0, &opt(), None).await });
     for seq in [0u64, 1, 1, 0, 2] {
         let f = frame(seq as u32, 4);
         write_msg(&mut aw, &asec.seal(&Frame::new(link::SEQ, 0, seq_payload(seq, &f))).unwrap()).await.unwrap();
@@ -236,7 +236,7 @@ async fn s7_silence_means_a_dead_link_and_a_probe_keeps_an_idle_link_alive() {
     let l2 = l.clone();
     let o = DriveOptions { dead_after: Duration::from_millis(300), ping_every: None };
     let t = std::time::Instant::now();
-    let e = drive(&l2, br, bw, bsec, tx, 0, &o).await;
+    let e = drive(&l2, br, bw, bsec, tx, 0, &o, None).await;
     assert_eq!(e, End::Dead);
     assert!(t.elapsed() >= Duration::from_millis(290) && t.elapsed() < Duration::from_secs(2));
     // with probes on one side and answers on the other, an idle link lives well past the deadline
@@ -247,8 +247,8 @@ async fn s7_silence_means_a_dead_link_and_a_probe_keeps_an_idle_link_alive() {
     let o = || DriveOptions { dead_after: Duration::from_millis(400), ping_every: Some(Duration::from_millis(80)) };
     let o_b = DriveOptions { dead_after: Duration::from_millis(400), ping_every: None };
     let (a2, b2) = (a.clone(), b.clone());
-    let ta = tokio::spawn(async move { drive(&a2, ar, aw, asec, atx, 0, &o()).await });
-    let tb = tokio::spawn(async move { drive(&b2, br, bw, bsec, btx, 0, &o_b).await });
+    let ta = tokio::spawn(async move { drive(&a2, ar, aw, asec, atx, 0, &o(), None).await });
+    let tb = tokio::spawn(async move { drive(&b2, br, bw, bsec, btx, 0, &o_b, None).await });
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(!ta.is_finished() && !tb.is_finished(), "an idle link with probes must stay up");
     a.push(&frame(1, 10)).await.unwrap();
@@ -269,8 +269,8 @@ async fn s8_interactive_frames_pass_queued_file_data_without_losing_order() {
     let (btx, b_got) = collector();
     let ((ar, aw, asec), (br, bw, bsec)) = pipe(&k).await;
     let (a2, b2) = (a.clone(), b.clone());
-    tokio::spawn(async move { drive(&a2, ar, aw, asec, atx, 0, &opt()).await });
-    tokio::spawn(async move { drive(&b2, br, bw, bsec, btx, 0, &opt()).await });
+    tokio::spawn(async move { drive(&a2, ar, aw, asec, atx, 0, &opt(), None).await });
+    tokio::spawn(async move { drive(&b2, br, bw, bsec, btx, 0, &opt(), None).await });
 
     tokio::time::timeout(Duration::from_secs(3), async {
         while b_got.lock().unwrap().len() != 9 {

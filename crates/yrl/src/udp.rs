@@ -28,6 +28,8 @@ const MIN_RTO: Duration = Duration::from_millis(80);
 const MAX_RTO: Duration = Duration::from_secs(4);
 const INITIAL_RTO: Duration = Duration::from_millis(300);
 const ACK_DELAY: Duration = Duration::from_millis(15);
+/// Bound pacing bursts while avoiding one sub-millisecond timer per 1100-byte packet.
+const PACING_SLICES: u64 = 16;
 /// resends of one packet before the connection is declared dead
 const MAX_TRIES: u32 = 14;
 const APP_CHUNK: usize = 64 * 1024;
@@ -51,6 +53,8 @@ pub struct Stats {
     /// sending window now and the largest it reached, in packets
     pub window: AtomicU64,
     pub window_max: AtomicU64,
+    /// times a ready data packet waited for its cwnd/RTT pacing slot
+    pub pacing_waits: AtomicU64,
 }
 
 impl Stats {
@@ -159,6 +163,14 @@ impl Rtt {
     }
 }
 
+fn pacing_interval(srtt: Duration) -> Duration {
+    Duration::from_secs_f64(srtt.as_secs_f64() / PACING_SLICES as f64)
+}
+
+fn pacing_burst(window: u64) -> u64 {
+    window.max(1).div_ceil(PACING_SLICES)
+}
+
 async fn driver(conn: u64, send: SendFn, mut rx: mpsc::Receiver<Vec<u8>>, core: DuplexStream, mut mute: bool, stats: Arc<Stats>) {
     let (mut core_rd, mut core_wr) = tokio::io::split(core);
     let mut next_seq: u64 = 0;
@@ -173,6 +185,10 @@ async fn driver(conn: u64, send: SendFn, mut rx: mpsc::Receiver<Vec<u8>>, core: 
     let mut timeouts: u32 = 0;
     let mut last_progress = Instant::now();
     let mut rtt = Rtt { srtt: None, var: Duration::from_millis(100), rto: INITIAL_RTO };
+    // The initial cwnd remains a short startup burst. Once the first RTT sample exists, new data is
+    // spread over that RTT; loss reduces cwnd and therefore automatically increases the spacing.
+    let mut next_paced_send = Instant::now();
+    let mut pacing_left = 0u64;
 
     let mut rcv_next: u64 = 0;
     let mut ooo: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
@@ -201,6 +217,13 @@ async fn driver(conn: u64, send: SendFn, mut rx: mpsc::Receiver<Vec<u8>>, core: 
         // 1. cut application bytes into packets while the window allows
         let window = (cwnd as u64).min(peer_wnd).max(1);
         while (inflight.len() as u64) < window && !app_buf.is_empty() {
+            if rtt.srtt.is_some() && pacing_left == 0 {
+                if Instant::now() < next_paced_send {
+                    stats.pacing_waits.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                pacing_left = pacing_burst(window);
+            }
             let take = app_buf.len().min(MSS);
             let data: Vec<u8> = app_buf.drain(..take).collect();
             if inflight.is_empty() {
@@ -211,6 +234,12 @@ async fn driver(conn: u64, send: SendFn, mut rx: mpsc::Receiver<Vec<u8>>, core: 
             mute = false;
             let h = Header { kind: KIND_DATA, seq: seg.seq, ack: rcv_next, wnd: my_wnd(&ooo, deliver.len() - deliver_pos), sack: sack_map(rcv_next, &ooo) };
             send(&encode(conn, &h, &seg.data));
+            if let Some(srtt) = rtt.srtt {
+                pacing_left = pacing_left.saturating_sub(1);
+                if pacing_left == 0 {
+                    next_paced_send = Instant::now() + pacing_interval(srtt);
+                }
+            }
             ack_owed = 0;
             ack_due = None;
             inflight.push_back(seg);
@@ -234,7 +263,12 @@ async fn driver(conn: u64, send: SendFn, mut rx: mpsc::Receiver<Vec<u8>>, core: 
         // 2. what to wait for
         let now = Instant::now();
         let rto_at = inflight.iter().find(|s| !s.sacked).map(|s| s.sent_at + rtt.rto * (1u32 << timeouts.min(4)));
-        let wake_at = match (rto_at, ack_due) {
+        let protocol_at = match (rto_at, ack_due) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let pacing_at = (rtt.srtt.is_some() && pacing_left == 0 && !app_buf.is_empty() && (inflight.len() as u64) < window && next_paced_send > now).then_some(next_paced_send);
+        let wake_at = match (protocol_at, pacing_at) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
@@ -329,7 +363,7 @@ async fn driver(conn: u64, send: SendFn, mut rx: mpsc::Receiver<Vec<u8>>, core: 
                         cwnd = ssthresh;
                         recover_until = next_seq;
                     }
-                    for i in resend {
+                    for i in resend.into_iter().take(2) {
                         stats.retransmitted.fetch_add(1, Ordering::Relaxed);
                         let s = &mut inflight[i];
                         s.skipped = 0;
@@ -412,6 +446,20 @@ async fn driver(conn: u64, send: SendFn, mut rx: mpsc::Receiver<Vec<u8>>, core: 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+
+    #[test]
+    fn pacing_uses_rtt_and_the_loss_reduced_window_without_a_fixed_rate() {
+        let rtt = Duration::from_millis(80);
+        assert_eq!(pacing_interval(rtt), Duration::from_millis(5));
+        assert_eq!(pacing_burst(64), 4);
+        assert_eq!(pacing_burst(16), 1, "a smaller congestion window after loss emits fewer packets per RTT slice");
+        assert!(pacing_interval(Duration::from_millis(2)) < Duration::from_micros(130), "a clean low-RTT path is not capped at an arbitrary bitrate");
     }
 }
 

@@ -85,6 +85,23 @@ fn operation_admission_is_global_per_session_per_key_per_account_and_per_kind() 
     );
 }
 
+#[test]
+fn authenticated_network_admission_is_hierarchical_and_raii() {
+    let mut limits = ResourceLimits::default();
+    limits.max_network_connections_total = 3;
+    limits.max_network_connections_per_key = 2;
+    limits.max_network_connections_per_account = 2;
+    let resources = manager(limits);
+    let a1 = resources.try_network_connection(b"key-a", "anna").unwrap();
+    let _a2 = resources.try_network_connection(b"key-a", "anna").unwrap();
+    assert!(resources.try_network_connection(b"key-a", "bob").is_none(), "one authenticated device cannot monopolize through accounts");
+    assert!(resources.try_network_connection(b"key-b", "anna").is_none(), "one account cannot monopolize through devices");
+    let _other = resources.try_network_connection(b"key-b", "bob").unwrap();
+    assert_eq!(resources.usage().network_connections, 3);
+    drop(a1);
+    assert!(resources.try_network_connection(b"key-c", "carol").is_some(), "disconnect releases every network quota level");
+}
+
 #[tokio::test]
 async fn bulk_memory_cannot_consume_the_interactive_reserve() {
     let capacity = 4 * yrl::wire::MAX_FRAME;

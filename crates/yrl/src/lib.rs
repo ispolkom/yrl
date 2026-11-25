@@ -20,6 +20,7 @@ pub mod install;
 pub mod keys;
 pub mod keylife;
 pub mod link;
+pub mod network;
 pub mod pty;
 pub mod prompt;
 pub mod relay;

@@ -60,6 +60,7 @@ struct St {
 
 struct HeldFrame {
     data: Arc<[u8]>,
+    priority: Priority,
     _memory: Option<crate::resources::LinkMemoryPermit>,
 }
 
@@ -71,10 +72,16 @@ enum Priority {
 }
 
 fn priority(f: &Frame) -> Priority {
-    if matches!(f.kind, crate::filewire::FILE_PUT | crate::filewire::FILE_GET | crate::filewire::FILE_DATA | crate::filewire::FILE_READY | crate::filewire::FILE_END | crate::filewire::FILE_ABORT) {
+    priority_kind(f.kind)
+}
+
+fn priority_kind(kind: u8) -> Priority {
+    // Only payload is bulk. Transfer setup, completion and abort are control traffic and must pass
+    // a saturated file queue so delivery confirmation and cancellation remain prompt.
+    if kind == crate::filewire::FILE_DATA {
         Priority::Bulk
     } else if matches!(
-        f.kind,
+        kind,
         crate::wire::PING
             | crate::wire::PONG
             | crate::wire::EXEC_REQ
@@ -98,6 +105,11 @@ fn priority(f: &Frame) -> Priority {
             | crate::stepup::STEPUP_CHALLENGE
             | crate::stepup::STEPUP_PROOF
             | crate::stepup::STEPUP_RESULT
+            | crate::filewire::FILE_PUT
+            | crate::filewire::FILE_GET
+            | crate::filewire::FILE_READY
+            | crate::filewire::FILE_END
+            | crate::filewire::FILE_ABORT
     ) {
         Priority::Interactive
     } else {
@@ -184,7 +196,7 @@ impl Link {
                 continue;
             }
             s.bytes += inner.len();
-            let held = HeldFrame { data: inner.clone(), _memory: memory };
+            let held = HeldFrame { data: inner.clone(), priority, _memory: memory };
             match priority {
                 Priority::Interactive => s.pending_interactive.push_back(held),
                 Priority::Normal => s.pending_normal.push_back(held),
@@ -279,7 +291,7 @@ impl Link {
             if let Some((q, b)) = s.unacked.get((*cursor - *front) as usize) {
                 debug_assert_eq!(*q, *cursor);
                 *cursor += 1;
-                return Action::Send(*q, b.data.clone());
+                return Action::Send(*q, b.data.clone(), b.priority);
             }
         }
         let inner = s.pending_interactive.pop_front().or_else(|| s.pending_normal.pop_front()).or_else(|| s.pending_bulk.pop_front());
@@ -288,15 +300,16 @@ impl Link {
             s.next_seq += 1;
             *cursor += 1;
             let data = inner.data.clone();
+            let priority = inner.priority;
             s.unacked.push_back((seq, inner));
-            return Action::Send(seq, data);
+            return Action::Send(seq, data, priority);
         }
         Action::Idle
     }
 }
 
 enum Action {
-    Send(u64, Arc<[u8]>),
+    Send(u64, Arc<[u8]>, Priority),
     Ack(u64),
     Pong,
     Idle,
@@ -317,7 +330,7 @@ fn env(kind: u8, payload: Vec<u8>) -> Frame {
 
 /// Runs one connection of the session until it ends. `peer_expected` is what the other side said it already has (from RESUME / RESUMED, or 0 for a new session).
 /// Everything the other side sends is delivered to `sink` exactly once and in order.
-pub async fn drive<R, W>(link: &Arc<Link>, mut rd: R, mut wr: W, sec: Arc<Secure>, sink: mpsc::Sender<Frame>, peer_expected: u64, opt: &DriveOptions) -> End
+pub async fn drive<R, W>(link: &Arc<Link>, mut rd: R, mut wr: W, sec: Arc<Secure>, sink: mpsc::Sender<Frame>, peer_expected: u64, opt: &DriveOptions, network: Option<crate::network::NetworkFlow>) -> End
 where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
@@ -343,16 +356,16 @@ where
         let mut idle_due = false;
         loop {
             let act = link.next_action(&mut cursor, idle_due);
-            let (kind, payload) = match act {
+            let (kind, payload, interactive) = match act {
                 Action::Stop => return End::Closed,
                 Action::Bad => return End::Protocol,
-                Action::Send(q, inner) => {
+                Action::Send(q, inner, priority) => {
                     let mut p = q.to_be_bytes().to_vec();
                     p.extend_from_slice(&inner);
-                    (SEQ, p)
+                    (SEQ, p, priority == Priority::Interactive)
                 }
-                Action::Ack(n) => (ACK, n.to_be_bytes().to_vec()),
-                Action::Pong => (LINK_PONG, vec![]),
+                Action::Ack(n) => (ACK, n.to_be_bytes().to_vec(), true),
+                Action::Pong => (LINK_PONG, vec![], true),
                 Action::Idle => {
                     let ping_in = opt.ping_every.map(|p| p.saturating_sub(last_sent.elapsed()));
                     tokio::select! {
@@ -360,7 +373,7 @@ where
                         _ = tokio::time::sleep(ACK_DELAY) => idle_due = true,
                         _ = async { match ping_in { Some(d) => tokio::time::sleep(d).await, None => std::future::pending().await } } => {
                             let Ok(m) = sec_w.seal(&env(LINK_PING, vec![])) else { return End::Protocol };
-                            if write_msg(&mut wr, &m).await.is_err() {
+                            if write_network_msg(&mut wr, &m, network.as_ref(), true).await.is_err() {
                                 return End::Io;
                             }
                             last_sent = Instant::now();
@@ -371,7 +384,7 @@ where
             };
             idle_due = false;
             let Ok(m) = sec_w.seal(&env(kind, payload)) else { return End::Protocol };
-            if write_msg(&mut wr, &m).await.is_err() {
+            if write_network_msg(&mut wr, &m, network.as_ref(), interactive).await.is_err() {
                 return End::Io;
             }
             last_sent = Instant::now();
@@ -385,6 +398,13 @@ where
                 Ok(Ok(m)) => m,
             };
             let Ok(f) = sec.open(&msg) else { return End::Protocol };
+            if let Some(network) = network.as_ref() {
+                let interactive = match f.kind {
+                    SEQ if f.payload.len() >= 9 => priority_kind(f.payload[8]) == Priority::Interactive,
+                    _ => true,
+                };
+                if network.charge(msg.len() + 2, interactive).await.is_err() { return End::Io }
+            }
             match f.kind {
                 SEQ => {
                     if f.payload.len() < 8 + 5 {
@@ -435,6 +455,18 @@ where
     }
 }
 
+async fn write_network_msg<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8], network: Option<&crate::network::NetworkFlow>, interactive: bool) -> std::io::Result<()> {
+    let Some(network) = network else { return write_msg(w, data).await };
+    use tokio::io::AsyncWriteExt;
+    if data.is_empty() || data.len() > u16::MAX as usize {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad message length"));
+    }
+    let mut out = (data.len() as u16).to_be_bytes().to_vec();
+    out.extend_from_slice(data);
+    network.write_all(w, &out, interactive).await?;
+    w.flush().await
+}
+
 #[cfg(test)]
 mod resource_tests {
     use super::*;
@@ -450,7 +482,7 @@ mod resource_tests {
 
         link.push(&frame).await.unwrap();
         let mut cursor = 0;
-        assert!(matches!(link.next_action(&mut cursor, false), Action::Send(0, _)));
+        assert!(matches!(link.next_action(&mut cursor, false), Action::Send(0, _, Priority::Bulk)));
         assert_eq!(resources.usage().link_bytes, encoded);
         link.on_ack(1).unwrap();
         assert_eq!(resources.usage().link_bytes, 0, "an authoritative ACK releases the retained frame");
@@ -459,5 +491,15 @@ mod resource_tests {
         assert_eq!(resources.usage().link_bytes, encoded);
         link.close();
         assert_eq!(resources.usage().link_bytes, 0, "session teardown releases pending frames even without an ACK");
+    }
+
+    #[tokio::test]
+    async fn file_completion_control_passes_unsent_bulk_payload() {
+        let link = Link::new(DEFAULT_WINDOW);
+        link.push(&Frame::new(crate::filewire::FILE_DATA, 0, vec![7; 4096])).await.unwrap();
+        link.push(&Frame::new(crate::filewire::FILE_END, 0, vec![0; 8])).await.unwrap();
+        let mut cursor = 0;
+        let Action::Send(0, first, Priority::Interactive) = link.next_action(&mut cursor, false) else { panic!("file completion must use the protected control lane") };
+        assert_eq!(Frame::decode(&first).unwrap().kind, crate::filewire::FILE_END);
     }
 }

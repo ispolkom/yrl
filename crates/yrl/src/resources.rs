@@ -4,6 +4,7 @@
 //! frame. Operation admission is deliberately non-blocking, matching the existing per-session
 //! limits: an overloaded request receives the ordinary "too many requests" error.
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -21,6 +22,11 @@ pub struct ResourceLimits {
     pub max_transfers_total: usize,
     pub max_tunnels_total: usize,
     pub max_fs_total: usize,
+    pub max_network_connections_total: usize,
+    pub max_network_connections_per_key: usize,
+    pub max_network_connections_per_account: usize,
+    /// Bytes written by one session before a waiting session gets a turn. This is fairness, not a rate.
+    pub network_write_quantum: usize,
 }
 
 impl Default for ResourceLimits {
@@ -38,6 +44,12 @@ impl Default for ResourceLimits {
             max_transfers_total: 32,
             max_tunnels_total: 128,
             max_fs_total: 64,
+            max_network_connections_total: 256,
+            // Twice the default session share permits a replacement route to attach before the
+            // superseded transport has observed EOF and released its permit.
+            max_network_connections_per_key: 32,
+            max_network_connections_per_account: 32,
+            network_write_quantum: 16 << 10,
         }
     }
 }
@@ -52,6 +64,23 @@ pub enum OperationKind {
 }
 
 impl ResourceLimits {
+    pub fn from_env() -> anyhow::Result<ResourceLimits> {
+        fn value(name: &str, default: usize) -> anyhow::Result<usize> {
+            match std::env::var(name) {
+                Ok(v) => v.parse::<usize>().map_err(|_| anyhow::anyhow!("invalid {name}")),
+                Err(std::env::VarError::NotPresent) => Ok(default),
+                Err(_) => Err(anyhow::anyhow!("invalid {name}")),
+            }
+        }
+        let mut limits = ResourceLimits::default();
+        limits.max_network_connections_total = value("YRL_NETWORK_CONNECTIONS_TOTAL", limits.max_network_connections_total)?;
+        limits.max_network_connections_per_key = value("YRL_NETWORK_CONNECTIONS_PER_KEY", limits.max_network_connections_per_key)?;
+        limits.max_network_connections_per_account = value("YRL_NETWORK_CONNECTIONS_PER_ACCOUNT", limits.max_network_connections_per_account)?;
+        limits.network_write_quantum = value("YRL_NETWORK_QUANTUM_BYTES", limits.network_write_quantum)?;
+        limits.validate().map_err(|e| anyhow::anyhow!(e))?;
+        Ok(limits)
+    }
+
     fn operation_limit(&self, kind: OperationKind) -> usize {
         match kind {
             OperationKind::Exec => self.max_exec_total,
@@ -88,6 +117,17 @@ impl ResourceLimits {
         if operations.contains(&0) {
             return Err("operation limits must be non-zero");
         }
+        if self.max_network_connections_total == 0
+            || self.max_network_connections_per_key == 0
+            || self.max_network_connections_per_account == 0
+            || self.max_network_connections_per_key > self.max_network_connections_total
+            || self.max_network_connections_per_account > self.max_network_connections_total
+        {
+            return Err("network connection limits must be non-zero and within the global limit");
+        }
+        if self.network_write_quantum == 0 || self.network_write_quantum > crate::wire::MAX_FRAME {
+            return Err("network write quantum must be between one byte and one maximum frame");
+        }
         Ok(())
     }
 }
@@ -102,6 +142,9 @@ struct Counts {
     operations_by_key: HashMap<Vec<u8>, usize>,
     operations_by_account: HashMap<String, usize>,
     operations_by_kind: HashMap<OperationKind, usize>,
+    network_connections: usize,
+    network_by_key: HashMap<Vec<u8>, usize>,
+    network_by_account: HashMap<String, usize>,
 }
 
 pub struct ResourceManager {
@@ -110,6 +153,8 @@ pub struct ResourceManager {
     link_keys: Mutex<HashMap<Vec<u8>, Weak<MemoryPool>>>,
     link_accounts: Mutex<HashMap<String, Weak<MemoryPool>>>,
     counts: Mutex<Counts>,
+    network: Arc<crate::network::FairNetwork>,
+    next_network_flow: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +162,7 @@ pub struct ResourceUsage {
     pub link_bytes: usize,
     pub sessions: usize,
     pub operations: usize,
+    pub network_connections: usize,
 }
 
 impl Default for ResourceManager {
@@ -128,12 +174,15 @@ impl Default for ResourceManager {
 impl ResourceManager {
     pub fn new(limits: ResourceLimits) -> Result<Self, &'static str> {
         limits.validate()?;
+        let network = crate::network::FairNetwork::new(limits.network_write_quantum);
         Ok(ResourceManager {
             link_total: Arc::new(MemoryPool::new(limits.link_bytes_total)),
             limits,
             link_keys: Mutex::new(HashMap::new()),
             link_accounts: Mutex::new(HashMap::new()),
             counts: Mutex::new(Counts::default()),
+            network,
+            next_network_flow: AtomicU64::new(1),
         })
     }
 
@@ -147,6 +196,7 @@ impl ResourceManager {
             link_bytes: self.limits.link_bytes_total - self.link_total.all.available_permits(),
             sessions: c.sessions,
             operations: c.operations,
+            network_connections: c.network_connections,
         }
     }
 
@@ -241,6 +291,29 @@ impl ResourceManager {
             kind,
         })
     }
+
+    /// Admission for one currently attached authenticated transport. The session may outlive it;
+    /// dropping this permit on EOF/cancellation releases all network counters for RESUME.
+    pub fn try_network_connection(self: &Arc<Self>, key: &[u8], account: &str) -> Option<NetworkConnectionPermit> {
+        let mut c = self.counts.lock().unwrap();
+        if c.network_connections >= self.limits.max_network_connections_total
+            || c.network_by_key.get(key).copied().unwrap_or(0) >= self.limits.max_network_connections_per_key
+            || c.network_by_account.get(account).copied().unwrap_or(0) >= self.limits.max_network_connections_per_account
+        {
+            return None;
+        }
+        c.network_connections += 1;
+        *c.network_by_key.entry(key.to_vec()).or_default() += 1;
+        *c.network_by_account.entry(account.to_string()).or_default() += 1;
+        drop(c);
+        let id = self.next_network_flow.fetch_add(1, Ordering::Relaxed);
+        Some(NetworkConnectionPermit {
+            manager: self.clone(),
+            key: key.to_vec(),
+            account: account.to_string(),
+            flow: self.network.flow(id),
+        })
+    }
 }
 
 pub struct SessionPermit {
@@ -290,6 +363,28 @@ impl Drop for OperationPermit {
         decrement(&mut c.operations_by_key, &self.key);
         decrement(&mut c.operations_by_account, &self.account);
         decrement(&mut c.operations_by_kind, &self.kind);
+    }
+}
+
+pub struct NetworkConnectionPermit {
+    manager: Arc<ResourceManager>,
+    key: Vec<u8>,
+    account: String,
+    flow: crate::network::NetworkFlow,
+}
+
+impl NetworkConnectionPermit {
+    pub fn flow(&self) -> crate::network::NetworkFlow {
+        self.flow.clone()
+    }
+}
+
+impl Drop for NetworkConnectionPermit {
+    fn drop(&mut self) {
+        let mut c = self.manager.counts.lock().unwrap();
+        c.network_connections -= 1;
+        decrement(&mut c.network_by_key, &self.key);
+        decrement(&mut c.network_by_account, &self.account);
     }
 }
 

@@ -12,10 +12,17 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let relay = yrl::relay::serve(listener, yrl::relay::RelayConfig::default()).await;
+    let cfg = match yrl::relay::RelayConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    };
+    let relay = yrl::relay::serve(listener, cfg).await;
     eprintln!("[yrl-relay] listening on {bind}");
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        eprintln!("[yrl-relay] pairs so far: {}, dropped: {}", relay.stats.pairs.load(std::sync::atomic::Ordering::SeqCst), relay.stats.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        eprintln!("[yrl-relay] pairs so far: {}, active: {}, dropped: {}", relay.stats.pairs.load(std::sync::atomic::Ordering::SeqCst), relay.stats.active_pairs.load(std::sync::atomic::Ordering::SeqCst), relay.stats.dropped.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

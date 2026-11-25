@@ -276,7 +276,7 @@ async fn manage(link: Arc<link::Link>, id: Ident, sid: Vec<u8>, first: Pre, sink
     let mut previous_route = first_route;
     loop {
         if let Some((rd, wr, sec, peer_expected, route)) = conn.take() {
-            let end = link::drive(&link, rd, wr, sec, sink.clone(), peer_expected, &dopt).await;
+            let end = link::drive(&link, rd, wr, sec, sink.clone(), peer_expected, &dopt, None).await;
             if end == link::End::Closed || link.is_closed() {
                 break;
             }

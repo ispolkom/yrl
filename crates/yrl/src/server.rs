@@ -380,13 +380,17 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                 let client_expected = u64::from_be_bytes(b[link::SID_LEN..].try_into().unwrap());
                 match cfg.sessions.get(&sid) {
                     Some(e) if e.key == who.public && !e.link.is_closed() && client_expected <= e.link.positions().0 && crate::executor::auth_snapshot(&cfg.dir, &e.key, &e.account).as_ref() == Some(&e.auth) => {
+                        let Some(network) = cfg.resources.try_network_connection(&e.key, &e.account) else {
+                            cfg.log(format!("resume deferred via '{}': network connection budget exhausted", who.label));
+                            return;
+                        };
                         let reply = e.link.positions().1.to_be_bytes().to_vec();
                         if !send_plain(&mut wr, &sec, Frame::new(link::RESUMED, 0, reply)).await {
                             return;
                         }
                         cfg.log(format!("session resumed via '{}'", who.label));
                         cfg.rec(1, crate::auditlog::Event::new("resume", crate::auditlog::LEVEL_USER, crate::auditlog::RESULT_OK).session(&sid).device(&who.public));
-                        run_connection(e, rd, wr, sec, client_expected, sid, &cfg).await;
+                        run_connection(e, rd, wr, sec, client_expected, sid, &cfg, network).await;
                         return;
                     }
                     _ => {
@@ -431,6 +435,11 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                         cfg.max_sessions_per_account,
                     ) else {
                         cfg.log(format!("login refused via '{}': too many sessions", who.label));
+                        let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                        return;
+                    };
+                    let Some(network) = cfg.resources.try_network_connection(&who.public, &typed_login) else {
+                        cfg.log(format!("login refused via '{}': network connection budget exhausted", who.label));
                         let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
                         return;
                     };
@@ -502,7 +511,7 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                         cfg.sessions.remove(&sid);
                         return;
                     }
-                    run_connection(entry, rd, wr, sec, 0, sid, &cfg).await;
+                    run_connection(entry, rd, wr, sec, 0, sid, &cfg, network).await;
                     return;
                 }
                 None => {
@@ -531,10 +540,11 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
 }
 
 /// one connection of a session: runs until it breaks; the session itself stays for `session_grace`
-async fn run_connection<R: tokio::io::AsyncRead + Unpin + Send, W: tokio::io::AsyncWrite + Unpin + Send>(entry: Arc<SessionEntry>, rd: R, wr: W, sec: Arc<crate::session::Secure>, peer_expected: u64, sid: [u8; link::SID_LEN], cfg: &ServerConfig) {
+async fn run_connection<R: tokio::io::AsyncRead + Unpin + Send, W: tokio::io::AsyncWrite + Unpin + Send>(entry: Arc<SessionEntry>, rd: R, wr: W, sec: Arc<crate::session::Secure>, peer_expected: u64, sid: [u8; link::SID_LEN], cfg: &ServerConfig, network: crate::resources::NetworkConnectionPermit) {
     let gen = entry.attach_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let Some(sink) = entry.inbound.lock().unwrap().clone() else { return };
-    let end = drive(&entry.link, rd, wr, sec, sink, peer_expected, &DriveOptions { dead_after: cfg.dead_after, ping_every: None }).await;
+    let flow = network.flow();
+    let end = drive(&entry.link, rd, wr, sec, sink, peer_expected, &DriveOptions { dead_after: cfg.dead_after, ping_every: None }, Some(flow)).await;
     if entry.link.is_closed() {
         cfg.sessions.remove(&sid);
         return;
