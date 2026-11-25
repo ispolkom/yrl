@@ -72,20 +72,26 @@ pub async fn rig(key_rights: &str) -> Rig {
 
 /// connected and logged in as anna
 pub async fn open(r: &Rig) -> Client {
-    let c = Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let c = Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     c
 }
 
 /// a raw, handshaken, NOT logged in connection
-pub async fn raw(r: &Rig) -> (TcpStream, Secure) {
-    let mut s = TcpStream::connect(&r.addr).await.unwrap();
-    let sec = client_handshake(&mut s, &r.client, &r.server_pub, REKEY_EVERY).await.unwrap();
+pub async fn raw(r: &Rig) -> (tokio::io::DuplexStream, Secure) {
+    let mut outer = TcpStream::connect(&r.addr).await.unwrap();
+    let gate = Arc::new(client_handshake(&mut outer, &r.client, &r.server_pub, REKEY_EVERY).await.unwrap());
+    let (mut rd, mut wr) = tokio::io::split(outer);
+    write_msg(&mut wr, &gate.seal(&Frame::new(yrl::ipc::IPC_TUNNEL, 0, vec![])).unwrap()).await.unwrap();
+    let reply = gate.open(&read_msg(&mut rd).await.unwrap()).unwrap();
+    assert_eq!(reply.kind, yrl::ipc::IPC_TUNNEL_OK);
+    let mut s = yrl::ipc::secure_tunnel(rd, wr, gate);
+    let sec = client_handshake(&mut s, &r.client, &r.exec_pub, REKEY_EVERY).await.unwrap();
     (s, sec)
 }
 
 /// sends a frame on a hand-driven connection: plain before the session starts, numbered inside it
-pub async fn send(s: &mut TcpStream, sec: &Secure, f: Frame) {
+pub async fn send<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, sec: &Secure, f: Frame) {
     use std::sync::atomic::Ordering::SeqCst;
     let f = if sec.raw_mode.load(SeqCst) {
         let seq = sec.raw_out.fetch_add(1, SeqCst);
@@ -99,7 +105,7 @@ pub async fn send(s: &mut TcpStream, sec: &Secure, f: Frame) {
 }
 
 /// the next frame from the server (inside a session: the next numbered one), or None if it closed / said nothing within two seconds
-pub async fn recv(s: &mut TcpStream, sec: &Secure) -> Option<Frame> {
+pub async fn recv<S: tokio::io::AsyncRead + Unpin>(s: &mut S, sec: &Secure) -> Option<Frame> {
     use std::sync::atomic::Ordering::SeqCst;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -120,7 +126,7 @@ pub async fn recv(s: &mut TcpStream, sec: &Secure) -> Option<Frame> {
 }
 
 /// logs in on a hand-driven connection; on success the connection switches to numbered frames
-pub async fn raw_login(s: &mut TcpStream, sec: &Secure, login: &str, pw: &[u8]) -> Option<Frame> {
+pub async fn raw_login<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(s: &mut S, sec: &Secure, login: &str, pw: &[u8]) -> Option<Frame> {
     send(s, sec, Frame::new(wire::LOGIN, 0, wire::encode_login(login.as_bytes(), pw).unwrap())).await;
     let f = recv(s, sec).await?;
     if f.kind == wire::LOGIN_OK {
@@ -145,6 +151,7 @@ pub fn fast_opts() -> yrl::client::ClientOptions {
 }
 
 pub async fn open_via(r: &Rig, addr: &str, opts: yrl::client::ClientOptions) -> Client {
+    let opts = yrl::client::ClientOptions { executor_public: Some(r.exec_pub.clone()), ..opts };
     let c = Client::connect_opts(addr, &r.client, &r.server_pub, opts).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     c

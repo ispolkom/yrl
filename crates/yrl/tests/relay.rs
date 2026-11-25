@@ -29,7 +29,7 @@ fn via(relay_addr: &str) -> ClientOptions {
 }
 
 async fn client_via(r: &Rig, relay_addr: &str) -> Client {
-    let c = Client::connect_opts("label-only", &r.client, &r.server_pub, via(relay_addr)).await.unwrap();
+    let c = Client::connect_opts("label-only", &r.client, &r.server_pub, ClientOptions { executor_public: Some(r.exec_pub.clone()), ..via(relay_addr) }).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     c
 }
@@ -107,7 +107,7 @@ async fn rl4_a_fake_server_at_the_relay_learns_nothing_and_gets_no_password() {
         }
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let opts = ClientOptions { connect_timeout: Duration::from_millis(1500), ..via(&ra) };
+    let opts = ClientOptions { executor_public: Some(victim.exec_pub.clone()), connect_timeout: Duration::from_millis(1500), ..via(&ra) };
     let res = Client::connect_opts("x", &victim.client, &victim.server_pub, opts).await;
     assert!(res.is_err(), "the client must not accept a server that cannot prove its key");
     tokio::time::sleep(Duration::from_millis(200)).await;

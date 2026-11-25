@@ -16,7 +16,7 @@ async fn main() {
             yrl::ipc::init_keys(&PathBuf::from(&a[2]))?; // the keys of the local door between the gatekeeper and the executor
             println!("server public key (give it to the client): {}", hex::encode(k.public));
             let e = std::fs::read_to_string(PathBuf::from(&a[2]).join("ipc/executor.pub"))?;
-            println!("executor public key (give it to the client for SUDO step-up): {}", e.trim());
+            println!("executor public key (pin it on every client for the end-to-end channel): {}", e.trim());
             let b = std::fs::read_to_string(PathBuf::from(&a[2]).join("ipc/broker.pub"))?;
             println!("broker public key (give it to the client for ROOT step-up): {}", b.trim());
             Ok(())

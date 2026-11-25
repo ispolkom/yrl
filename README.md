@@ -99,7 +99,7 @@ cargo build --release -p yrl
 ./target/release/yrld serve srv 0.0.0.0:2222
 
 # connect from another terminal or machine
-./target/release/yrl shell cli host:2222 <SERVER_PUBLIC_KEY> anna
+./target/release/yrl shell cli host:2222 <SERVER_PUBLIC_KEY> anna --executor <EXECUTOR_PUBLIC_KEY>
 ```
 
 For a server behind NAT:
@@ -107,7 +107,7 @@ For a server behind NAT:
 ```bash
 yrl-relay 0.0.0.0:7000
 yrld serve srv - --relay relay.example:7000
-yrl shell cli ignored:0 <SERVER_PUBLIC_KEY> anna --relay relay.example:7000
+yrl shell cli ignored:0 <SERVER_PUBLIC_KEY> anna --executor <EXECUTOR_PUBLIC_KEY> --relay relay.example:7000
 ```
 
 Production-style installation uses separate system users and systemd units. Read [deploy/INSTALL.md](deploy/INSTALL.md) before running `sudo ./deploy/install.sh prepare …`; preparation does not start services or touch firewall rules.

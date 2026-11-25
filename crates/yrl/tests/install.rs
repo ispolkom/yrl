@@ -33,7 +33,7 @@ fn i1_the_table_says_what_it_should_about_secrets() {
     let l = state_layout();
     // only these files may be read by any group, and only by the group named
     let group_readable: BTreeSet<(String, &str)> = l.iter().filter(|i| i.kind == Kind::File && i.mode & 0o040 != 0 && !i.path.ends_with(".pub")).map(|i| (i.path.clone(), i.group)).collect();
-    let want: BTreeSet<(String, &str)> = [("authorized_keys", G_CONF), ("users", G_CONF), ("tunnels", G_CONF), ("words.root", "yrl-broker")].iter().map(|(p, g)| (p.to_string(), *g)).collect();
+    let want: BTreeSet<(String, &str)> = [("authorized_keys", G_CONF), ("words.root", "yrl-broker")].iter().map(|(p, g)| (p.to_string(), *g)).collect();
     assert_eq!(group_readable, want, "which files a group may read");
     // nothing is open to everybody except the public keys
     let everyone: BTreeSet<String> = l.iter().filter(|i| i.kind == Kind::File && i.mode & 0o004 != 0).map(|i| i.path.clone()).collect();
@@ -370,20 +370,21 @@ async fn wait_for(p: PathBuf) {
 }
 
 /// the executor expects its gatekeeper by user NAME and without the /proc check (as the unit file says); `gate_uid` is what the executor is told
-async fn stand_with(gate_uid: &str) -> (tempfile::TempDir, Procs, String, Vec<u8>, yrl::keys::KeyPair) {
+async fn stand_with(gate_uid: &str) -> (tempfile::TempDir, Procs, String, Vec<u8>, Vec<u8>, yrl::keys::KeyPair) {
     stand_any(gate_uid, true).await
 }
 
-async fn stand_default_exe() -> (tempfile::TempDir, Procs, String, Vec<u8>, yrl::keys::KeyPair) {
+async fn stand_default_exe() -> (tempfile::TempDir, Procs, String, Vec<u8>, Vec<u8>, yrl::keys::KeyPair) {
     stand_any(&my_user_name(), false).await
 }
 
-async fn stand_any(gate_uid: &str, no_exe_check: bool) -> (tempfile::TempDir, Procs, String, Vec<u8>, yrl::keys::KeyPair) {
+async fn stand_any(gate_uid: &str, no_exe_check: bool) -> (tempfile::TempDir, Procs, String, Vec<u8>, Vec<u8>, yrl::keys::KeyPair) {
     let dir = tempfile::tempdir().unwrap();
     let sd = dir.path().join("srv");
     let out = Command::new(env!("CARGO_BIN_EXE_yrld")).args(["init", sd.to_str().unwrap()]).output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let server_pub = hex::decode(text.lines().find(|l| l.contains("server public")).unwrap().split_whitespace().last().unwrap()).unwrap();
+    let exec_pub = hex::decode(text.lines().find(|l| l.contains("executor public")).unwrap().split_whitespace().last().unwrap()).unwrap();
     let client = yrl::keys::generate();
     yrl::keys::authorize(&sd.join("authorized_keys"), &hex::encode(&client.public), "laptop", "exec").unwrap();
     yrl::users::set_user(&sd.join("users"), "anna", "exec", PW).unwrap();
@@ -405,7 +406,7 @@ async fn stand_any(gate_uid: &str, no_exe_check: bool) -> (tempfile::TempDir, Pr
     std::fs::copy(env!("CARGO_BIN_EXE_yrld"), &copy).unwrap();
     procs.0.push(Command::new(&copy).args(["gatekeeper", &s, &format!("127.0.0.1:{port}")]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     tokio::time::sleep(Duration::from_millis(700)).await;
-    (dir, procs, format!("127.0.0.1:{port}"), server_pub, client)
+    (dir, procs, format!("127.0.0.1:{port}"), server_pub, exec_pub, client)
 }
 
 fn my_user_name() -> String {
@@ -415,19 +416,19 @@ fn my_user_name() -> String {
 #[tokio::test]
 async fn i9_the_door_between_users_is_kept_by_user_id_and_the_proc_check_can_be_off() {
     // told the gatekeeper's user by name, with the program check off: it works
-    let (_d, _p, addr, server_pub, client) = stand_with(&my_user_name()).await;
-    let c = yrl::client::Client::connect_opts(&addr, &client, &server_pub, fast_opts()).await.unwrap();
+    let (_d, _p, addr, server_pub, exec_pub, client) = stand_with(&my_user_name()).await;
+    let c = yrl::client::Client::connect_opts(&addr, &client, &server_pub, yrl::client::ClientOptions { executor_public: Some(exec_pub), ..fast_opts() }).await.unwrap();
     c.login("anna", PW, T).await.expect("the gatekeeper is the expected user");
     assert_eq!(c.exec(&[b"echo", b"across"], 5000, Duration::from_secs(20)).await.unwrap().stdout, b"across\n");
     // told another user: the same gatekeeper is a stranger at the door
     // ... and when the program check is on (the default), the same copy is a stranger even with the right user id
-    let (_d3, _p3, addr3, server_pub3, client3) = stand_default_exe().await;
-    let c3 = yrl::client::Client::connect_opts(&addr3, &client3, &server_pub3, fast_opts()).await.unwrap();
-    assert!(c3.login("anna", PW, T).await.is_err(), "by default the door wants the very same program");
+    let (_d3, _p3, addr3, server_pub3, exec_pub3, client3) = stand_default_exe().await;
+    let c3 = yrl::client::Client::connect_opts(&addr3, &client3, &server_pub3, yrl::client::ClientOptions { executor_public: Some(exec_pub3), ..fast_opts() }).await;
+    assert!(c3.is_err(), "by default the door wants the very same program");
     let other = if me().0 == 1 { "2" } else { "1" };
-    let (_d2, _p2, addr2, server_pub2, client2) = stand_with(other).await;
-    let c2 = yrl::client::Client::connect_opts(&addr2, &client2, &server_pub2, fast_opts()).await.unwrap();
-    assert!(c2.login("anna", PW, T).await.is_err(), "the door checks the user id");
+    let (_d2, _p2, addr2, server_pub2, exec_pub2, client2) = stand_with(other).await;
+    let c2 = yrl::client::Client::connect_opts(&addr2, &client2, &server_pub2, yrl::client::ClientOptions { executor_public: Some(exec_pub2), ..fast_opts() }).await;
+    assert!(c2.is_err(), "the door checks the user id");
 }
 
 #[test]
@@ -519,21 +520,21 @@ fn i13_a_failed_login_says_why_in_the_owners_log_and_nothing_to_the_sender() {
 async fn i14_the_server_log_tells_a_wrong_password_from_a_lock_and_from_a_bad_file() {
     let r = rig("exec").await;
     let log = |needle: &str| r.log.lock().unwrap().iter().any(|l| l.contains(needle));
-    let c = yrl::client::Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let c = yrl::client::Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     assert!(c.login("anna", b"not the password at all", T).await.is_err());
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(log("wrong password, or no such account"), "{:?}", r.log.lock().unwrap());
     // the file the gatekeeper reads is made unreadable for it: the log says that, not 'wrong password'
     let users = r.server_dir().join("users");
     std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o666)).unwrap();
-    let c2 = yrl::client::Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let c2 = yrl::client::Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     assert!(c2.login("anna", PW, T).await.is_err());
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(log("accounts file is writable by its group or open to others"), "{:?}", r.log.lock().unwrap());
     std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o600)).unwrap();
     // enough failures: the lock is named
     for _ in 0..8 {
-        if let Ok(c) = yrl::client::Client::connect(&r.addr, &r.client, &r.server_pub, T).await {
+        if let Ok(c) = yrl::client::Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await {
             let _ = c.login("anna", b"wrong wrong wrong", T).await;
         }
     }

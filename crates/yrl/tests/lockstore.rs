@@ -192,7 +192,7 @@ async fn k9_through_the_whole_system_a_restarted_broker_keeps_its_locks_and_unlo
     let out = Command::new(yrld).args(["init", sd.to_str().unwrap()]).output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let key_of = |tag: &str| hex::decode(text.lines().find(|l| l.contains(tag)).unwrap().split_whitespace().last().unwrap()).unwrap();
-    let (server_pub, broker_pub) = (key_of("server public"), key_of("broker public"));
+    let (server_pub, executor_pub, broker_pub) = (key_of("server public"), key_of("executor public"), key_of("broker public"));
     let client = yrl::keys::generate();
     yrl::keys::authorize(&sd.join("authorized_keys"), &hex::encode(&client.public), "laptop", "exec,root").unwrap();
     yrl::users::set_user(&sd.join("users"), "anna", "exec,root", PW).unwrap();
@@ -238,7 +238,7 @@ async fn k9_through_the_whole_system_a_restarted_broker_keeps_its_locks_and_unlo
     procs.0.push(mk(&["gatekeeper", sd.to_str().unwrap(), &format!("127.0.0.1:{port}")]));
     tokio::time::sleep(Duration::from_millis(600)).await;
     let addr = format!("127.0.0.1:{port}");
-    let c = yrl::client::Client::connect(&addr, &client, &server_pub, T).await.unwrap();
+    let c = yrl::client::Client::connect_pinned(&addr, &client, &server_pub, &executor_pub, T).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     let op = Op::RestartService("kept".into());
     for _ in 0..3 {
@@ -252,7 +252,7 @@ async fn k9_through_the_whole_system_a_restarted_broker_keeps_its_locks_and_unlo
     procs.0.push(mk(&["broker", sd.to_str().unwrap()]));
     wait_for("broker.sock").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let c2 = yrl::client::Client::connect(&addr, &client, &server_pub, T).await.unwrap();
+    let c2 = yrl::client::Client::connect_pinned(&addr, &client, &server_pub, &executor_pub, T).await.unwrap();
     c2.login("anna", PW, T).await.unwrap();
     let e = c2.elevate(Level::Root, &op, ROOT_PHRASE, &broker_pub, Duration::from_secs(8)).await.unwrap_err().to_string();
     assert!(e.contains("locked"), "after the restart: {e}");

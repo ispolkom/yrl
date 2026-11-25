@@ -78,11 +78,11 @@ fn g2_the_socket_is_private_and_its_place_is_safe() {
 async fn g3_only_the_gatekeeper_with_the_key_set_up_for_it_gets_in() {
     let r = rig("exec,shell").await;
     let (g, _e) = executor_of(&r, |_| {}).await;
-    assert!(open_session(&g, &r.client.public, "anna", &rights(&["exec"])).await.is_some(), "the real gatekeeper gets in");
+    assert!(yrl::executor::open_tunnel(&g, None).await.is_some(), "the real gatekeeper gets a carrier tunnel");
     let impostor = GatekeeperIpc { key: yrl::keys::generate(), ..g.clone() };
-    assert!(open_session(&impostor, &r.client.public, "anna", &rights(&["exec"])).await.is_none(), "a program with another key does not");
+    assert!(yrl::executor::open_tunnel(&impostor, None).await.is_none(), "a program with another key does not");
     let wrong_executor = GatekeeperIpc { executor_public: yrl::keys::generate().public, ..g.clone() };
-    assert!(open_session(&wrong_executor, &r.client.public, "anna", &rights(&["exec"])).await.is_none(), "and a gatekeeper does not talk to a fake executor either");
+    assert!(yrl::executor::open_tunnel(&wrong_executor, None).await.is_none(), "and a gatekeeper does not talk to a fake executor either");
     assert!(r.log.lock().unwrap().iter().any(|l| l.contains("handshake")));
 }
 
@@ -91,13 +91,13 @@ async fn g4_the_program_and_the_user_on_the_other_end_must_be_the_expected_ones(
     let r = rig("exec,shell").await;
     // right key, wrong program
     let (g, _e) = executor_of(&r, |e| e.expected_exe = Some(PathBuf::from("/bin/true"))).await;
-    assert!(open_session(&g, &r.client.public, "anna", &rights(&["exec"])).await.is_none());
+    assert!(yrl::executor::open_tunnel(&g, None).await.is_none());
     assert!(r.log.lock().unwrap().iter().any(|l| l.contains("WrongProgram")), "{:?}", r.log.lock().unwrap());
     // right key, wrong user
     let me = unsafe { libc::geteuid() };
     let r2 = rig("exec,shell").await;
     let (g2, _e2) = executor_of(&r2, |e| e.expected_uid = Some(me + 1)).await;
-    assert!(open_session(&g2, &r2.client.public, "anna", &rights(&["exec"])).await.is_none());
+    assert!(yrl::executor::open_tunnel(&g2, None).await.is_none());
     assert!(r2.log.lock().unwrap().iter().any(|l| l.contains("WrongUser")));
     // the right program and user pass (here: this very test program)
     let r3 = rig("exec,shell").await;
@@ -106,7 +106,7 @@ async fn g4_the_program_and_the_user_on_the_other_end_must_be_the_expected_ones(
         e.expected_exe = Some(std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap());
     })
     .await;
-    assert!(open_session(&g3, &r3.client.public, "anna", &rights(&["exec"])).await.is_some());
+    assert!(yrl::executor::open_tunnel(&g3, None).await.is_some());
 }
 
 #[tokio::test]
@@ -117,9 +117,9 @@ async fn g5_a_request_for_more_than_the_files_allow_is_refused() {
         let g = g.clone();
         async move { open_session(&g, &key, who, &want).await.is_some() }
     };
-    assert!(ask(r.client.public.clone(), "anna", rights(&["exec"])).await);
-    assert!(ask(r.client.public.clone(), "anna", rights(&["exec", "shell"])).await);
-    assert!(ask(r.client.public.clone(), "anna", rights(&[])).await, "nothing is a subset of everything");
+    assert!(!ask(r.client.public.clone(), "anna", rights(&["exec"])).await, "even a truthful Gatekeeper assertion is not an authentication mechanism");
+    assert!(!ask(r.client.public.clone(), "anna", rights(&["exec", "shell"])).await);
+    assert!(!ask(r.client.public.clone(), "anna", rights(&[])).await);
     assert!(!ask(r.client.public.clone(), "anna", rights(&["root"])).await, "anna has root, the KEY does not");
     assert!(!ask(r.client.public.clone(), "anna", rights(&["exec", "files"])).await, "anna has files, the key does not");
     assert!(!ask(r.client.public.clone(), "guest", rights(&["exec"])).await, "the key has exec, guest does not");
@@ -137,7 +137,7 @@ async fn g6_the_gatekeeper_cannot_pick_the_system_user() {
     let (g, _e) = executor_of(&r, |_| {}).await;
     if unsafe { libc::geteuid() } != 0 {
         assert!(open_session(&g, &r.client.public, "bound", &rights(&["exec"])).await.is_none());
-        assert!(r.log.lock().unwrap().iter().any(|l| l.contains("not root")), "{:?}", r.log.lock().unwrap());
+        assert!(r.log.lock().unwrap().iter().any(|l| l.contains("no tunnel request")), "legacy identity assertions are rejected before account resolution");
     }
     // through the whole server the same refusal reaches the client as an ordinary failed login, not as silence
     if unsafe { libc::geteuid() } != 0 {
@@ -154,25 +154,13 @@ async fn g6_the_gatekeeper_cannot_pick_the_system_user() {
 
 #[tokio::test]
 async fn g7_what_a_session_may_do_is_what_was_granted_not_what_the_gatekeeper_sends() {
-    let r = rig("exec,shell,files").await;
+    let r = rig("exec").await;
     let (g, _e) = executor_of(&r, |_| {}).await;
-    // a session granted only `exec`: a terminal, a file transfer and a directory listing are refused by the executor itself
-    let (to, mut from) = open_session(&g, &r.client.public, "anna", &rights(&["exec"])).await.unwrap();
-
-    to.send(Frame::new(wire::PTY_OPEN, 0, wire::encode_pty_open(1, 24, 80, b"xterm").unwrap())).await.unwrap();
-    let f = next(&mut from).await;
-    assert_eq!((f.kind, &f.payload[8..10]), (wire::ERROR, &1u16.to_be_bytes()[..]), "no 'shell' right");
-    let req = yrl::fsops::FsReq { id: 2, op: yrl::fsops::OP_LS, a: b"/".to_vec(), b: vec![] }.encode().unwrap();
-    to.send(Frame::new(yrl::fsops::FS_REQ, 0, req)).await.unwrap();
-    let f = next(&mut from).await;
-    assert_eq!((f.kind, &f.payload[8..10]), (wire::ERROR, &1u16.to_be_bytes()[..]), "no 'files' right");
-    to.send(Frame::new(wire::PING, 0, b"x".to_vec())).await.unwrap();
-    assert_eq!(next(&mut from).await.kind, wire::PONG, "the session itself works");
-    // a frame the executor has no business with (a second open) ends the session
-    to.send(Frame::new(ipc::IPC_OPEN, 0, vec![])).await.unwrap();
-    to.send(Frame::new(wire::LOGIN, 0, vec![])).await.unwrap();
-    let ended = tokio::time::timeout(W, async { while from.recv().await.is_some() {} }).await;
-    assert!(ended.is_ok(), "the pipe closes");
+    assert!(open_session(&g, &r.client.public, "anna", &rights(&["exec", "shell", "files"])).await.is_none());
+    let c = open(&r).await;
+    assert_eq!(c.exec(&[b"echo", b"e2e"], 5000, W).await.unwrap().stdout, b"e2e\n");
+    let mut p = c.pty_open(24, 80, "xterm").await.unwrap();
+    assert!(matches!(tokio::time::timeout(W, p.next()).await.unwrap(), yrl::client::PtyEvent::Error(1, _)), "Executor applies the authenticated key/account intersection, not Gatekeeper assertions");
 }
 
 #[tokio::test]
@@ -254,6 +242,7 @@ async fn g11_the_gatekeeper_and_the_executor_as_two_separate_programs() {
     let yrld = env!("CARGO_BIN_EXE_yrld");
     assert!(Command::new(yrld).args(["init", sd.to_str().unwrap()]).stdout(Stdio::null()).status().unwrap().success());
     let server_pub = hex::decode(std::fs::read_to_string(sd.join("static.key")).unwrap().lines().nth(1).unwrap().trim()).unwrap();
+    let executor_pub = hex::decode(std::fs::read_to_string(sd.join("ipc/executor.pub")).unwrap().trim()).unwrap();
     let client = yrl::keys::generate();
     yrl::keys::authorize(&sd.join("authorized_keys"), &hex::encode(&client.public), "laptop", "exec").unwrap();
     yrl::users::set_user(&sd.join("users"), "anna", "exec", PW).unwrap();
@@ -278,7 +267,7 @@ async fn g11_the_gatekeeper_and_the_executor_as_two_separate_programs() {
     let exec_status = std::fs::read_to_string(format!("/proc/{}/status", procs.0[0].id())).unwrap();
     assert!(exec_status.contains("Seccomp:\t0"), "the executor must NOT be walled in: it has to start programs");
     let addr = format!("127.0.0.1:{port}");
-    let c = yrl::client::Client::connect(&addr, &client, &server_pub, T).await.unwrap();
+    let c = yrl::client::Client::connect_pinned(&addr, &client, &server_pub, &executor_pub, T).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     assert_eq!(c.exec(&[b"echo", b"two programs"], 5000, W).await.unwrap().stdout, b"two programs\n");
     // the executor goes away: the session ends, the gatekeeper stays and says no to new logins instead of hanging
@@ -286,8 +275,7 @@ async fn g11_the_gatekeeper_and_the_executor_as_two_separate_programs() {
     exec_proc.kill().unwrap();
     exec_proc.wait().unwrap();
     assert!(c.exec(&[b"echo", b"x"], 5000, Duration::from_secs(5)).await.is_err(), "nothing is executed without the executor");
-    let c2 = yrl::client::Client::connect(&addr, &client, &server_pub, T).await.unwrap();
-    assert!(c2.login("anna", PW, T).await.is_err(), "no new session without the executor");
+    assert!(yrl::client::Client::connect_pinned(&addr, &client, &server_pub, &executor_pub, T).await.is_err(), "no new end-to-end connection without the executor");
     assert!(procs.0[0].try_wait().unwrap().is_none(), "the gatekeeper is still running");
 }
 
@@ -344,7 +332,7 @@ async fn g13_a_recorded_conversation_played_back_opens_nothing() {
         }
     });
     g.socket = relay_path.clone();
-    let session = open_session(&g, &r.client.public, "anna", &rights(&["exec"])).await;
+    let session = yrl::executor::open_tunnel(&g, None).await;
     assert!(session.is_some(), "the real conversation works through the relay");
     drop(session);
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -361,12 +349,9 @@ async fn g13_a_recorded_conversation_played_back_opens_nothing() {
     assert!(got.len() <= first_reply_len, "after the handshake answer the executor said nothing ({} bytes, the handshake answer is {})", got.len(), first_reply_len);
 }
 
-// These two tests describe the required Client <-> Executor boundary. They are ignored until the
-// end-to-end channel exists because both deliberately fail against the current IPC_OPEN protocol.
-// Run them explicitly with: cargo test -p yrl --test ipc gatekeeper_impersonation -- --ignored
+// These two tests describe the required Client <-> Executor boundary.
 
 #[tokio::test]
-#[ignore = "known vulnerability: IPC_OPEN trusts the gatekeeper's claim about the client key and account"]
 async fn g14_gatekeeper_impersonation_without_the_client_private_key_or_password_is_refused() {
     let r = rig("exec").await;
     let (gate, _executor) = executor_of(&r, |_| {}).await;
@@ -379,24 +364,13 @@ async fn g14_gatekeeper_impersonation_without_the_client_private_key_or_password
 }
 
 #[tokio::test]
-#[ignore = "known vulnerability: a gatekeeper-authenticated IPC peer can inject ordinary user operations"]
 async fn g15_gatekeeper_impersonation_cannot_inject_an_exec_operation() {
     let r = rig("exec").await;
     let (gate, _executor) = executor_of(&r, |_| {}).await;
     let claimed_public = yrl::keys::read_authorized(&r.server_dir().join("authorized_keys"))[0].public.clone();
-    let (to_executor, mut from_executor) = open_session(&gate, &claimed_public, "anna", &rights(&["exec"])).await.expect("current architecture accepts the forged session");
-
     let marker = r.dir.path().join("injected-by-gatekeeper");
-    let path = marker.as_os_str().as_encoded_bytes().to_vec();
-    let request = yrl::wire::ExecReq { request_id: 91, timeout_ms: 5_000, argv: vec![b"/usr/bin/touch".to_vec(), path] };
-    to_executor.send(Frame::new(wire::EXEC_REQ, 0, request.encode().unwrap())).await.unwrap();
-    tokio::time::timeout(W, async {
-        while let Some(frame) = from_executor.recv().await {
-            if frame.kind == wire::EXIT || frame.kind == wire::ERROR {
-                break;
-            }
-        }
-    }).await.unwrap();
+    let forged = open_session(&gate, &claimed_public, "anna", &rights(&["exec"])).await;
+    assert!(forged.is_none(), "Executor opened an operation channel from Gatekeeper assertions");
 
     assert!(!marker.exists(), "Executor ran an operation created by Gatekeeper rather than authenticated end-to-end from Client");
 }

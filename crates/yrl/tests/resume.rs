@@ -193,9 +193,19 @@ async fn r7_a_session_is_ended_when_nobody_comes_back_and_the_client_learns_it()
 }
 
 /// a hand-driven login that also returns the session id
-async fn raw_with_sid(r: &Rig, key: &yrl::keys::KeyPair) -> (tokio::net::TcpStream, yrl::session::Secure, Vec<u8>) {
-    let mut s = tokio::net::TcpStream::connect(&r.addr).await.unwrap();
-    let sec = yrl::session::client_handshake(&mut s, key, &r.server_pub, yrl::session::REKEY_EVERY).await.unwrap();
+async fn raw_for(r: &Rig, key: &yrl::keys::KeyPair) -> Option<(tokio::io::DuplexStream, yrl::session::Secure)> {
+    let mut outer = tokio::net::TcpStream::connect(&r.addr).await.ok()?;
+    let gate = std::sync::Arc::new(yrl::session::client_handshake(&mut outer, key, &r.server_pub, yrl::session::REKEY_EVERY).await.ok()?);
+    let (mut rd, mut wr) = tokio::io::split(outer);
+    yrl::session::write_msg(&mut wr, &gate.seal(&Frame::new(yrl::ipc::IPC_TUNNEL, 0, vec![])).ok()?).await.ok()?;
+    if gate.open(&yrl::session::read_msg(&mut rd).await.ok()?).ok()?.kind != yrl::ipc::IPC_TUNNEL_OK { return None }
+    let mut s = yrl::ipc::secure_tunnel(rd, wr, gate);
+    let sec = yrl::session::client_handshake(&mut s, key, &r.exec_pub, yrl::session::REKEY_EVERY).await.ok()?;
+    Some((s, sec))
+}
+
+async fn raw_with_sid(r: &Rig, key: &yrl::keys::KeyPair) -> (tokio::io::DuplexStream, yrl::session::Secure, Vec<u8>) {
+    let (mut s, sec) = raw_for(r, key).await.unwrap();
     send(&mut s, &sec, Frame::new(wire::LOGIN, 0, wire::encode_login(b"anna", PW).unwrap())).await;
     assert_eq!(recv(&mut s, &sec).await.unwrap().kind, wire::LOGIN_OK);
     let sess = recv(&mut s, &sec).await.unwrap();
@@ -204,8 +214,7 @@ async fn raw_with_sid(r: &Rig, key: &yrl::keys::KeyPair) -> (tokio::net::TcpStre
 }
 
 async fn try_resume(r: &Rig, key: &yrl::keys::KeyPair, sid: &[u8]) -> Option<u8> {
-    let mut s = tokio::net::TcpStream::connect(&r.addr).await.unwrap();
-    let sec = yrl::session::client_handshake(&mut s, key, &r.server_pub, yrl::session::REKEY_EVERY).await.ok()?;
+    let (mut s, sec) = raw_for(r, key).await?;
     let mut p = sid.to_vec();
     p.extend_from_slice(&0u64.to_be_bytes());
     send(&mut s, &sec, Frame::new(link::RESUME, 0, p)).await;
@@ -273,11 +282,11 @@ async fn r11_the_number_of_sessions_is_limited() {
     let r = rig_with("exec,shell,files,tunnel", |mut c| { c.max_sessions_per_key = 2; c }).await;
     let a = open(&r).await;
     let b = open(&r).await;
-    let third = yrl::client::Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let third = yrl::client::Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     assert!(third.login("anna", PW, T).await.is_err(), "the third session of one key is refused");
     drop(a);
     tokio::time::sleep(Duration::from_millis(400)).await;
-    let fourth = yrl::client::Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let fourth = yrl::client::Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     assert!(fourth.login("anna", PW, T).await.is_ok(), "a place was freed");
     drop(b);
 }
@@ -338,8 +347,7 @@ async fn r14_a_slow_network_is_just_slow() {
 async fn r15_a_client_cannot_claim_to_have_received_what_was_never_sent() {
     let r = rig("exec,shell,files,tunnel").await;
     let (_s, _sec, sid) = raw_with_sid(&r, &r.client).await;
-    let mut s = tokio::net::TcpStream::connect(&r.addr).await.unwrap();
-    let sec = yrl::session::client_handshake(&mut s, &r.client, &r.server_pub, yrl::session::REKEY_EVERY).await.unwrap();
+    let (mut s, sec) = raw_for(&r, &r.client).await.unwrap();
     let mut p = sid.clone();
     p.extend_from_slice(&1_000_000u64.to_be_bytes());
     send(&mut s, &sec, Frame::new(link::RESUME, 0, p)).await;
@@ -364,7 +372,7 @@ async fn r17_the_total_number_of_sessions_is_limited_too() {
     let _a = open(&r).await;
     let other = yrl::keys::generate();
     yrl::keys::authorize(&r.server_dir().join("authorized_keys"), &hex::encode(&other.public), "second", "exec").unwrap();
-    let b = yrl::client::Client::connect(&r.addr, &other, &r.server_pub, T).await.unwrap();
+    let b = yrl::client::Client::connect_pinned(&r.addr, &other, &r.server_pub, &r.exec_pub, T).await.unwrap();
     assert!(b.login("anna", PW, T).await.is_err(), "a different key is refused as well: the server is full");
 }
 

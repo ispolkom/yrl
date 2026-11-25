@@ -88,7 +88,7 @@ async fn account(r: &Rig, login: &str, rights: &str, os: Option<&str>) {
 }
 
 async fn try_login(r: &Rig, login: &str) -> bool {
-    let c = Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let c = Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     c.login(login, b"some good password", T).await.is_ok()
 }
 
@@ -109,7 +109,7 @@ async fn i4_an_account_that_cannot_get_a_safe_identity_is_refused_even_with_the_
     let m = me().expect("the user running the tests is in /etc/passwd");
     account(&r, "myself", "exec", Some(&m.name)).await;
     assert!(try_login(&r, "myself").await, "naming the user the server already runs as is fine");
-    let c = Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let c = Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     c.login("myself", b"some good password", T).await.unwrap();
     assert_eq!(String::from_utf8_lossy(&c.exec(&[b"id", b"-un"], 5000, T).await.unwrap().stdout).trim(), m.name);
 }

@@ -72,7 +72,7 @@ fn quick() -> ClientOptions {
 }
 
 async fn try_connect(g: &Gate, key: &yrl::keys::KeyPair) -> Result<Client, String> {
-    Client::connect_opts(&g.r.addr, key, &g.r.server_pub, quick()).await.map_err(|e| e.to_string())
+    Client::connect_opts(&g.r.addr, key, &g.r.server_pub, ClientOptions { executor_public: Some(g.r.exec_pub.clone()), ..quick() }).await.map_err(|e| e.to_string())
 }
 
 fn read_j(dir: &std::path::Path, j: Journal) -> Vec<Record> {
@@ -174,7 +174,7 @@ async fn g6_the_client_knocks_by_itself_before_connecting_and_before_every_recon
     let mut o = quick();
     o.connect_timeout = Duration::from_secs(5);
     o.knock = Some(Knock { udp: g.spa.to_string(), settle: Duration::from_millis(150) });
-    let c = Client::connect_opts(&ch.addr, &g.r.client, &g.r.server_pub, o).await.expect("the knock is sent before the connection");
+    let c = Client::connect_opts(&ch.addr, &g.r.client, &g.r.server_pub, ClientOptions { executor_public: Some(g.r.exec_pub.clone()), ..o }).await.expect("the knock is sent before the connection");
     c.login("anna", PW, T).await.unwrap();
     let mut p = c.pty_open(24, 80, "xterm").await.unwrap();
     p.write(b"echo pid-$$-a$((1+1))\n").await.unwrap();

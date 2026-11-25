@@ -211,7 +211,7 @@ async fn t12_a_revoked_key_is_refused_at_once() {
 #[tokio::test]
 async fn keys_rotate_every_n_messages_in_step_on_both_sides() {
     let r = rig_with("exec", |mut c| { c.rekey_every = 3; c }).await;
-    let c = Client::connect_with(&r.addr, &r.client, &r.server_pub, T, 3).await.unwrap();
+    let c = Client::connect_pinned_with(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T, 3).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     for i in 0..25u8 {
         assert_eq!(c.ping(&[i], T).await.unwrap(), vec![i], "message {i} after rotations");

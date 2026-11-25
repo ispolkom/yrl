@@ -137,7 +137,7 @@ pub async fn serve(listener: TcpListener, me: KeyPair, mut cfg: ServerConfig) {
         let Ok(slot) = cfg.conn_slots.clone().try_acquire_owned() else { continue }; // full: dropped without a word
         let (cfg, me) = (cfg.clone(), me.clone());
         tokio::spawn(async move {
-            handle(stream, Some(peer), me, cfg).await;
+            handle_gate(stream, Some(peer), me, cfg).await;
             drop(slot);
         });
     }
@@ -194,7 +194,7 @@ pub async fn serve_udp(sock: Arc<tokio::net::UdpSocket>, me: KeyPair, mut cfg: S
         let stream = crate::udp::spawn_stream(id, send, rx, true);
         let (cfg, me, conns2) = (cfg.clone(), me.clone(), conns.clone());
         tokio::spawn(async move {
-            handle(stream, Some(peer), me, cfg).await;
+            handle_gate(stream, Some(peer), me, cfg).await;
             conns2.lock().unwrap().remove(&id);
             drop(slot);
         });
@@ -280,8 +280,41 @@ async fn send_plain<W: tokio::io::AsyncWrite + Unpin>(wr: &mut W, sec: &crate::s
     }
 }
 
+/// Network-facing gatekeeper. It authenticates the device for admission and then carries only an
+/// opaque Client <-> Executor Noise stream. LOGIN, RESUME, ACK/SEQ and operation frames never
+/// terminate here.
+async fn handle_gate<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(mut stream: S, peer: Option<SocketAddr>, me: KeyPair, cfg: ServerConfig) {
+    use crate::ipc::{IPC_TUNNEL, IPC_TUNNEL_OK};
+    let authorized = read_authorized(&cfg.dir.join("authorized_keys"));
+    let window = crate::enroll::read_window(&cfg.dir);
+    let hs = tokio::time::timeout(
+        cfg.handshake_timeout,
+        server_handshake_open(&mut stream, &me, &authorized, cfg.rekey_every, window.is_some()),
+    ).await;
+    let (sec, who) = match hs {
+        Ok(Ok(x)) => x,
+        Ok(Err(_)) => { cfg.log("connection dropped (gate handshake failed)".into()); return }
+        Err(_) => { cfg.log("connection dropped (gate handshake timeout)".into()); return }
+    };
+    if !authorized.iter().any(|a| a.public == who.public) {
+        if let Some(w) = window { enroll_guest(stream, sec, who, w, &cfg).await; }
+        return;
+    }
+    let Some(gate) = cfg.gate.as_ref() else { return };
+    let sec = Arc::new(sec);
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    let Ok(Ok(msg)) = tokio::time::timeout(cfg.handshake_timeout, read_msg(&mut rd)).await else { return };
+    let Ok(request) = sec.open(&msg) else { return };
+    if request.kind != IPC_TUNNEL || !request.payload.is_empty() { return }
+    let Some(mut executor) = crate::executor::open_tunnel(gate, peer).await else { return };
+    let Ok(reply) = sec.seal(&Frame::new(IPC_TUNNEL_OK, 0, vec![])) else { return };
+    if write_msg(&mut wr, &reply).await.is_err() { return }
+    let mut client = crate::ipc::secure_tunnel(rd, wr, sec);
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut executor).await;
+}
+
 /// `peer` is None for a connection that arrived through a relay: the relay is not trusted to say who the client is, so there is no address to throttle by
-async fn handle<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(mut stream: S, peer: Option<SocketAddr>, me: KeyPair, cfg: ServerConfig) {
+pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(mut stream: S, peer: Option<SocketAddr>, me: KeyPair, cfg: ServerConfig) {
     // read afresh on every connection: a revoked key acts at once
     let authorized = read_authorized(&cfg.dir.join("authorized_keys"));
     // outside a window an unknown key gets silence; while the owner has one open it may complete the handshake, to present the code and nothing else
@@ -341,7 +374,7 @@ async fn handle<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send +
                             return;
                         }
                         cfg.log(format!("session resumed via '{}'", who.label));
-                        cfg.rec(0, crate::auditlog::Event::new("resume", crate::auditlog::LEVEL_USER, crate::auditlog::RESULT_OK).session(&sid).device(&who.public));
+                        cfg.rec(1, crate::auditlog::Event::new("resume", crate::auditlog::LEVEL_USER, crate::auditlog::RESULT_OK).session(&sid).device(&who.public));
                         run_connection(e, rd, wr, sec, client_expected, sid, &cfg).await;
                         return;
                     }
@@ -349,7 +382,7 @@ async fn handle<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send +
                         cfg.throttle.fail(&key_id);
                         cfg.throttle.fail(&ip_id);
                         cfg.log(format!("resume refused via '{}'", who.label));
-                        cfg.rec(0, crate::auditlog::Event::new("resume", crate::auditlog::LEVEL_NONE, crate::auditlog::RESULT_DENIED).device(&who.public));
+                        cfg.rec(1, crate::auditlog::Event::new("resume", crate::auditlog::LEVEL_NONE, crate::auditlog::RESULT_DENIED).device(&who.public));
                         let _ = send_plain(&mut wr, &sec, Frame::new(link::RESUME_REFUSED, 0, vec![])).await;
                         return;
                     }
@@ -377,16 +410,16 @@ async fn handle<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send +
                     cfg.throttle.ok(&key_id);
                     cfg.throttle.ok(&ip_id);
                     cfg.log(format!("login ok via '{}'", who.label));
-                    cfg.rec(0, crate::auditlog::Event::new("login", crate::auditlog::LEVEL_USER, crate::auditlog::RESULT_OK).device(&who.public).user(&typed_login));
+                    cfg.rec(1, crate::auditlog::Event::new("login", crate::auditlog::LEVEL_USER, crate::auditlog::RESULT_OK).device(&who.public).user(&typed_login));
                     if !cfg.sessions.room_for(&who.public, cfg.max_sessions, cfg.max_sessions_per_key) {
                         cfg.log(format!("login refused via '{}': too many sessions", who.label));
                         let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
                         return;
                     }
-                    // the executor is asked first: it decides from the account files whether this session may exist and as whom it runs
-                    let Some(gate) = cfg.gate.clone() else { return };
-                    let Some((to_exec, mut from_exec)) = crate::executor::open_session(&gate, &who.public, &typed_login, &eff).await else {
-                        cfg.log(format!("login refused via '{}': the executor said no", who.label));
+                    // This code runs in Executor. Identity and rights came from the authenticated
+                    // inner channel and are checked against Executor-owned files here.
+                    let Some((to_exec, mut from_exec)) = crate::executor::direct_session(&cfg, &who.public, &typed_login, &eff).await else {
+                        cfg.log(format!("login refused via '{}': executor authorization failed", who.label));
                         let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
                         return;
                     };
@@ -434,7 +467,7 @@ async fn handle<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send +
                     // the typed login is not logged: people type passwords there. The reason is for the owner's own log; the sender is told nothing but "no".
                     let why = if locked { "locked after repeated failures (the password was not even looked at)" } else { crate::users::why_unreadable(&cfg.dir.join("users")).unwrap_or("wrong password, or no such account") };
                     cfg.log(format!("login failed via '{}': {why}", who.label));
-                    cfg.rec(0, crate::auditlog::Event::new("login", crate::auditlog::LEVEL_NONE, if locked { crate::auditlog::RESULT_LOCKED } else { crate::auditlog::RESULT_DENIED }).device(&who.public));
+                    cfg.rec(1, crate::auditlog::Event::new("login", crate::auditlog::LEVEL_NONE, if locked { crate::auditlog::RESULT_LOCKED } else { crate::auditlog::RESULT_DENIED }).device(&who.public));
                     let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
                     if attempts >= cfg.max_login_attempts {
                         break;
@@ -504,7 +537,7 @@ pub async fn serve_via_relay(relay_addr: String, me: KeyPair, mut cfg: ServerCon
                 }
                 cfg.log("a client came through the relay".into());
                 let (cfg2, me2) = (cfg.clone(), me.clone());
-                tokio::spawn(async move { handle(stream, None, me2, cfg2).await });
+                tokio::spawn(async move { handle_gate(stream, None, me2, cfg2).await });
             }
         }));
     }

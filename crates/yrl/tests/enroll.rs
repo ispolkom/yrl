@@ -59,7 +59,7 @@ async fn n2_the_whole_way_a_new_device_is_added_and_can_then_log_in_with_exactly
     let me = list.iter().find(|a| a.public == phone.public).unwrap();
     assert_eq!((me.label.as_str(), me.rights.clone()), ("phone", rights(&["exec", "files"])));
     // and it logs in as usual, with the account's password; the window is not needed any more
-    let c2 = Client::connect(&r.addr, &phone, &r.server_pub, T).await.unwrap();
+    let c2 = Client::connect_pinned(&r.addr, &phone, &r.server_pub, &r.exec_pub, T).await.unwrap();
     assert_eq!(c2.login("anna", PW, T).await.unwrap(), rights(&["exec", "files"]), "rights = account and key; the key has exec and files");
     assert_eq!(c2.exec(&[b"echo", b"enrolled"], 5000, W).await.unwrap().stdout, b"enrolled\n");
 }

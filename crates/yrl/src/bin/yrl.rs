@@ -34,6 +34,12 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
             owned.drain(i..=i + 1);
         }
     }
+    if let Some(i) = owned.iter().position(|x| x == "--executor") {
+        if let Some(k) = owned.get(i + 1).cloned() {
+            std::env::set_var("YRL_EXECUTOR_KEY", k);
+            owned.drain(i..=i + 1);
+        }
+    }
     let a = &owned[..];
     match a.get(1).map(String::as_str) {
         Some("keygen") => {
@@ -87,6 +93,7 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
                 _ => anyhow::bail!("level: sudo or root"),
             };
             let exec_pub = hex::decode(a.get(7).ok_or_else(|| anyhow::anyhow!("need the executor key"))?)?;
+            std::env::set_var("YRL_EXECUTOR_KEY", &a[7]);
             let arg = a.get(9).cloned().unwrap_or_default();
             let op = match a.get(8).map(String::as_str) {
                 Some("test") => Op::TestPrivileged(arg),
@@ -128,7 +135,7 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
             }
             std::process::exit(r.code);
         }
-        _ => anyhow::bail!("usage: yrl keygen <dir> | enroll <dir> <addr> <srv-key> <name> | elevate <..> <sudo|root> <executor-key> <test|restart> [arg] | visual <..> | forward <..> <local-port> <host> <port> | socks <..> <local-port> | put|get <dir> <host:port> <server-public-hex> <login> <from> <to> | shell <dir> <host:port> <server-public-hex> <login> | ping <dir> <host:port> <server-public-hex> <login> | exec <dir> <host:port> <server-public-hex> <login> -- <program> [args…]"),
+        _ => anyhow::bail!("usage: yrl keygen <dir> | enroll <dir> <addr> <srv-key> <name> | elevate <..> <sudo|root> <executor-key> <test|restart> [arg] | visual <..> | forward <..> <local-port> <host> <port> | socks <..> <local-port> | put|get <dir> <host:port> <server-public-hex> <login> <from> <to> | shell <dir> <host:port> <server-public-hex> <login> | ping <dir> <host:port> <server-public-hex> <login> | exec <dir> <host:port> <server-public-hex> <login> -- <program> [args…]; add --executor <executor-public-hex> to every login command"),
     }
     Ok(())
 }
@@ -140,9 +147,10 @@ async fn connect(a: &[String]) -> anyhow::Result<Client> {
     }
     let me = keys::load(&PathBuf::from(&a[2]))?;
     let server = hex::decode(&a[4])?;
+    let executor_public = hex::decode(std::env::var("YRL_EXECUTOR_KEY").map_err(|_| anyhow::anyhow!("missing pinned Executor key: pass --executor <executor-public-hex>"))?)?;
     let relay = std::env::var("YRL_RELAY").ok();
     let knock = std::env::var("YRL_KNOCK").ok().map(|udp| yrl::client::Knock { udp, settle: Duration::from_millis(300) });
-    let opts = yrl::client::ClientOptions { connect_timeout: Duration::from_secs(if relay.is_some() || knock.is_some() { 15 } else { 5 }), relay, knock, udp: std::env::var("YRL_UDP").ok(), ..Default::default() };
+    let opts = yrl::client::ClientOptions { executor_public: Some(executor_public), connect_timeout: Duration::from_secs(if relay.is_some() || knock.is_some() { 15 } else { 5 }), relay, knock, udp: std::env::var("YRL_UDP").ok(), ..Default::default() };
     let c = Client::connect_opts(&a[3], &me, &server, opts).await?;
     let pw = yrl::prompt::read_password(&format!("password for {}: ", a[5]))?;
     c.login(&a[5], &pw, Duration::from_secs(10)).await?;

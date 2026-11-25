@@ -54,8 +54,8 @@ async fn e1_an_ordinary_session_leaves_its_marks_with_the_right_names_on_them() 
     c.fs_mkdir(d.join("a-new-dir").to_str().unwrap().as_bytes(), 0o755, W).await.unwrap();
     assert!(c.tunnel_open("127.0.0.1", 9, W).await.is_err()); // not allowed: no rules
     c.close().await;
-    let ord = wait_for(&r.server_dir(), Journal::Ordinary, |r| has(r, Source::Executor, "session_close") && has(r, Source::Gatekeeper, "login") && has(r, Source::Executor, "fs")).await;
-    for (src, op) in [(Source::Gatekeeper, "login"), (Source::Executor, "session_open"), (Source::Executor, "exec"), (Source::Executor, "pty"), (Source::Executor, "file"), (Source::Executor, "fs"), (Source::Executor, "denied"), (Source::Executor, "session_close")] {
+    let ord = wait_for(&r.server_dir(), Journal::Ordinary, |r| has(r, Source::Executor, "session_close") && has(r, Source::Executor, "login") && has(r, Source::Executor, "fs")).await;
+    for (src, op) in [(Source::Executor, "login"), (Source::Executor, "session_open"), (Source::Executor, "exec"), (Source::Executor, "pty"), (Source::Executor, "file"), (Source::Executor, "fs"), (Source::Executor, "denied"), (Source::Executor, "session_close")] {
         assert!(has(&ord, src, op), "missing {} by {}", op, src.name());
     }
     let exec = ord.iter().find(|x| x.ev.op == "exec").unwrap();
@@ -76,9 +76,9 @@ async fn e1_an_ordinary_session_leaves_its_marks_with_the_right_names_on_them() 
 #[tokio::test]
 async fn e2_a_failed_login_is_recorded_without_the_name_or_the_password_that_was_typed() {
     let r = rig("exec").await;
-    let c = yrl::client::Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let c = yrl::client::Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     assert!(c.login("typed-by-mistake-hunter2", b"wrong password here", T).await.is_err());
-    let ord = wait_for(&r.server_dir(), Journal::Ordinary, |r| has(r, Source::Gatekeeper, "login")).await;
+    let ord = wait_for(&r.server_dir(), Journal::Ordinary, |r| has(r, Source::Executor, "login")).await;
     let l = ord.iter().find(|x| x.ev.op == "login").unwrap();
     assert_eq!((l.ev.result, l.ev.level), (RESULT_DENIED, LEVEL_NONE));
     assert_eq!(l.ev.device, r.client.public);
@@ -137,7 +137,7 @@ async fn e4_the_security_journal_gets_the_events_about_the_protection_itself() {
     for i in 0..3 {
         let k = yrl::keys::generate();
         yrl::keys::authorize(&r.server_dir().join("authorized_keys"), &hex::encode(&k.public), &format!("d{i}"), "exec,sudo,root").unwrap();
-        let cl = yrl::client::Client::connect(&r.addr, &k, &r.server_pub, T).await.unwrap();
+        let cl = yrl::client::Client::connect_pinned(&r.addr, &k, &r.server_pub, &r.exec_pub, T).await.unwrap();
         cl.login("anna", PW, T).await.unwrap();
         for _ in 0..3 {
             let _ = cl.elevate(Level::Root, &rop, b"a wrong phrase, long enough", &r.broker_pub, W).await;
@@ -203,7 +203,8 @@ async fn e7_each_part_can_report_only_for_itself_through_the_real_socket() {
     let r = rig("exec,sudo,root").await;
     let gate = r.cfg.audit.gate.clone().unwrap();
     // the gatekeeper's own key at the audit socket: allowed its own things only
-    assert!(gate.record_critical(Event::new("login", LEVEL_USER, RESULT_OK).user("anna")).await.is_ok());
+    assert!(gate.record_critical(Event::new("enroll_guest", LEVEL_NONE, RESULT_OK)).await.is_ok());
+    assert!(gate.record_critical(Event::new("login", LEVEL_USER, RESULT_OK).user("anna")).await.is_err(), "login now terminates at Executor");
     for op in ["stepup_root", "broker_op", "exec", "unlock", "global_root_off", "checkpoint"] {
         assert!(gate.record_critical(Event::new(op, LEVEL_ROOT, RESULT_OK)).await.is_err(), "the gatekeeper must not be able to say '{op}'");
     }

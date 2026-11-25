@@ -127,16 +127,16 @@ async fn l7_unknown_and_known_logins_cost_the_same_time() {
 async fn l8_rights_come_from_the_server_and_are_cut_by_the_key() {
     // key may only exec; anna's account says exec+root: the session gets exec
     let r = rig("exec").await;
-    let c = Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let c = Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     assert_eq!(c.login("anna", PW, T).await.unwrap(), vec!["exec".to_string()]);
     // an account without rights: logged in, but nothing may be run
-    let c = Client::connect(&r.addr, &r.client, &r.server_pub, T).await.unwrap();
+    let c = Client::connect_pinned(&r.addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     assert!(c.login("guest", b"guest-password", T).await.unwrap().is_empty());
     let res = c.exec(&[b"true"], 1000, T).await.unwrap();
     assert_eq!(res.error.map(|e| e.0), Some(1));
     // key with both rights: both
     let r2 = rig("exec,root").await;
-    let c = Client::connect(&r2.addr, &r2.client, &r2.server_pub, T).await.unwrap();
+    let c = Client::connect_pinned(&r2.addr, &r2.client, &r2.server_pub, &r2.exec_pub, T).await.unwrap();
     let mut got = c.login("anna", PW, T).await.unwrap();
     got.sort();
     assert_eq!(got, vec!["exec".to_string(), "root".to_string()]);
@@ -347,11 +347,16 @@ async fn l20_only_the_login_kind_counts_as_a_login() {
     }
 }
 
-async fn raw_from(r: &Rig, key: &yrl::keys::KeyPair, source: &str) -> (TcpStream, yrl::session::Secure) {
+async fn raw_from(r: &Rig, key: &yrl::keys::KeyPair, source: &str) -> (tokio::io::DuplexStream, yrl::session::Secure) {
     let sock = tokio::net::TcpSocket::new_v4().unwrap();
     sock.bind(format!("{source}:0").parse().unwrap()).unwrap();
-    let mut s = sock.connect(r.addr.parse().unwrap()).await.unwrap();
-    let sec = yrl::session::client_handshake(&mut s, key, &r.server_pub, yrl::session::REKEY_EVERY).await.unwrap();
+    let mut outer = sock.connect(r.addr.parse().unwrap()).await.unwrap();
+    let gate = std::sync::Arc::new(yrl::session::client_handshake(&mut outer, key, &r.server_pub, yrl::session::REKEY_EVERY).await.unwrap());
+    let (mut rd, mut wr) = tokio::io::split(outer);
+    yrl::session::write_msg(&mut wr, &gate.seal(&Frame::new(yrl::ipc::IPC_TUNNEL, 0, vec![])).unwrap()).await.unwrap();
+    assert_eq!(gate.open(&yrl::session::read_msg(&mut rd).await.unwrap()).unwrap().kind, yrl::ipc::IPC_TUNNEL_OK);
+    let mut s = yrl::ipc::secure_tunnel(rd, wr, gate);
+    let sec = yrl::session::client_handshake(&mut s, key, &r.exec_pub, yrl::session::REKEY_EVERY).await.unwrap();
     (s, sec)
 }
 

@@ -123,7 +123,7 @@ async fn u5_three_wrong_phrases_lock_that_key_out_of_root_and_only_that() {
     // another device key of the same owner is not touched
     let other = yrl::keys::generate();
     yrl::keys::authorize(&r.server_dir().join("authorized_keys"), &hex::encode(&other.public), "phone", "exec,sudo,root").unwrap();
-    let c2 = yrl::client::Client::connect(&r.addr, &other, &r.server_pub, T).await.unwrap();
+    let c2 = yrl::client::Client::connect_pinned(&r.addr, &other, &r.server_pub, &r.exec_pub, T).await.unwrap();
     c2.login("anna", PW, T).await.unwrap();
     assert_eq!(c2.elevate(Level::Root, &op, ROOT_PHRASE, &r.broker_pub, W).await.unwrap(), "restarted yandi (mock)");
     // the owner on the machine lifts it
@@ -151,7 +151,7 @@ async fn u7_failures_by_three_different_keys_switch_remote_root_off_for_everybod
     for i in 0..3 {
         let k = yrl::keys::generate();
         yrl::keys::authorize(&r.server_dir().join("authorized_keys"), &hex::encode(&k.public), &format!("dev{i}"), "exec,sudo,root").unwrap();
-        let cl = yrl::client::Client::connect(&r.addr, &k, &r.server_pub, T).await.unwrap();
+        let cl = yrl::client::Client::connect_pinned(&r.addr, &k, &r.server_pub, &r.exec_pub, T).await.unwrap();
         cl.login("anna", PW, T).await.unwrap();
         for _ in 0..3 {
             let _ = cl.elevate(Level::Root, &op, b"a wrong phrase, long enough", &r.broker_pub, W).await;
@@ -257,57 +257,10 @@ async fn u10_a_taken_over_gatekeeper_cannot_get_an_approval_of_its_own() {
         let key = r.client.public.clone();
         async move { open_session(&g, &key, "anna", &rights).await }
     };
-    let begin = |id: u64, level: Level, op: &Op, pin: &[u8]| {
-        let mut hs = snow::Builder::new(NOISE_XK.parse().unwrap()).local_private_key(&g.key.private).remote_public_key(pin).prologue(&prologue(id, level, op, pin)).build_initiator().unwrap();
-        let mut buf = vec![0u8; 512];
-        let n = hs.write_message(&[], &mut buf).unwrap();
-        (hs, Frame::new(STEPUP_BEGIN, 0, encode_begin(id, level, op, &buf[..n])))
-    };
-    // a session opened with only `exec`: a SUDO step-up is refused at once, no challenge
-    let (to, mut from) = ask(vec!["exec".into()]).await.unwrap();
-    let op = Op::TestPrivileged("evil".into());
-    let (_hs, f) = begin(1, Level::Sudo, &op, &r.exec_pub);
-    to.send(f).await.unwrap();
-    let f = tokio::time::timeout(W, from.recv()).await.unwrap().unwrap();
-    assert_eq!((f.kind, decode_result(&f.payload).unwrap().1), (STEPUP_RESULT, R_DENIED), "no right for the level in this session");
-    // a session that does carry the `sudo` right: the gatekeeper can START a step-up, but cannot finish it with its own device key, even knowing the phrase
-    let (to, mut from) = ask(vec!["exec".into(), "sudo".into()]).await.unwrap();
-    let (mut hs, f) = begin(2, Level::Sudo, &op, &r.exec_pub);
-    to.send(f).await.unwrap();
-    let ch = tokio::time::timeout(W, from.recv()).await.unwrap().unwrap();
-    assert_eq!(ch.kind, STEPUP_CHALLENGE);
-    let mut scratch = vec![0u8; 512];
-    let mut buf = vec![0u8; 512];
-    hs.read_message(decode_msg(&ch.payload).unwrap().1, &mut scratch).unwrap();
-    let n = hs.write_message(SUDO_PHRASE, &mut buf).unwrap(); // even with the CORRECT phrase
-    to.send(Frame::new(STEPUP_PROOF, 0, encode_msg(2, &buf[..n]))).await.unwrap();
-    let f = tokio::time::timeout(W, from.recv()).await.unwrap().unwrap();
-    assert_eq!(decode_result(&f.payload).unwrap().1, R_DENIED, "the device key is not the key of this session");
-    assert_eq!(r.cfg.lockouts.standing(&r.client.public, Level::Sudo), Standing::Open, "and the owner's key is not blamed for what the gatekeeper did");
-    // garbage in place of a proof does not count against the owner either
-    let (to, mut from) = ask(vec!["exec".into(), "sudo".into()]).await.unwrap();
-    for i in 0..5u64 {
-        let (_hs, f) = begin(10 + i, Level::Sudo, &op, &r.exec_pub);
-        to.send(f).await.unwrap();
-        let ch = tokio::time::timeout(W, from.recv()).await.unwrap().unwrap();
-        assert_eq!(ch.kind, STEPUP_CHALLENGE);
-        to.send(Frame::new(STEPUP_PROOF, 0, encode_msg(10 + i, &[7u8; 80]))).await.unwrap();
-        let f = tokio::time::timeout(W, from.recv()).await.unwrap().unwrap();
-        assert_eq!(decode_result(&f.payload).unwrap().1, R_DENIED);
-    }
-    assert_eq!(r.cfg.lockouts.standing(&r.client.public, Level::Sudo), Standing::Open, "five garbage proofs: the owner can still raise SUDO");
-    // ROOT through the same compromised gatekeeper: the executor passes the bytes to the broker, which will not finish either
-    let (to, mut from) = ask(vec!["exec".into(), "root".into()]).await.unwrap();
-    let rop = Op::RestartService("evil".into());
-    let (mut hs, f) = begin(20, Level::Root, &rop, &r.broker_pub);
-    to.send(f).await.unwrap();
-    let ch = tokio::time::timeout(W, from.recv()).await.unwrap().unwrap();
-    assert_eq!(ch.kind, STEPUP_CHALLENGE, "the broker answered, through the executor");
-    hs.read_message(decode_msg(&ch.payload).unwrap().1, &mut scratch).unwrap();
-    let n = hs.write_message(ROOT_PHRASE, &mut buf).unwrap();
-    to.send(Frame::new(STEPUP_PROOF, 0, encode_msg(20, &buf[..n]))).await.unwrap();
-    let f = tokio::time::timeout(W, from.recv()).await.unwrap().unwrap();
-    assert_eq!(decode_result(&f.payload).unwrap().1, R_DENIED);
+    assert!(ask(vec!["exec".into()]).await.is_none());
+    assert!(ask(vec!["exec".into(), "sudo".into()]).await.is_none(), "Gatekeeper assertions cannot create a channel on which to start SUDO");
+    assert!(ask(vec!["exec".into(), "root".into()]).await.is_none(), "Gatekeeper assertions cannot reach the broker through a forged session");
+    assert_eq!(r.cfg.lockouts.standing(&r.client.public, Level::Sudo), Standing::Open);
     assert_eq!(r.cfg.root_lockouts.standing(&r.client.public, Level::Root), Standing::Open);
     assert!(!r.server_dir().join("broker.log").exists());
 }

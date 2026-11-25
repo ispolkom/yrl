@@ -106,12 +106,12 @@ async fn wait_ops(dir: &std::path::Path, j: Journal, ops: &[(&str, Source)]) -> 
 async fn p1_four_programs_one_journal_and_the_owners_commands_in_it() {
     let st = stand(5).await;
     let addr = format!("127.0.0.1:{}", st.port);
-    let c = yrl::client::Client::connect(&addr, &st.client, &st.server_pub, T).await.unwrap();
+    let c = yrl::client::Client::connect_pinned(&addr, &st.client, &st.server_pub, &st.exec_pub, T).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     c.exec(&[b"echo", b"audited"], 5000, W).await.unwrap();
     c.elevate(Level::Sudo, &Op::TestPrivileged("p".into()), SUDO_PHRASE, &st.exec_pub, W).await.unwrap_or_else(|e| panic!("elevate(Sudo) failed: {e:#}\n--- journal so far: {:?}", read(&st.sd, Journal::Ordinary).iter().map(|r| (r.source.name(), r.ev.op.clone())).collect::<Vec<_>>()));
     c.elevate(Level::Root, &Op::RestartService("svc".into()), ROOT_PHRASE, &st.broker_pub, W).await.unwrap_or_else(|e| panic!("elevate(Root) failed: {e:#}"));
-    wait_ops(&st.sd, Journal::Ordinary, &[("login", Source::Gatekeeper), ("session_open", Source::Executor), ("exec", Source::Executor), ("stepup_sudo", Source::Executor), ("stepup_root", Source::Broker), ("broker_op", Source::Broker)]).await;
+    wait_ops(&st.sd, Journal::Ordinary, &[("login", Source::Executor), ("session_open", Source::Executor), ("exec", Source::Executor), ("stepup_sudo", Source::Executor), ("stepup_root", Source::Broker), ("broker_op", Source::Broker)]).await;
     // the owner's commands on the machine leave their mark in the security journal
     let mut w = Command::new(YRLD).args(["word", "set", st.sd.to_str().unwrap(), "sudo"]).stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
     w.stdin.take().unwrap().write_all(b"a brand new sudo phrase, long\n").unwrap();
@@ -130,7 +130,7 @@ async fn p1_four_programs_one_journal_and_the_owners_commands_in_it() {
 async fn p2_an_edit_to_the_files_is_found_by_the_command_and_the_audit_process_will_not_continue_on_it() {
     let mut st = stand(3).await;
     let addr = format!("127.0.0.1:{}", st.port);
-    let c = yrl::client::Client::connect(&addr, &st.client, &st.server_pub, T).await.unwrap();
+    let c = yrl::client::Client::connect_pinned(&addr, &st.client, &st.server_pub, &st.exec_pub, T).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     for i in 0..6 {
         c.exec(&[b"echo", format!("{i}").as_bytes()], 5000, W).await.unwrap();

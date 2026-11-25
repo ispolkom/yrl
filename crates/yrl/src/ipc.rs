@@ -12,9 +12,51 @@ pub const IPC_OPEN: u8 = 60;
 pub const IPC_OK: u8 = 61;
 /// executor -> gatekeeper: no (the reason is deliberately not told)
 pub const IPC_REFUSED: u8 = 62;
+/// Open an opaque byte tunnel. On the executor door this is the only session-opening request:
+/// client identity, login, rights, SEQ and ACK remain inside the tunneled Client <-> Executor Noise channel.
+pub const IPC_TUNNEL: u8 = 63;
+pub const IPC_TUNNEL_OK: u8 = 64;
+pub const IPC_TUNNEL_DATA: u8 = 65;
 
 pub const MAX_ACCOUNT: usize = 64;
 pub const MAX_RIGHTS: usize = 1024;
+const TUNNEL_CHUNK: usize = 32 * 1024;
+const TUNNEL_BUFFER: usize = 256 * 1024;
+
+/// Turns an authenticated Noise connection into a bounded opaque byte stream. The framing is visible
+/// to the carrier, but the bytes are the independent Client <-> Executor Noise protocol.
+pub fn secure_tunnel<R, W>(mut rd: R, mut wr: W, sec: std::sync::Arc<crate::session::Secure>) -> tokio::io::DuplexStream
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (user, pump) = tokio::io::duplex(TUNNEL_BUFFER);
+    let (mut from_user, mut to_user) = tokio::io::split(pump);
+    let sec_out = sec.clone();
+    tokio::spawn(async move {
+        let outgoing = async {
+            let mut buf = vec![0u8; TUNNEL_CHUNK];
+            loop {
+                let n = from_user.read(&mut buf).await?;
+                if n == 0 { return Ok::<(), std::io::Error>(()) }
+                let frame = Frame::new(IPC_TUNNEL_DATA, 0, buf[..n].to_vec());
+                let msg = sec_out.seal(&frame).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "cannot seal tunnel data"))?;
+                crate::session::write_msg(&mut wr, &msg).await?;
+            }
+        };
+        let incoming = async {
+            loop {
+                let msg = crate::session::read_msg(&mut rd).await?;
+                let frame = sec.open(&msg).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad tunnel data"))?;
+                if frame.kind != IPC_TUNNEL_DATA { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unexpected tunnel frame")) }
+                to_user.write_all(&frame.payload).await?;
+            }
+        };
+        let _ = tokio::select! { r = outgoing => r, r = incoming => r };
+    });
+    user
+}
 
 pub fn encode_open(key: &[u8], account: &str, rights: &[String]) -> Result<Vec<u8>, WireError> {
     let r = rights.join(",");

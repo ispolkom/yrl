@@ -70,6 +70,9 @@ pub struct ExecResult {
 /// How the client behaves when the network under it breaks.
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
+    /// Pinned Executor static public key. When present, the Gatekeeper connection is used only as
+    /// an opaque carrier and a second Noise IK handshake is established end to end.
+    pub executor_public: Option<Vec<u8>>,
     pub rekey_every: u64,
     /// a probe goes out when nothing was sent for this long
     pub ping_every: Duration,
@@ -103,6 +106,7 @@ pub struct Knock {
 impl Default for ClientOptions {
     fn default() -> Self {
         ClientOptions {
+            executor_public: None,
             rekey_every: REKEY_EVERY,
             ping_every: Duration::from_secs(10),
             dead_after: Duration::from_secs(30),
@@ -158,6 +162,25 @@ async fn open_stream(route: &Route, me: &KeyPair, server_public: &[u8], opts: &C
     }
 }
 
+async fn open_authenticated_stream(route: &Route, me: &KeyPair, gate_public: &[u8], opts: &ClientOptions) -> Result<(BoxIo, Secure)> {
+    let mut outer = open_stream(route, me, gate_public, opts).await?;
+    let gate_sec = Arc::new(client_handshake(&mut outer, me, gate_public, opts.rekey_every).await?);
+    let Some(executor_public) = opts.executor_public.as_deref() else {
+        return Ok((outer, Arc::try_unwrap(gate_sec).map_err(|_| anyhow::anyhow!("gate handshake state is shared"))?));
+    };
+    let (mut rd, mut wr) = tokio::io::split(outer);
+    let request = gate_sec.seal(&Frame::new(crate::ipc::IPC_TUNNEL, 0, vec![]))?;
+    write_msg(&mut wr, &request).await?;
+    let reply = gate_sec.open(&read_msg(&mut rd).await?)?;
+    if reply.kind != crate::ipc::IPC_TUNNEL_OK || !reply.payload.is_empty() {
+        bail!("gatekeeper refused the executor tunnel");
+    }
+    let tunnel = crate::ipc::secure_tunnel(rd, wr, gate_sec);
+    let mut inner: BoxIo = Box::new(tunnel);
+    let sec = client_handshake(&mut inner, me, executor_public, opts.rekey_every).await?;
+    Ok((inner, sec))
+}
+
 /// one signed datagram, no answer expected; the address it came from is the one that is let in
 async fn knock(k: &Knock, me: &KeyPair, server_public: &[u8], service: u8) -> Result<()> {
     let sock = tokio::net::UdpSocket::bind(if k.udp.starts_with('[') { "[::]:0" } else { "0.0.0.0:0" }).await?;
@@ -208,8 +231,7 @@ async fn try_resume(id: &Ident, route: usize, sid: &[u8], link: &link::Link, dia
     diagnostics.lock().unwrap().attempted(selected.transport);
     let started = std::time::Instant::now();
     let attempt = async {
-        let mut stream = open_stream(selected, &id.me, &id.server_public, o).await?;
-        let sec = client_handshake(&mut stream, &id.me, &id.server_public, o.rekey_every).await?;
+        let (stream, sec) = open_authenticated_stream(selected, &id.me, &id.server_public, o).await?;
         let sec = Arc::new(sec);
         let (mut rd, mut wr) = tokio::io::split(stream);
         let mut p = sid.to_vec();
@@ -318,6 +340,14 @@ impl Client {
         Self::connect_opts(addr, me, server_public, ClientOptions { connect_timeout: timeout, rekey_every, ..Default::default() }).await
     }
 
+    pub async fn connect_pinned(addr: &str, me: &KeyPair, gate_public: &[u8], executor_public: &[u8], timeout: Duration) -> Result<Client> {
+        Self::connect_opts(addr, me, gate_public, ClientOptions { executor_public: Some(executor_public.to_vec()), connect_timeout: timeout, ..Default::default() }).await
+    }
+
+    pub async fn connect_pinned_with(addr: &str, me: &KeyPair, gate_public: &[u8], executor_public: &[u8], timeout: Duration, rekey_every: u64) -> Result<Client> {
+        Self::connect_opts(addr, me, gate_public, ClientOptions { executor_public: Some(executor_public.to_vec()), connect_timeout: timeout, rekey_every, ..Default::default() }).await
+    }
+
     /// connects and does the key handshake; the session starts with `login`
     pub async fn connect_opts(addr: &str, me: &KeyPair, server_public: &[u8], opts: ClientOptions) -> Result<Client> {
         let routes = configured_routes(addr, &opts);
@@ -338,9 +368,7 @@ impl Client {
                 return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("all connection routes timed out")));
             }
             let attempt = async {
-                let mut stream = open_stream(spec, me, server_public, &opts).await?;
-                let sec = client_handshake(&mut stream, me, server_public, opts.rekey_every).await?;
-                Ok::<_, anyhow::Error>((stream, sec))
+                open_authenticated_stream(spec, me, server_public, &opts).await
             };
             let attempt = tokio::time::timeout(opts.route_timeout.min(remaining), attempt).await;
             match attempt {
@@ -430,6 +458,9 @@ impl Client {
     /// the second factor: after the key is accepted the server wants a login and a password. Returns the rights granted to this session.
     /// From here on the session survives broken connections: the client reconnects and resumes by itself.
     pub async fn login(&self, login: &str, password: &[u8], timeout: Duration) -> Result<Vec<String>> {
+        if self.ident.opts.executor_public.is_none() {
+            bail!("a pinned Executor public key is required before login");
+        }
         let mut guard = self.pre.lock().await;
         let Some(pre) = guard.as_mut() else { bail!("already logged in") };
         let mut payload = wire::encode_login(login.as_bytes(), password).map_err(|e| anyhow::anyhow!("{e:?}"))?;

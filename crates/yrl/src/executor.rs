@@ -302,10 +302,12 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
 // ---------------------------------------------------------------- the local door
 
 pub async fn serve_ipc(listener: UnixListener, cfg: ServerConfig, ipc: crate::ipc::ExecutorIpc) {
+    let preauth = Arc::new(Semaphore::new(64));
     loop {
         let Ok((stream, _)) = listener.accept().await else { continue };
+        let Ok(slot) = preauth.clone().try_acquire_owned() else { continue };
         let (cfg, ipc) = (cfg.clone(), ipc.clone());
-        tokio::spawn(async move { handle_ipc(stream, cfg, ipc).await });
+        tokio::spawn(async move { handle_ipc(stream, cfg, ipc).await; drop(slot); });
     }
 }
 
@@ -339,60 +341,27 @@ async fn handle_ipc(mut stream: UnixStream, cfg: ServerConfig, ipc: crate::ipc::
         return;
     };
     let (mut rd, mut wr) = stream.into_split();
-    // 3. the request to open a session; everything is checked again against the account files
+    // 3. only an opaque tunnel may be opened. Client identity and authorization are established by
+    // a second Noise IK handshake that terminates here, never by assertions from the gatekeeper.
     let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_secs(5), read_msg(&mut rd)).await else { return };
     let Ok(open) = sec.open(&msg) else { return };
-    if open.kind != IPC_OPEN {
-        cfg.log("local connection refused: no open request".into());
+    if open.kind != IPC_TUNNEL || open.payload.len() > 64 {
+        cfg.log("local connection refused: no tunnel request".into());
         return;
     }
-    let reply = |kind: u8| sec.seal(&Frame::new(kind, 0, vec![]));
-    let verified = (|| {
-        let (key, account, wanted) = decode_open(&open.payload).ok()?;
-        let Some((rights, os_user)) = rights_for(&cfg.dir, &key, &account, &wanted) else {
-            cfg.log("local request refused: more than the account and the key allow, or an unknown account or key".into());
-            return None;
-        };
-        match identity::resolve(os_user.as_deref(), identity::euid(), &rights, identity::lookup_name, identity::lookup_uid) {
-            Ok(target) => Some((key, account, rights, target)),
-            Err(why) => {
-                cfg.log(format!("local request refused: {}", why.why()));
-                None
-            }
-        }
-    })();
-    let Some((key, account, rights, target)) = verified else {
-        if let Ok(m) = reply(IPC_REFUSED) {
-            let _ = write_msg(&mut wr, &m).await;
-        }
-        return;
+    let peer = if open.payload.is_empty() {
+        None
+    } else {
+        std::str::from_utf8(&open.payload).ok().and_then(|s| s.parse().ok())
     };
-    let Ok(m) = reply(IPC_OK) else { return };
+    if !open.payload.is_empty() && peer.is_none() { return }
+    let sec = Arc::new(sec);
+    let Ok(m) = sec.seal(&Frame::new(IPC_TUNNEL_OK, 0, vec![])) else { return };
     if write_msg(&mut wr, &m).await.is_err() {
         return;
     }
-    // 4. the session: frames in, frames out
-    let sec = Arc::new(sec);
-    let (in_tx, in_rx) = mpsc::channel::<Frame>(64);
-    let (out_tx, mut out_rx) = mpsc::channel::<Frame>(64);
-    let sec_r = sec.clone();
-    tokio::spawn(async move {
-        while let Ok(m) = read_msg(&mut rd).await {
-            let Ok(f) = sec_r.open(&m) else { break };
-            if in_tx.send(f).await.is_err() {
-                break;
-            }
-        }
-    });
-    tokio::spawn(async move {
-        while let Some(f) = out_rx.recv().await {
-            let Ok(m) = sec.seal(&f) else { break };
-            if write_msg(&mut wr, &m).await.is_err() {
-                break;
-            }
-        }
-    });
-    session_main(cfg, "session".into(), account, key, ipc.key.clone(), rights, target, in_rx, out_tx).await;
+    let tunnel = crate::ipc::secure_tunnel(rd, wr, sec);
+    crate::server::handle_inner(tunnel, peer, ipc.key.clone(), cfg).await;
 }
 
 // ---------------------------------------------------------------- the gatekeeper's side of the same door
@@ -428,6 +397,49 @@ pub async fn open_session(g: &crate::ipc::GatekeeperIpc, key: &[u8], account: &s
             }
         }
     });
+    Some((to_exec, from_exec))
+}
+
+/// Gatekeeper side of the executor door. It receives only an opaque stream; there are deliberately
+/// no key/account/rights arguments for a compromised gatekeeper to forge.
+pub async fn open_tunnel(g: &crate::ipc::GatekeeperIpc, peer: Option<std::net::SocketAddr>) -> Option<tokio::io::DuplexStream> {
+    use crate::ipc::*;
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&g.socket)).await.ok()?.ok()?;
+    let sec = tokio::time::timeout(Duration::from_secs(5), crate::session::client_handshake(&mut stream, &g.key, &g.executor_public, REKEY_EVERY)).await.ok()?.ok()?;
+    let sec = Arc::new(sec);
+    let (mut rd, mut wr) = stream.into_split();
+    // The peer address is an availability/rate-limit hint only. It is never used for identity,
+    // authorization, or access rights, because a compromised Gatekeeper can forge it.
+    let payload = peer.map(|p| p.to_string().into_bytes()).unwrap_or_default();
+    let open = sec.seal(&Frame::new(IPC_TUNNEL, 0, payload)).ok()?;
+    write_msg(&mut wr, &open).await.ok()?;
+    let msg = tokio::time::timeout(Duration::from_secs(5), read_msg(&mut rd)).await.ok()?.ok()?;
+    let reply = sec.open(&msg).ok()?;
+    if reply.kind != IPC_TUNNEL_OK || !reply.payload.is_empty() { return None }
+    Some(crate::ipc::secure_tunnel(rd, wr, sec))
+}
+
+/// Starts the already authenticated user's operational session inside Executor. The inputs come
+/// from the Client <-> Executor Noise endpoint, not from Gatekeeper, and are checked against disk again.
+pub(crate) async fn direct_session(cfg: &ServerConfig, key: &[u8], account: &str, wanted: &[String]) -> Option<(mpsc::Sender<Frame>, mpsc::Receiver<Frame>)> {
+    let Some((rights, os_user)) = rights_for(&cfg.dir, key, account, wanted) else {
+        cfg.log("executor authorization refused: account/key rights do not permit the request".into());
+        return None;
+    };
+    let target = match identity::resolve(os_user.as_deref(), identity::euid(), &rights, identity::lookup_name, identity::lookup_uid) {
+        Ok(target) => target,
+        Err(why) => {
+            cfg.log(format!("executor identity refused: {}", why.why()));
+            return None;
+        }
+    };
+    let exec_key = cfg.exec_identity.clone()?;
+    let (to_exec, in_rx) = mpsc::channel::<Frame>(64);
+    let (out_tx, from_exec) = mpsc::channel::<Frame>(64);
+    let cfg = cfg.clone();
+    let key = key.to_vec();
+    let account = account.to_string();
+    tokio::spawn(session_main(cfg, "end-to-end client".into(), account, key, exec_key, rights, target, in_rx, out_tx));
     Some((to_exec, from_exec))
 }
 

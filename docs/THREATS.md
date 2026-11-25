@@ -196,9 +196,13 @@ Missing: recursive deletion, server-side copy/move, parallel progress UI, embedd
 
 ## Gatekeeper ↔ executor boundary (section G, `tests/ipc.rs`, `src/ipc.rs`, `src/executor.rs`)
 
-The **gatekeeper** handles network, key handshake, login, sessions, and resumption, but contains no implementation for programs, PTYs, files, directories, or tunnels. The **executor** acts on the machine and listens only on `<directory>/ipc.sock`. Development command `yrld serve` hosts both in one process through the same socket and checks.
+The **gatekeeper** handles network admission and transports an opaque, bounded byte stream, but contains no login, session, resumption, ACK/SEQ, program, PTY, file, directory, or tunnel authority. After the outer Client↔Gatekeeper Noise IK admission handshake, the client opens a carrier tunnel and performs an independent Noise IK handshake directly with the pinned Executor key. LOGIN, password verification, the resumable Link, authoritative ACK/SEQ, and every user operation terminate only at **executor**, which listens on `<directory>/ipc.sock`. Development command `yrld serve` hosts both in one process through the same socket and checks.
 
-Executor admission has four independent checks: (1) 0600 socket and a directory not writable by others; (2) kernel `SO_PEERCRED` uid/pid; (3) `/proc/<pid>/exe`; (4) Noise IK with a pre-provisioned pair-specific key from `yrld init`. The executor independently recomputes requested permissions ⊆ account ∩ key and selects the OS user itself.
+Executor carrier admission has four independent checks: (1) 0600 socket and a directory not writable by others; (2) kernel `SO_PEERCRED` uid/pid; (3) `/proc/<pid>/exe`; (4) Noise IK with a pre-provisioned pair-specific key from `yrld init`. That admits only a carrier, never a user session. Inside it, Executor independently authenticates the client key with Noise IK, verifies the password, computes account ∩ key permissions from Executor-owned files, and selects the OS user itself. `IPC_OPEN` identity/account/rights assertions are rejected.
+
+The client pins the Executor public key printed by `yrld init` out of band (`--executor` or `YRL_EXECUTOR_KEY`); Gatekeeper never supplies or redirects this key. On reconnect each outer and inner Noise handshake creates fresh cipher state. RESUME then attaches the existing Executor-owned Link. Link sequence numbers and acknowledgements are encrypted by the inner channel, retransmission reuses the Link's stored logical frame rather than a Noise nonce, and every new Noise connection starts from fresh handshake-derived keys and nonce zero. A Gatekeeper may drop, delay, replay, or reorder carrier records, but authenticated decryption and Link ACK/SEQ validation prevent it from acknowledging, injecting, or duplicating an accepted operation.
+
+Unauthenticated resource use is bounded twice: Gatekeeper connection slots and handshake deadlines limit network admission; Executor limits concurrent local pre-authentication carriers, uses bounded 32 KiB tunnel records and 256 KiB stream buffers, enforces the inner handshake/login deadlines, and limits concurrent password hashes. A peer-address value from Gatekeeper is used only as a rate-limit availability hint, never for identity or authorization.
 
 | # | requirement | test |
 |---|---|---|
@@ -215,7 +219,7 @@ Executor admission has four independent checks: (1) 0600 socket and a directory 
 | G12 | gatekeeper `no_new_privs` + seccomp blocks exec, tracing, mounts, modules, namespaces, uid/gid changes while retaining network/files/threads/local sockets | `g12_*`, `g11_*` |
 | G11 | separate real processes; executor death denies commands/new logins while gatekeeper lives | `g11_*` |
 
-Invariant: a fully compromised gatekeeper can disrupt service but cannot make the executor exceed account **and** key permissions, choose an OS user, or be replaced by another local program. Remaining gaps: the gatekeeper chooses account+key without knowing the password; SUDO/ROOT need fresh human proof; seccomp is a denylist and no filesystem jail exists; real separate-user uid checks require root; pid reuse makes the key check essential.
+Invariant: a fully compromised gatekeeper can disrupt service and observe traffic shape, but cannot impersonate a client, learn its password, acknowledge authoritative inner data, inject/replay an accepted operation, make Executor exceed account **and** key permissions, choose an OS user, or redirect a client to another Executor key. Remaining gaps: SUDO/ROOT still need fresh human proof; seccomp is a denylist and no filesystem jail exists; real separate-user uid checks require root; pid reuse makes the local Noise key check essential; denial of service and traffic analysis by Gatekeeper remain possible.
 
 ## Step-up: USER → SUDO → ROOT (section U, `tests/stepup.rs`, `src/stepup.rs`)
 

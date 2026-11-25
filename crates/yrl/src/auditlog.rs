@@ -52,8 +52,8 @@ impl Source {
     /// the operations each part may report (a taken-over gatekeeper cannot write what only the broker could have seen)
     pub fn may_report(self, op: &str) -> bool {
         match self {
-            Source::Gatekeeper => matches!(op, "login" | "resume" | "enroll_guest" | "audit_degraded" | "spa_ok" | "spa_rejected" | "spa_error"),
-            Source::Executor => matches!(op, "session_open" | "session_close" | "exec" | "pty" | "file" | "fs" | "tunnel" | "denied" | "stepup_sudo" | "peer_refused" | "replay" | "lockout_tamper" | "audit_degraded"),
+            Source::Gatekeeper => matches!(op, "enroll_guest" | "audit_degraded" | "spa_ok" | "spa_rejected" | "spa_error"),
+            Source::Executor => matches!(op, "login" | "resume" | "session_open" | "session_close" | "exec" | "pty" | "file" | "fs" | "tunnel" | "denied" | "stepup_sudo" | "peer_refused" | "replay" | "lockout_tamper" | "audit_degraded"),
             Source::Broker => matches!(op, "stepup_root" | "broker_op" | "peer_refused" | "replay" | "lockout_tamper" | "global_root_off" | "audit_degraded"),
             Source::Owner => matches!(op, "unlock" | "enroll_open" | "enroll_decision" | "word_set" | "init" | "audit_degraded"),
             Source::Firewall => matches!(op, "firewall_open" | "firewall_close" | "firewall_refused" | "firewall_reset" | "peer_refused" | "audit_degraded"),

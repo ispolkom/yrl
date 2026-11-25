@@ -209,12 +209,13 @@ fn a7_a_damaged_last_record_is_never_silently_continued() {
 #[test]
 fn a8_a_source_may_report_only_what_it_could_have_seen() {
     let (d, s) = svc(100);
-    assert!(s.append(Source::Gatekeeper, ev("login", LEVEL_NONE)).is_ok());
+    assert!(s.append(Source::Gatekeeper, ev("enroll_guest", LEVEL_NONE)).is_ok());
+    assert!(s.append(Source::Gatekeeper, ev("login", LEVEL_NONE)).is_err());
     for op in ["stepup_root", "broker_op", "exec", "stepup_sudo", "unlock", "checkpoint", "global_root_off"] {
         assert!(s.append(Source::Gatekeeper, ev(op, LEVEL_ROOT)).is_err(), "the gatekeeper must not report '{op}'");
     }
     assert!(s.append(Source::Broker, ev("exec", LEVEL_USER)).is_err() && s.append(Source::Broker, ev("stepup_root", LEVEL_ROOT)).is_ok());
-    assert!(s.append(Source::Executor, ev("stepup_root", LEVEL_ROOT)).is_err() && s.append(Source::Executor, ev("exec", LEVEL_USER)).is_ok());
+    assert!(s.append(Source::Executor, ev("stepup_root", LEVEL_ROOT)).is_err() && s.append(Source::Executor, ev("exec", LEVEL_USER)).is_ok() && s.append(Source::Executor, ev("login", LEVEL_USER)).is_ok());
     assert!(s.append(Source::Executor, ev("checkpoint", LEVEL_NONE)).is_err(), "nobody but the audit process makes checkpoints");
     assert!(s.append(Source::Owner, ev("unlock", LEVEL_NONE)).is_ok() && s.append(Source::Owner, ev("exec", LEVEL_USER)).is_err());
     assert!(s.append(Source::Gatekeeper, ev("made-up", LEVEL_NONE)).is_err());

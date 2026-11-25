@@ -142,7 +142,7 @@ async fn b6_without_a_broker_root_is_simply_unavailable() {
     tokio::spawn(yrl::executor::serve_ipc(el, cfg.clone(), e));
     cfg.gate = Some(g);
     tokio::spawn(yrl::server::serve(l, r.server_key.clone(), cfg));
-    let c = yrl::client::Client::connect(&addr, &r.client, &r.server_pub, T).await.unwrap();
+    let c = yrl::client::Client::connect_pinned(&addr, &r.client, &r.server_pub, &r.exec_pub, T).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     let e = c.elevate(Level::Root, &Op::RestartService("x".into()), ROOT_PHRASE, &r.broker_pub, W).await.unwrap_err().to_string();
     assert!(e.contains("denied"), "{e}");
@@ -205,7 +205,7 @@ async fn b7_three_programs_and_what_happens_when_one_of_them_dies() {
     procs.0.push(mk(&["gatekeeper", sd.to_str().unwrap(), &format!("127.0.0.1:{port}")]));
     tokio::time::sleep(Duration::from_millis(600)).await;
     let addr = format!("127.0.0.1:{port}");
-    let c = yrl::client::Client::connect(&addr, &client, &server_pub, T).await.unwrap();
+    let c = yrl::client::Client::connect_pinned(&addr, &client, &server_pub, &exec_pub, T).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     let op = Op::RestartService("three-programs".into());
     assert_eq!(c.elevate(Level::Root, &op, ROOT_PHRASE, &broker_pub, W).await.unwrap(), "restarted three-programs (mock)");
@@ -214,7 +214,7 @@ async fn b7_three_programs_and_what_happens_when_one_of_them_dies() {
     let mut broker = procs.0.remove(1); // (0 is the audit process)
     broker.kill().unwrap();
     broker.wait().unwrap();
-    let c2 = yrl::client::Client::connect(&addr, &client, &server_pub, T).await.unwrap();
+    let c2 = yrl::client::Client::connect_pinned(&addr, &client, &server_pub, &exec_pub, T).await.unwrap();
     c2.login("anna", PW, T).await.unwrap();
     assert!(c2.elevate(Level::Root, &op, ROOT_PHRASE, &broker_pub, Duration::from_secs(8)).await.is_err(), "no ROOT without the broker");
     assert!(c2.elevate(Level::Sudo, &Op::TestPrivileged("y".into()), SUDO_PHRASE, &exec_pub, W).await.is_ok());

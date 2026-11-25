@@ -25,7 +25,7 @@ impl Term {
         assert_eq!(unsafe { libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), &ws) }, 0);
         let (master, slave) = unsafe { (OwnedFd::from_raw_fd(m), OwnedFd::from_raw_fd(s)) };
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_yrl"));
-        cmd.args(["visual", kdir.to_str().unwrap(), &r.addr, &hex::encode(&r.server_pub), "anna"]).current_dir(cwd).env("TERM", "xterm");
+        cmd.args(["visual", kdir.to_str().unwrap(), &r.addr, &hex::encode(&r.server_pub), "anna", "--executor", &hex::encode(&r.exec_pub)]).current_dir(cwd).env("TERM", "xterm");
         cmd.stdin(Stdio::from(slave.try_clone().unwrap())).stdout(Stdio::from(slave.try_clone().unwrap())).stderr(Stdio::from(slave.try_clone().unwrap()));
         unsafe {
             cmd.pre_exec(|| {

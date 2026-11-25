@@ -81,6 +81,7 @@ async fn k1_inner() {
     let out = Command::new(YRLD).args(["init", &s]).output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let server_pub = hex::decode(text.lines().find(|l| l.contains("server public")).unwrap().split_whitespace().last().unwrap()).unwrap();
+    let executor_pub = hex::decode(text.lines().find(|l| l.contains("executor public")).unwrap().split_whitespace().last().unwrap()).unwrap();
     let client = yrl::keys::generate();
     yrl::keys::authorize(&sd.join("authorized_keys"), &hex::encode(&client.public), "laptop", "exec,shell,root").unwrap();
     // inside the private namespace the only user is "root" (this process's own account), so the account names it, with the right the server demands for that
@@ -98,7 +99,7 @@ async fn k1_inner() {
     procs.0.push(spawn(&["gatekeeper", &s, &format!("127.0.0.1:{work}"), "--spa", &format!("127.0.0.1:{knock}"), "--work-port", &work.to_string(), "--knock-ttl", "4"]));
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let addr = format!("127.0.0.1:{work}");
-    let quiet = ClientOptions { connect_timeout: Duration::from_millis(600), give_up_after: Duration::from_millis(1500), ..fast_opts() };
+    let quiet = ClientOptions { executor_public: Some(executor_pub), connect_timeout: Duration::from_millis(600), give_up_after: Duration::from_millis(1500), ..fast_opts() };
     // 1. the wall: the right key, the right password, and still nothing
     assert!(Client::connect_opts(&addr, &client, &server_pub, quiet.clone()).await.is_err(), "no knock: the real kernel drops the connection");
     // 2. with the client's own knock
