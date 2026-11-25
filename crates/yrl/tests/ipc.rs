@@ -366,11 +366,35 @@ async fn g14_gatekeeper_impersonation_without_the_client_private_key_or_password
 #[tokio::test]
 async fn g15_gatekeeper_impersonation_cannot_inject_an_exec_operation() {
     let r = rig("exec").await;
-    let (gate, _executor) = executor_of(&r, |_| {}).await;
+    let gate = r.cfg.gate.clone().unwrap();
     let claimed_public = yrl::keys::read_authorized(&r.server_dir().join("authorized_keys"))[0].public.clone();
     let marker = r.dir.path().join("injected-by-gatekeeper");
     let forged = open_session(&gate, &claimed_public, "anna", &rights(&["exec"])).await;
     assert!(forged.is_none(), "Executor opened an operation channel from Gatekeeper assertions");
 
+    // Keep a genuine, authorized session alive. The attacker learns its session id but has only
+    // Gatekeeper's private key; neither the client's private key nor its password is available.
+    let (mut client, sec) = raw(&r).await;
+    send(&mut client, &sec, Frame::new(wire::LOGIN, 0, wire::encode_login(b"anna", PW).unwrap())).await;
+    assert_eq!(recv(&mut client, &sec).await.unwrap().kind, wire::LOGIN_OK);
+    let session = recv(&mut client, &sec).await.unwrap();
+    assert_eq!(session.kind, yrl::link::SESSION);
+    sec.raw_mode.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let request = wire::ExecReq { request_id: 91, timeout_ms: 5_000, argv: vec![b"/usr/bin/touch".to_vec(), marker.as_os_str().as_encoded_bytes().to_vec()] };
+    let command = Frame::new(wire::EXEC_REQ, 0, request.encode().unwrap());
+    let mut resume = session.payload.clone();
+    resume.extend_from_slice(&0u64.to_be_bytes());
+    let mut tunnel = yrl::executor::open_tunnel(&gate, None).await.expect("captured Gatekeeper can open IPC_TUNNEL");
+    yrl::session::write_msg(&mut tunnel, &Frame::new(yrl::link::RESUME, 0, resume).encode().unwrap()).await.unwrap();
+    let _ = yrl::session::write_msg(&mut tunnel, &command.encode().unwrap()).await;
+    assert!(tokio::time::timeout(Duration::from_secs(2), yrl::session::read_msg(&mut tunnel)).await.unwrap().is_err(), "plaintext RESUME/command was accepted inside the tunnel");
+
+    // Even a fresh, correctly framed inner Noise handshake signed by Gatekeeper's own key
+    // cannot attach to the client's existing session or submit the command.
+    let mut tunnel = yrl::executor::open_tunnel(&gate, None).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(2), yrl::session::client_handshake(&mut tunnel, &gate.key, &gate.executor_public, yrl::session::REKEY_EVERY)).await.unwrap().is_err());
+    send(&mut client, &sec, Frame::new(wire::PING, 0, b"still-authorized".to_vec())).await;
+    assert_eq!(recv(&mut client, &sec).await.unwrap().kind, wire::PONG, "the original session remains usable");
     assert!(!marker.exists(), "Executor ran an operation created by Gatekeeper rather than authenticated end-to-end from Client");
 }
