@@ -150,7 +150,7 @@ async fn connect(a: &[String]) -> anyhow::Result<Client> {
     let executor_public = hex::decode(std::env::var("YRL_EXECUTOR_KEY").map_err(|_| anyhow::anyhow!("missing pinned Executor key: pass --executor <executor-public-hex>"))?)?;
     let relay = std::env::var("YRL_RELAY").ok();
     let knock = std::env::var("YRL_KNOCK").ok().map(|udp| yrl::client::Knock { udp, settle: Duration::from_millis(300) });
-    let opts = yrl::client::ClientOptions { executor_public: Some(executor_public), connect_timeout: Duration::from_secs(if relay.is_some() || knock.is_some() { 15 } else { 5 }), relay, knock, udp: std::env::var("YRL_UDP").ok(), ..Default::default() };
+    let opts = yrl::client::ClientOptions { executor_public: Some(executor_public), crypto_profile_store: Some(PathBuf::from(&a[2]).join("crypto-profiles")), connect_timeout: Duration::from_secs(if relay.is_some() || knock.is_some() { 15 } else { 5 }), relay, knock, udp: std::env::var("YRL_UDP").ok(), ..Default::default() };
     let c = Client::connect_opts(&a[3], &me, &server, opts).await?;
     let pw = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("password for {}: ", a[5]))?);
     c.login(&a[5], &pw, Duration::from_secs(10)).await?;

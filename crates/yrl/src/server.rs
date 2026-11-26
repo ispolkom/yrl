@@ -1,7 +1,7 @@
 //! The server side: accept, handshake (silent on any failure), then a login (key first, then login + password), then PING / EXEC with rights checked by the server for every request.
 //! Before the login the only frame that is accepted is LOGIN; anything else closes the connection. The rights of a session are the login's rights limited by the key's rights; the client never states a role.
 use crate::keys::{read_authorized, KeyPair};
-use crate::session::{read_msg, server_handshake_open, write_msg, REKEY_EVERY};
+use crate::session::{read_msg, write_msg, REKEY_EVERY};
 use crate::throttle::Throttle;
 use crate::link::{self, drive, DriveOptions, Link};
 use crate::users::{dummy_hash, read_users, verify_hash};
@@ -316,9 +316,10 @@ async fn handle_gate<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + S
     use crate::ipc::{IPC_TUNNEL, IPC_TUNNEL_OK};
     let authorized = read_authorized(&cfg.dir.join("authorized_keys"));
     let window = crate::enroll::read_window(&cfg.dir);
+    let policy = match crate::crypto_profile::Policy::from_env() { Ok(p) => p, Err(_) => { cfg.log("connection dropped (invalid crypto policy)".into()); return } };
     let hs = tokio::time::timeout(
         cfg.handshake_timeout,
-        server_handshake_open(&mut stream, &me, &authorized, cfg.rekey_every, window.is_some()),
+        crate::session::server_handshake_open_context(&mut stream, &me, &authorized, cfg.rekey_every, window.is_some(), crate::crypto_profile::Context::Gatekeeper, policy),
     ).await;
     let (sec, who) = match hs {
         Ok(Ok(x)) => x,
@@ -348,7 +349,8 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
     let authorized = read_authorized(&cfg.dir.join("authorized_keys"));
     // outside a window an unknown key gets silence; while the owner has one open it may complete the handshake, to present the code and nothing else
     let window = crate::enroll::read_window(&cfg.dir);
-    let hs = tokio::time::timeout(cfg.handshake_timeout, server_handshake_open(&mut stream, &me, &authorized, cfg.rekey_every, window.is_some())).await;
+    let policy = match crate::crypto_profile::Policy::from_env() { Ok(p) => p, Err(_) => { cfg.log("connection dropped (invalid crypto policy)".into()); return } };
+    let hs = tokio::time::timeout(cfg.handshake_timeout, crate::session::server_handshake_open_context(&mut stream, &me, &authorized, cfg.rekey_every, window.is_some(), crate::crypto_profile::Context::Executor, policy)).await;
     let (sec, who) = match hs {
         Ok(Ok(x)) => x,
         Ok(Err(_)) => {

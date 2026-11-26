@@ -13,6 +13,17 @@ This file distinguishes the **accepted implementation-stage sequence** from the 
 | **4. Key and secret lifecycle** | Protect role-private key files, clear secret buffers, support unattended services, offline encrypted recovery, safe Noise-key rotation, device revocation and protected migration. | Implemented in **`f69e4b7`**; deployment acceptance and the Audit journal-signing rollover limit are in `STAGE4_ACCEPTANCE.md`. |
 | **5. Failure and overload resilience** | Find and remove failure modes exposed by sustained load, repeated disconnects and bounded-resource operation without weakening authentication, cryptography or delivery guarantees. | In progress. The initial correction and substages 5.1–5.6 are implemented, including bounded admission, containment and explicit crash-recovery semantics. Final integration and deployment acceptance remain pending. |
 | **6. Trusted audit and software delivery** | Rotated and independently verifiable Audit history, signing-key lifecycle, signed releases and downgrade-safe updates. | Implemented through substages 6.1–6.6. Focused tests are prepared and compilation/unit policy verification pass; comprehensive and installed-host acceptance remain Stage 8. |
+| **7. Extended cryptographic protection** | Versioned profiles, hybrid post-quantum transport/signatures, OPAQUE, FIDO2 and optional TPM-backed key handling. | In progress. Substage 7.1 is implemented behind the default-off `crypto-profiles` feature; it is not enabled in production before Stage 8 acceptance. |
+
+## Current Stage 7: extended cryptographic protection
+
+### Substage 7.1: authenticated cryptographic profiles
+
+YRL now has a canonical, bounded profile offer and selection protocol. Profile IDs unambiguously name the complete Noise pattern, authentication, KDF and AEAD suite. The exact offer digest, selected ID and role context are carried inside the Noise handshake payload and the context is also in the Noise prologue, so stripping, substitution, replay across Gatekeeper/Executor roles and unauthenticated negotiation are rejected. Unknown, repeated and policy-forbidden IDs fail closed; a route failure never triggers a weaker offer.
+
+The client keeps separate persistent profile high-water marks for each pinned peer key and Gatekeeper/Executor context. Both a configured minimum and the remembered value are enforced on every fresh route handshake, including RESUME. The state is atomically written to a private file. Gatekeeper and Executor remain independent handshakes; transport selection does not select a crypto profile. `YRL_CRYPTO_MIN_PROFILE` configures the minimum accepted ID.
+
+The only registered suite at this point is `0x00010001`, the existing Noise IK / X25519 / ChaChaPoly / BLAKE2s construction. Negotiation is compiled only with the default-off `crypto-profiles` feature, preserving the installed wire format until Stage 8 validates migration. There is deliberately no opportunistic legacy fallback. Focused tests cover malformed, unknown, repeated, stripped and substituted profiles, role separation and persistent monotonic state; they are prepared but not run.
 
 ## Current Stage 5: Failure and overload resilience
 

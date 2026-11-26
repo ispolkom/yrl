@@ -24,3 +24,10 @@ An `authorized_keys` entry is `<hex public key> <label> <comma-separated permiss
 Frames: `LOGIN=8` `[login_len u8 ≤64][login][password_len u16 ≤256][password]` (exactly, with no trailing bytes); `LOGIN_OK=9`, whose payload is the comma-separated session permissions; and `LOGIN_FAIL=10`, whose payload is always empty.
 
 Before `LOGIN_OK`, Executor accepts only LOGIN or RESUME. The Executor-owned `users` file contains `<login> <permissions|-> <argon2id PHC>` and has mode 0600; Gatekeeper neither reads the password nor supplies an account or rights assertion.
+## Cryptographic profile negotiation (Stage 7.1)
+
+When the default-off `crypto-profiles` feature is enabled, each outer Gatekeeper and inner Executor Noise IK handshake replaces the legacy `YRL1` payload with a bounded canonical profile offer. The Noise prologue is `"YRL crypto profiles v1\0" || role`, where role is one of `gatekeeper`, `executor`, `broker`, or `local-ipc`.
+
+The initiator payload is `"YRL-CRYPTO-OFFER" || version:u8 || role:u8 || minimum:u32be || count:u8 || profile[count]:u32be`. Version is 1 and count is 1..8. Unknown and repeated IDs are invalid. The responder payload is `"YRL-CRYPTO-SELECT" || version:u8 || role:u8 || selected:u32be || BLAKE3(exact_offer)`. Selection must be in the offer and no lower than either peer's configured minimum. Since both payloads are processed by Noise handshake messages, and the exact offer digest is returned, removal and substitution are authenticated failures.
+
+Profile `0x00010001` denotes the existing `Noise_IK_25519_ChaChaPoly_BLAKE2s` suite. Profile negotiation is independent for Gatekeeper and Executor and independent of UDP/TCP/Relay selection. There is no on-error downgrade or automatic retry with the legacy payload. The feature remains disabled in production pending Stage 8 migration acceptance.

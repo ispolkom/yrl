@@ -110,3 +110,8 @@ By default, a session opens in a terminal with familiar commands (`cd ls cp mv r
 7. AI agents do not need this shell; they call the same structured operations directly.
 
 Proposed first verb set (about 25, subject to agreement): `cd pwd ls cat head tail cp mv rm mkdir touch stat find du df ps kill top uname uptime whoami ip hostname env which svc` (`status/start/stop/restart`), `logs`, and `ping`.
+## Stage 7 cryptographic profile architecture
+
+Cryptographic agility is represented by complete, versioned profiles rather than independently negotiable algorithm names. This prevents invalid combinations and keeps Gatekeeper, Executor and Broker cryptographic authority separate. The authenticated Noise transcript covers a canonical offer, role context and exact selected profile; persistent per-key/per-role high-water state adds downgrade memory across connections and transport changes.
+
+Stage 7 additions are opt-in build features until Stage 8 acceptance. A failed handshake never causes an automatic weaker retry. New post-quantum, password, hardware-token and TPM profiles may be registered only when their standardized construction and maintained library satisfy the documented threat model; reserved or proposed algorithms are not advertised as supported.

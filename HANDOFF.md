@@ -7,6 +7,7 @@
 - Implementation baseline: Stage 4 was published in **`f69e4b7`** (`Harden secret handling and add offline key recovery lifecycle`). Stage 5 — failure and overload resilience — is in progress: the throughput/liveness correction and substages 5.1–5.6 are implemented. Formal end-to-end deployment acceptance has not been recorded.
 - Scope boundary: this repository is YRL. Do not modify the separate YANDI NODE source tree. Do not interpret the future desktop or other-OS design documents as implemented features.
 - Stage 6 substages 6.1–6.6 are implemented: trusted segmented Audit, key lifecycle/export, offline-rooted releases and manual downgrade-safe transactional activation. Comprehensive and installed-host acceptance is intentionally deferred to Stage 8.
+- Stage 7.1 is implemented behind the default-off `crypto-profiles` feature. No Stage 7 profile is enabled in an installed production service before Stage 8 acceptance.
 - This handoff records outcomes and verification at the baseline, not a development diary.
 
 ## Architecture at the baseline
@@ -44,6 +45,15 @@ Key code: `client.rs` (route manager), `link.rs` (SEQ/ACK, bounded buffers, prio
 | 4 — key and secret lifecycle | Implemented in **`f69e4b7`**. Private-file checks, zeroizing buffers, separated role keys, offline encrypted recovery, Noise-key rotation, device revocation and migration. Services start without an interactive unlock. | `tests/keylife.rs`, `STAGE4_ACCEPTANCE.md`. Audit journal-signing-key rollover is not implemented. |
 | 5 — failure and overload resilience | In progress. Throughput/liveness correction and substages 5.1–5.6 are implemented: hierarchical budgets, containment, bounded IPC, network/disk admission and explicit crash/restart semantics. | Focused tests are prepared but intentionally not run. Final workspace and installed-host acceptance are pending. |
 | 6 — trusted audit and software delivery | Implemented through 6.1–6.6: signed segment rotation/retention, rollback anchors, offline verification/export, Audit key generations, offline-rooted releases and transactional downgrade-safe activation. | Focused tests compile but were intentionally not run. Real signed publication, service activation/recovery and final integration acceptance remain Stage 8. |
+| 7 — extended cryptographic protection | In progress: 7.1 provides authenticated, role-bound crypto-profile negotiation and per-peer downgrade high-water marks. | Default-off feature; focused tests are compile-only until Stage 8. Substages 7.2–7.6 are not yet claimed. |
+
+## Stage 7.1 cryptographic profiles
+
+`crypto_profile.rs` defines bounded canonical offers and selections. The offer is authenticated as a Noise handshake payload, its exact BLAKE3 digest is returned in the authenticated selection, and a Gatekeeper/Executor/Broker/local-IPC context is included in both the payload and Noise prologue. Unknown, repeated, stripped, substituted and below-minimum selections fail closed. Direct UDP, TCP and Relay all use the same policy; changing a route cannot weaken it.
+
+The production CLI stores separate monotonic high-water marks by pinned public key and role under its private key directory. Writes are private, atomic and directory-synced. `YRL_CRYPTO_MIN_PROFILE` can raise the local floor. Gatekeeper and Executor still negotiate independently and retain separate pinned identities. Embedded library callers must set `ClientOptions::crypto_profile_store` if they require persistent downgrade memory.
+
+Only classical profile `0x00010001` is registered: Noise IK with X25519, ChaChaPoly and BLAKE2s. The new wire exchange is behind `crypto-profiles`, disabled by default, and has no automatic fallback to the old wire format. This is intentional until explicit migration and Stage 8 interoperability/performance acceptance. Prepared tests in `tests/crypto_profiles.rs` cover downgrade/stripping/substitution, context binding, feature-gated handshake and private persistent high-water state; they were not run.
 
 Stage 0 guarantees apply only while the Executor's server session remains alive. After a server-process restart or session-grace expiry, RESUME cannot recover it. Link retransmits stored logical frames after a fresh Noise handshake, so connection-local nonces are not reused. Confirmed frames are not re-executed, and control/interactive traffic has priority over unsent bulk file data within the bounded Link window. Stage 2 rechecks authority during a live session and before RESUME. Stages 3 and 4 must preserve these properties.
 
@@ -125,4 +135,4 @@ The current persistent data format is 1. Releases targeting another format fail 
 
 ## How to continue
 
-Start from the published Stage 5.6 commit and perform only the owner-approved final acceptance work: the complete workspace suite, cross-stage scenarios and installed-host crash/recovery checks. Keep deployment-only claims pending until those checks complete. Private Discovery and Audit rotation remain deferred; do not start Stage 6 or touch YANDI NODE.
+Continue Stage 7 sequentially from the latest published substage. Keep every new profile default-off until Stage 8, do not replace a missing standardized construction or reviewed library with project-specific cryptography, and record an exact blocker where the requested guarantee cannot safely be delivered. Do not touch YANDI NODE, Private Discovery, multipath, route racing or Stage 8 acceptance work.

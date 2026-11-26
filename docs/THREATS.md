@@ -343,3 +343,8 @@ Login tradeoffs: a stolen key can trigger a bounded lockout against its owner; a
 ## Remaining v0.1 limitations
 
 A secret port is not treated as authentication. TCP SYN-flood defense belongs to the firewall. The network sees client address, timing, and volume. Hybrid post-quantum ML-KEM remains future work. The host executor is not yet sandboxed beyond running under the `yrld` user.
+## Stage 7.1 profile-negotiation threats
+
+An active carrier can delete, replay or change a profile offer, but it cannot produce the Noise-authenticated response bound to the changed offer. Role labels in the payload and prologue prevent a valid Gatekeeper negotiation from being replayed as an Executor negotiation. Unknown profiles, duplicates, selections outside the offer and selections below either minimum are rejected. The client stores a per-pinned-key/per-role maximum so a later connection cannot silently return below an already trusted profile.
+
+The current registered profile remains classical and therefore does not provide post-quantum confidentiality or authentication. The persistent state is protected by local filesystem controls; host root can roll it back together with client state unless its fingerprint/state is retained independently. A network attacker can always deny service. The default-off feature has no opportunistic legacy fallback; wire migration requires explicit coordinated deployment and Stage 8 acceptance.

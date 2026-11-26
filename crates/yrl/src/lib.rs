@@ -33,6 +33,7 @@ pub mod resources;
 pub mod release;
 pub mod sandbox;
 pub mod cgroup;
+pub mod crypto_profile;
 pub mod server;
 pub mod spa;
 pub mod stepup;

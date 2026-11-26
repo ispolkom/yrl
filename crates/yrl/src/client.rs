@@ -1,8 +1,9 @@
 //! The client side: connect directly to host:port with the server's known public key.
 use crate::filewire::{self as fw, GetReq, PutReq};
+use crate::crypto_profile::{Context as CryptoContext, Policy as CryptoPolicy, ProfileId, ProfileStore, CLASSICAL_V1};
 use crate::keys::KeyPair;
 use crate::link;
-use crate::session::{client_handshake, read_msg, write_msg, Secure, REKEY_EVERY};
+use crate::session::{client_handshake_context, read_msg, write_msg, Secure, REKEY_EVERY};
 use crate::wire::{self, split_id, with_id, ExecReq, Frame};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
@@ -93,6 +94,9 @@ pub struct ClientOptions {
     pub knock: Option<Knock>,
     /// host:port of the server's UDP data port: the session then runs over the reliable UDP stream, and TCP is only the fallback when this is not answered
     pub udp: Option<String>,
+    /// Persistent per-peer profile high-water marks. Production clients should set this.
+    pub crypto_profile_store: Option<std::path::PathBuf>,
+    pub minimum_crypto_profile: ProfileId,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +123,8 @@ impl Default for ClientOptions {
             relay: None,
             knock: None,
             udp: None,
+            crypto_profile_store: None,
+            minimum_crypto_profile: CLASSICAL_V1,
         }
     }
 }
@@ -164,7 +170,7 @@ async fn open_stream(route: &Route, me: &KeyPair, server_public: &[u8], opts: &C
 
 async fn open_authenticated_stream(route: &Route, me: &KeyPair, gate_public: &[u8], opts: &ClientOptions) -> Result<(BoxIo, Secure)> {
     let mut outer = open_stream(route, me, gate_public, opts).await?;
-    let gate_sec = Arc::new(client_handshake(&mut outer, me, gate_public, opts.rekey_every).await?);
+    let gate_sec = Arc::new(profiled_handshake(&mut outer, me, gate_public, opts, CryptoContext::Gatekeeper).await?);
     let Some(executor_public) = opts.executor_public.as_deref() else {
         return Ok((outer, Arc::try_unwrap(gate_sec).map_err(|_| anyhow::anyhow!("gate handshake state is shared"))?));
     };
@@ -177,8 +183,19 @@ async fn open_authenticated_stream(route: &Route, me: &KeyPair, gate_public: &[u
     }
     let tunnel = crate::ipc::secure_tunnel(rd, wr, gate_sec);
     let mut inner: BoxIo = Box::new(tunnel);
-    let sec = client_handshake(&mut inner, me, executor_public, opts.rekey_every).await?;
+    let sec = profiled_handshake(&mut inner, me, executor_public, opts, CryptoContext::Executor).await?;
     Ok((inner, sec))
+}
+
+async fn profiled_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, me: &KeyPair, peer: &[u8], opts: &ClientOptions, context: CryptoContext) -> Result<Secure> {
+    let mut policy = CryptoPolicy::from_env()?;
+    policy.minimum = policy.minimum.max(opts.minimum_crypto_profile);
+    let mut store = match &opts.crypto_profile_store { Some(path) => Some(ProfileStore::open(path)?), None => None };
+    if let Some(s) = store.as_ref() { policy.minimum = s.minimum(context, peer, policy.minimum); }
+    policy.validate()?;
+    let secure = client_handshake_context(stream, me, peer, opts.rekey_every, context, policy).await?;
+    if let Some(s) = store.as_mut() { s.remember(context, peer, secure.profile())?; }
+    Ok(secure)
 }
 
 /// one signed datagram, no answer expected; the address it came from is the one that is let in
