@@ -30,6 +30,7 @@ pub mod pty;
 pub mod prompt;
 pub mod relay;
 pub mod resources;
+pub mod release;
 pub mod sandbox;
 pub mod cgroup;
 pub mod server;

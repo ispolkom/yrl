@@ -6,7 +6,7 @@
 - Repository: `https://github.com/ispolkom/yrl`, branch `main`.
 - Implementation baseline: Stage 4 was published in **`f69e4b7`** (`Harden secret handling and add offline key recovery lifecycle`). Stage 5 — failure and overload resilience — is in progress: the throughput/liveness correction and substages 5.1–5.6 are implemented. Formal end-to-end deployment acceptance has not been recorded.
 - Scope boundary: this repository is YRL. Do not modify the separate YANDI NODE source tree. Do not interpret the future desktop or other-OS design documents as implemented features.
-- Stage 6 is in progress from `ee2c62d`; substages 6.1–6.4 implement segmented Audit retention, external checkpoints/export and cross-signed Audit signing-key generations with offline recovery and explicit revocation trust limits.
+- Stage 6 is in progress from `ee2c62d`; substages 6.1–6.5 implement trusted Audit plus an independent offline-root/delegated-key signed release format and verifier. Safe update activation remains substage 6.6.
 - This handoff records outcomes and verification at the baseline, not a development diary.
 
 ## Architecture at the baseline
