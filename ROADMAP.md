@@ -33,9 +33,9 @@ This preserves classical X25519 security, role/pinned-key separation, ACK/SEQ, R
 
 ### Substage 7.3: OPAQUE password authentication
 
-Blocked at the reviewed-backend/integration boundary. RFC 9807 is final, but upstream `opaque-ke` 5.x is pre-release and its cited independent audit covered a substantially older pre-RFC implementation. Treating that audit as assurance for the current RFC code would be misleading. The existing single LOGIN frame also cannot safely carry OPAQUE registration and KE1/KE2/KE3 without a reviewed state machine, fake-record enumeration defense and channel/identity binding.
+Implemented behind the default-off `opaque-rfc9807` feature with `opaque-ke` 4.0.1's RFC 9807 Ristretto255/SHA-512/Argon2id suite. Registration is performed only inside an already authenticated Executor session, so the new password remains client-side; server setup and per-account records use private, bounded, atomic storage. KE1/KE2/KE3 are bounded and tied to account, authenticated device key, Executor role, negotiated profile and Noise transcript. Unknown accounts use the library's fake-record path and the existing throttles remain in force.
 
-The compile-only `opaque-rfc9807` feature does not activate authentication: the support gate always returns an explicit unavailable error. There is no fallback from requested OPAQUE to Argon2. `docs/CRYPTOGRAPHY.md` records migration and lifecycle requirements and separately assesses Broker ROOT step-up. Current key+Argon2 authentication is unchanged; OPAQUE security is not claimed.
+OPAQUE login is explicit (`YRL_AUTH_OPAQUE=1`) and never falls back to legacy LOGIN. `yrld opaque-init` explicitly creates server state and `yrl opaque-register` migrates after one successful legacy authentication. Production enablement and RFC-vector execution remain Stage 8 work. The dependency's historical audit predates this exact release, so compilation is not claimed as cryptographic validation. Broker ROOT OPAQUE is not enabled: its independent operation-bound design remains a documented integration boundary, and existing Broker step-up is unchanged.
 
 ### Substage 7.4: hybrid post-quantum signatures
 

@@ -99,6 +99,27 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
         while jobs.try_join_next().is_some() {}
         if auth_snapshot(&cfg.dir, &who.public, &account).as_ref() != Some(&auth) { break }
         match frame.kind {
+            #[cfg(feature = "opaque-rfc9807")]
+            wire::OPAQUE_REG_START => {
+                let Ok((id, request)) = wire::split_id(&frame.payload) else { break };
+                let store = match crate::opaque_auth::Store::open(&cfg.dir.join("opaque")) { Ok(s) => s, Err(_) => { let _ = tx.send(denied(6, b"OPAQUE state unavailable", id)).await; continue } };
+                match crate::opaque_auth::registration_response(store.setup(), account.as_bytes(), request) {
+                    Ok(response) => { let _ = tx.send(Frame::new(wire::OPAQUE_REG_RESPONSE, 0, wire::with_id(id, &response))).await; }
+                    Err(_) => { let _ = tx.send(denied(6, b"invalid OPAQUE registration request", id)).await; }
+                }
+            }
+            #[cfg(feature = "opaque-rfc9807")]
+            wire::OPAQUE_REG_FINISH => {
+                let Ok((id, upload)) = wire::split_id(&frame.payload) else { break };
+                let result = crate::opaque_auth::registration_store(upload).and_then(|record| crate::opaque_auth::Store::open(&cfg.dir.join("opaque")).and_then(|s| s.save(account.as_bytes(), &record)));
+                if result.is_ok() {
+                    cfg.rec(1, ev("opaque_registration", RESULT_OK));
+                    let _ = tx.send(Frame::new(wire::OPAQUE_REG_OK, 0, wire::with_id(id, &[]))).await;
+                } else {
+                    cfg.rec(1, ev("opaque_registration", RESULT_DENIED));
+                    let _ = tx.send(denied(6, b"OPAQUE registration not committed", id)).await;
+                }
+            }
             wire::PING => {
                 let _ = tx.send(Frame::new(wire::PONG, frame.stream, frame.payload)).await;
             }

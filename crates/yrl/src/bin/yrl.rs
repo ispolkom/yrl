@@ -52,6 +52,15 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
             c.ping(b"yrl", Duration::from_secs(5)).await?;
             println!("pong in {:?}", t.elapsed());
         }
+        #[cfg(feature = "opaque-rfc9807")]
+        Some("opaque-register") => {
+            // Authenticate with the existing method once, then install an OPAQUE
+            // record without sending the newly entered password to the server.
+            let c = connect(a).await?;
+            let pw = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("new OPAQUE password for {}: ", a[5]))?);
+            c.register_opaque(&a[5], &pw, Duration::from_secs(30)).await?;
+            println!("OPAQUE registration committed; set YRL_AUTH_OPAQUE=1 for subsequent logins");
+        }
         Some("put") | Some("get") => {
             let up = a[1] == "put";
             let (from, to) = (a.get(6).ok_or_else(|| anyhow::anyhow!("need two paths"))?, a.get(7).ok_or_else(|| anyhow::anyhow!("need two paths"))?);
@@ -153,6 +162,13 @@ async fn connect(a: &[String]) -> anyhow::Result<Client> {
     let opts = yrl::client::ClientOptions { executor_public: Some(executor_public), crypto_profile_store: Some(PathBuf::from(&a[2]).join("crypto-profiles")), connect_timeout: Duration::from_secs(if relay.is_some() || knock.is_some() { 15 } else { 5 }), relay, knock, udp: std::env::var("YRL_UDP").ok(), ..Default::default() };
     let c = Client::connect_opts(&a[3], &me, &server, opts).await?;
     let pw = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("password for {}: ", a[5]))?);
+    #[cfg(feature = "opaque-rfc9807")]
+    if std::env::var_os("YRL_AUTH_OPAQUE").is_some() {
+        c.login_opaque(&a[5], &pw, Duration::from_secs(30)).await?;
+    } else {
+        c.login(&a[5], &pw, Duration::from_secs(10)).await?;
+    }
+    #[cfg(not(feature = "opaque-rfc9807"))]
     c.login(&a[5], &pw, Duration::from_secs(10)).await?;
     Ok(c)
 }

@@ -44,12 +44,14 @@ x25519-dalek = { version = "2.0", features = ["static_secrets", "zeroize"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core", "zeroize"] }
 zeroize = "1"
 clatter = { version = "2.3.0", default-features = false, features = ["std", "getrandom", "use-chacha20poly1305", "use-blake2", "use-rust-crypto-ml-kem"], optional = true }
+opaque-ke = { version = "4.0.1", default-features = false, features = ["std", "ristretto255", "argon2"], optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [features]
 default = []
 crypto-profiles = []
 pq-hybrid = ["crypto-profiles", "dep:clatter"]
-opaque-rfc9807 = []
+opaque-rfc9807 = ["dep:opaque-ke", "dep:sha2"]
 hybrid-signatures = []
 fido2 = []
 tpm2 = []

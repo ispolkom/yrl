@@ -34,7 +34,7 @@ Profile `0x00010001` denotes the existing `Noise_IK_25519_ChaChaPoly_BLAKE2s` su
 
 Profile `0x00020001` is the default-off hybrid profile. After the classical profile-selection reply, the initiator sends a Noise `pqNN` ML-KEM-768 public-key message encrypted by the outer Noise transport; the responder returns the encrypted ML-KEM ciphertext message. Before that exchange, both sides apply `MixHash("clatter.hybrid_dual_layer.outer")` and `MixKeyAndHash(outer_handshake_hash)` to the PQ state. Empty PQ payloads are required. Subsequent YRL frames use the PQ Noise transport, not nested per-frame encryption.
 
-No OPAQUE registration or KE1/KE2/KE3 frame code is assigned. The `opaque-rfc9807` feature is not a wire capability and must not be advertised; current LOGIN remains Argon2-based. This prevents a partial peer from triggering a silent downgrade or an incomplete PAKE state machine.
+With default-off `opaque-rfc9807`, frames 110/111/112 carry bounded RFC 9807 KE1/KE2/KE3 after the authenticated device-key Noise handshake. KE1 includes the bounded account name; KE2 is indistinguishable for absent accounts; KE3 must validate before a session opens. Frames 113–116 perform client-side password registration inside an already authenticated session and carry the existing request ID. The OPAQUE context binds account, device key, Executor role, negotiated profile and a hash of the Noise transcript. OPAQUE is selected explicitly and never falls back to LOGIN.
 
 No hybrid Ed25519 + ML-DSA-65 signature envelope is assigned. Existing signatures retain their classical format/profile. A verifier must not infer hybrid assurance from an attached unknown field or accept one valid member of a required future pair.
 

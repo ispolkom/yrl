@@ -61,11 +61,11 @@ Profile `0x00020001` is implemented behind `pq-hybrid`. Classical Noise IK authe
 
 Both peers must explicitly set `YRL_CRYPTO_ENABLE_EXPERIMENTAL_PQ=1`; no error path downgrades. Gatekeeper and Executor upgrade independently with their own outer transcript. Clatter/RustCrypto dependencies are MIT/Apache-2.0-compatible. The feature remains production-disabled because Clatter lacks formal audit and Stage 8 must run FIPS vectors, malformed-message, interoperability, resource and performance tests.
 
-## Stage 7.3 OPAQUE blocker
+## Stage 7.3 OPAQUE
 
-RFC 9807 is final, but the current upstream Rust implementation line has not published an independent audit covering its final-RFC code; the referenced 2021 audit covered 0.5.0. Integrating OPAQUE additionally requires a new bounded registration/KE1/KE2/KE3 state machine, unknown-user fake records, inner-Noise channel/role/device/account binding and crash-safe record/server-secret lifecycle. Those guarantees cannot be supplied by adding the primitive dependency alone.
+RFC 9807 authentication is implemented behind default-off `opaque-rfc9807` using `opaque-ke` 4.0.1. The Executor supports bounded KE1/KE2/KE3, fake records for unknown accounts, existing login throttling and a context binding account + device key + Executor role + crypto profile + Noise transcript. Setup/records are private, bounded and atomically replaced. `yrld opaque-init` is explicit; services never regenerate missing setup.
 
-`opaque-rfc9807` is compile-only and `crypto_support::require(OpaqueRfc9807)` deliberately fails closed. Existing Argon2 records are neither silently migrated nor used as fallback after an OPAQUE request. Broker ROOT step-up would require separate Broker-owned OPAQUE secrets and operation-bound context; it cannot reuse Executor login state. Exact unblock conditions and security limits are in `docs/CRYPTOGRAPHY.md`.
+An authenticated account can migrate with `yrl opaque-register`: the client performs Argon2id and sends only RFC registration messages. OPAQUE login requires explicit `YRL_AUTH_OPAQUE=1`; failure never retries Argon2 LOGIN. Prepared unit coverage exercises registration/login and matching keys; it was not run. `cargo check -p yrl --all-targets --features opaque-rfc9807` passes. Broker ROOT OPAQUE remains deliberately unavailable because it needs separate Broker secrets and operation-bound context; the existing independent step-up path remains in force.
 
 ## Stage 7.4 hybrid-signature blocker
 

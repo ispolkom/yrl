@@ -42,6 +42,11 @@ async fn main() {
                 yrl::users::set_user_os(&dir.join("users"), &a[3], &a[4], a.get(5).map(String::as_str), &pw)
             }).map(|_| println!("account saved"))
         }
+        #[cfg(feature = "opaque-rfc9807")]
+        Some("opaque-init") if a.len() == 3 => {
+            let dir = PathBuf::from(&a[2]);
+            yrl::keylife::service_guard(&dir).and_then(|_guard| yrl::opaque_auth::Store::init(&dir.join("opaque"))).map(|_| println!("OPAQUE server state initialized"))
+        }
         Some("word") => word_set(&a).await,
         Some("unlock") => unlock(&a).await,
         Some("enroll") if a.get(2).map(String::as_str) == Some("enable") => enroll_enable(&a[3], &a).await,

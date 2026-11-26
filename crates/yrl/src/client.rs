@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
+#[cfg(feature = "opaque-rfc9807")]
+use zeroize::Zeroize;
 
 /// a connection of either kind: TCP, or the reliable stream over UDP (src/udp.rs)
 pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -512,7 +514,7 @@ impl Client {
                     wire::PONG => {
                         let _ = pong_tx.send(f).await;
                     }
-                    wire::STDOUT | wire::STDERR | wire::EXIT | wire::ERROR | wire::OP_ACCEPTED | wire::OP_STATUS_RESULT | wire::PTY_OUT | wire::PTY_EXIT | fw::FILE_DATA | fw::FILE_READY | fw::FILE_END | crate::fsops::FS_RESP | crate::fsops::FS_DONE | crate::stepup::STEPUP_CHALLENGE | crate::stepup::STEPUP_RESULT | crate::tunwire::TUN_READY | crate::tunwire::TUN_DATA | crate::tunwire::TUN_EOF | crate::tunwire::TUN_CLOSE => {
+                    wire::STDOUT | wire::STDERR | wire::EXIT | wire::ERROR | wire::OP_ACCEPTED | wire::OP_STATUS_RESULT | wire::OPAQUE_REG_RESPONSE | wire::OPAQUE_REG_OK | wire::PTY_OUT | wire::PTY_EXIT | fw::FILE_DATA | fw::FILE_READY | fw::FILE_END | crate::fsops::FS_RESP | crate::fsops::FS_DONE | crate::stepup::STEPUP_CHALLENGE | crate::stepup::STEPUP_RESULT | crate::tunwire::TUN_READY | crate::tunwire::TUN_DATA | crate::tunwire::TUN_EOF | crate::tunwire::TUN_CLOSE => {
                         if let Ok((id, _)) = split_id(&f.payload) {
                             let t = waiting.lock().await.get(&id).cloned();
                             if let Some(t) = t {
@@ -528,6 +530,80 @@ impl Client {
         self.running.store(true, std::sync::atomic::Ordering::SeqCst);
         tokio::spawn(manage(self.link.clone(), self.ident.clone(), sess.payload, pre, sink, self.lost.clone()));
         Ok(rights)
+    }
+
+    /// RFC 9807 OPAQUE password authentication. This is an explicit method:
+    /// an OPAQUE failure never retries the legacy password frame.
+    #[cfg(feature = "opaque-rfc9807")]
+    pub async fn login_opaque(&self, login: &str, password: &[u8], timeout: Duration) -> Result<Vec<String>> {
+        if self.ident.opts.executor_public.is_none() { bail!("a pinned Executor public key is required before login") }
+        let mut guard = self.pre.lock().await;
+        let Some(pre) = guard.as_mut() else { bail!("already logged in") };
+        let (state, ke1) = crate::opaque_auth::login_start(password)?;
+        let payload = wire::encode_opaque_start(login.as_bytes(), &ke1).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let mut frame = Frame::new(wire::OPAQUE_LOGIN_START, 0, payload);
+        let sealed = pre.sec.seal(&frame)?;
+        frame.payload.zeroize();
+        write_msg(&mut pre.wr, &sealed).await?;
+        let msg = tokio::time::timeout(timeout, read_msg(&mut pre.rd)).await.map_err(|_| anyhow::anyhow!("no OPAQUE response"))??;
+        let mut response = pre.sec.open(&msg)?;
+        if response.kind != wire::OPAQUE_LOGIN_RESPONSE { response.payload.zeroize(); bail!("OPAQUE login refused") }
+        let binding = crate::opaque_auth::context(login.as_bytes(), &self.ident.me.public, b"executor", pre.sec.profile(), pre.sec.channel_binding())?;
+        let (mut ke3, _session_key) = crate::opaque_auth::login_client_finish(state, password, login.as_bytes(), b"executor", &binding, &response.payload)?;
+        response.payload.zeroize();
+        let sealed = pre.sec.seal(&Frame::new(wire::OPAQUE_LOGIN_FINISH, 0, ke3.clone()))?;
+        ke3.zeroize();
+        write_msg(&mut pre.wr, &sealed).await?;
+        let mut next = async || -> Result<Frame> {
+            let msg = tokio::time::timeout(timeout, read_msg(&mut pre.rd)).await.map_err(|_| anyhow::anyhow!("no answer to OPAQUE login"))??;
+            pre.sec.open(&msg)
+        };
+        let ok = next().await?;
+        if ok.kind != wire::LOGIN_OK { bail!("OPAQUE login refused") }
+        let rights: Vec<String> = String::from_utf8_lossy(&ok.payload).split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+        let sess = next().await?;
+        if sess.kind != link::SESSION || sess.payload.len() != link::SID_LEN { bail!("the server did not open a session") }
+        let pre = guard.take().unwrap();
+        let (sink, mut inbound) = mpsc::channel::<Frame>(256);
+        let (waiting, pong_tx, lost, link) = (self.waiting.clone(), self.pong_tx.clone(), self.lost.clone(), self.link.clone());
+        tokio::spawn(async move {
+            while let Some(f) = inbound.recv().await {
+                match f.kind {
+                    wire::CLOSE => { lost.store(true, std::sync::atomic::Ordering::SeqCst); link.close(); break }
+                    wire::PONG => { let _ = pong_tx.send(f).await; }
+                    wire::STDOUT | wire::STDERR | wire::EXIT | wire::ERROR | wire::OP_ACCEPTED | wire::OP_STATUS_RESULT | wire::OPAQUE_REG_RESPONSE | wire::OPAQUE_REG_OK | wire::PTY_OUT | wire::PTY_EXIT | fw::FILE_DATA | fw::FILE_READY | fw::FILE_END | crate::fsops::FS_RESP | crate::fsops::FS_DONE | crate::stepup::STEPUP_CHALLENGE | crate::stepup::STEPUP_RESULT | crate::tunwire::TUN_READY | crate::tunwire::TUN_DATA | crate::tunwire::TUN_EOF | crate::tunwire::TUN_CLOSE => {
+                        if let Ok((id, _)) = split_id(&f.payload) { if let Some(t) = waiting.lock().await.get(&id).cloned() { let _ = t.send(f).await; } }
+                    }
+                    _ => {}
+                }
+            }
+            finish_waiters(&waiting, lost.load(std::sync::atomic::Ordering::SeqCst)).await;
+        });
+        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::spawn(manage(self.link.clone(), self.ident.clone(), sess.payload, pre, sink, self.lost.clone()));
+        Ok(rights)
+    }
+
+    /// Upgrade an already authenticated legacy account to OPAQUE. The password
+    /// remains on the client; only RFC 9807 registration messages cross Noise.
+    #[cfg(feature = "opaque-rfc9807")]
+    pub async fn register_opaque(&self, account: &str, password: &[u8], timeout: Duration) -> Result<()> {
+        if !self.running.load(std::sync::atomic::Ordering::SeqCst) { bail!("authenticate the account before OPAQUE registration") }
+        let id = self.request_id();
+        let (tx, mut rx) = mpsc::channel(2);
+        self.waiting.lock().await.insert(id, tx);
+        let (state, request) = crate::opaque_auth::registration_start(password)?;
+        self.send(&Frame::new(wire::OPAQUE_REG_START, 0, with_id(id, &request))).await?;
+        let response = tokio::time::timeout(timeout, rx.recv()).await.map_err(|_| anyhow::anyhow!("OPAQUE registration timed out"))?.ok_or_else(|| anyhow::anyhow!("session ended"))?;
+        if response.kind != wire::OPAQUE_REG_RESPONSE { bail!("OPAQUE registration refused") }
+        let (_, bytes) = split_id(&response.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let (mut upload, _export_key) = crate::opaque_auth::registration_finish(state, password, account.as_bytes(), b"executor", bytes)?;
+        self.send(&Frame::new(wire::OPAQUE_REG_FINISH, 0, with_id(id, &upload))).await?;
+        upload.zeroize();
+        let done = tokio::time::timeout(timeout, rx.recv()).await.map_err(|_| anyhow::anyhow!("OPAQUE registration confirmation timed out"))?.ok_or_else(|| anyhow::anyhow!("session ended"))?;
+        self.waiting.lock().await.remove(&id);
+        if done.kind != wire::OPAQUE_REG_OK { bail!("OPAQUE registration was not committed") }
+        Ok(())
     }
 
     pub async fn ping(&self, payload: &[u8], timeout: Duration) -> Result<Vec<u8>> {

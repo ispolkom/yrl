@@ -135,8 +135,31 @@ pub fn split_id(p: &[u8]) -> Result<(u64, &[u8]), WireError> {
 pub const LOGIN: u8 = 8;
 pub const LOGIN_OK: u8 = 9;
 pub const LOGIN_FAIL: u8 = 10;
+/// RFC 9807 OPAQUE KE1/KE2/KE3. These are accepted only when the build enables
+/// `opaque-rfc9807`; there is no automatic fallback to `LOGIN`.
+pub const OPAQUE_LOGIN_START: u8 = 110;
+pub const OPAQUE_LOGIN_RESPONSE: u8 = 111;
+pub const OPAQUE_LOGIN_FINISH: u8 = 112;
+pub const OPAQUE_REG_START: u8 = 113;
+pub const OPAQUE_REG_RESPONSE: u8 = 114;
+pub const OPAQUE_REG_FINISH: u8 = 115;
+pub const OPAQUE_REG_OK: u8 = 116;
 pub const MAX_LOGIN: usize = 64;
 pub const MAX_PASSWORD: usize = 256;
+
+pub fn encode_opaque_start(login: &[u8], ke1: &[u8]) -> Result<Vec<u8>, WireError> {
+    if login.is_empty() || login.len() > MAX_LOGIN || ke1.is_empty() || ke1.len() > 4096 { return Err(WireError::TooLarge) }
+    let mut out = vec![login.len() as u8];
+    out.extend_from_slice(login);
+    out.extend_from_slice(ke1);
+    Ok(out)
+}
+
+pub fn decode_opaque_start(input: &[u8]) -> Result<(&[u8], &[u8]), WireError> {
+    let n = *input.first().ok_or(WireError::Short)? as usize;
+    if n == 0 || n > MAX_LOGIN || input.len() <= 1 + n || input.len() > 1 + MAX_LOGIN + 4096 { return Err(WireError::TooLarge) }
+    Ok((&input[1..1+n], &input[1+n..]))
+}
 
 /// `[login_len u8][login][password_len u16][password]`; both bounded, nothing trailing.
 pub fn encode_login(login: &[u8], password: &[u8]) -> Result<Vec<u8>, WireError> {

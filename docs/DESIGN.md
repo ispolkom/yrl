@@ -118,7 +118,7 @@ Stage 7 additions are opt-in build features until Stage 8 acceptance. A failed h
 
 Stage 7.2 uses a compound Noise construction rather than inventing KEM mixing: authenticated Noise IK negotiates and encrypts a Clatter PQ Noise NN handshake, whose key schedule is bound to the outer handshake hash using Clatter's hybrid dual-layer domain. Gatekeeper and Executor run independent upgrades. The extra round trip is accepted only in the explicit experimental profile.
 
-OPAQUE will require an Executor-owned multi-message protocol and independent Broker-owned step-up protocol, not a replacement hash inside LOGIN. Until the exact RFC implementation and integration are reviewed, the feature gate is intentionally unavailable and cannot fall back to legacy authentication after selection.
+OPAQUE is an Executor-owned multi-message protocol, not a replacement hash inside LOGIN. `opaque-ke` 4.0.1 performs RFC 9807 with Ristretto255/SHA-512 and client-side Argon2id. Its authenticated context binds account, device key, Executor role, profile and Noise transcript. Migration registration runs only after existing account authentication; records and the OPRF/AKE setup are private atomic state. OPAQUE login is explicit and cannot fall back. Broker step-up keeps its independent verifier until a separately keyed, operation-bound Broker OPAQUE protocol is designed and accepted.
 
 Hybrid signatures require one common canonical envelope and lifecycle across identity, Audit, releases and recovery. Partial contour upgrades are not labeled hybrid, and asymmetric signatures remain handshake-time/control-plane operations rather than per-frame work.
 

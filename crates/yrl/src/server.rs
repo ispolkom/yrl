@@ -433,6 +433,24 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
             let password = zeroize::Zeroizing::new(password);
             attempts += 1;
             let typed_login = String::from_utf8_lossy(&login).into_owned();
+            #[cfg(feature = "opaque-rfc9807")]
+            {
+                let opaque_root = cfg.dir.join("opaque");
+                match crate::opaque_auth::Store::open(&opaque_root) {
+                    Ok(store) => match store.load(&login) {
+                        Ok(Some(_)) => {
+                            cfg.log(format!("legacy login refused via '{}': account requires OPAQUE", who.label));
+                            cfg.rec(1, crate::auditlog::Event::new("login_downgrade", crate::auditlog::LEVEL_NONE, crate::auditlog::RESULT_DENIED).device(&who.public));
+                            let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                            return;
+                        }
+                        Ok(None) => {}
+                        Err(_) => return,
+                    },
+                    Err(_) if opaque_root.exists() => return,
+                    Err(_) => {}
+                }
+            }
             let locked = cfg.throttle.locked(&key_id) || cfg.throttle.locked(&ip_id);
             let granted = if locked {
                 None // locked: even the right password is not looked at
@@ -550,6 +568,95 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                     }
                 }
             }
+            }
+            #[cfg(feature = "opaque-rfc9807")]
+            wire::OPAQUE_LOGIN_START => {
+                let parsed = wire::decode_opaque_start(&frame.payload).map(|(login, ke1)| (login.to_vec(), ke1.to_vec()));
+                frame.payload.zeroize();
+                let Ok((login, mut ke1)) = parsed else { return };
+                attempts += 1;
+                let typed_login = String::from_utf8_lossy(&login).into_owned();
+                let locked = cfg.throttle.locked(&key_id) || cfg.throttle.locked(&ip_id);
+                if locked {
+                    let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                    return;
+                }
+                let store = match crate::opaque_auth::Store::open(&cfg.dir.join("opaque")) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        cfg.log("OPAQUE login refused: server state unavailable".into());
+                        let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                        return;
+                    }
+                };
+                let user = read_users(&cfg.dir.join("users")).into_iter().find(|u| u.login.as_bytes() == login);
+                let record = match store.load(&login) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        cfg.log("OPAQUE login refused: invalid account record".into());
+                        let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                        return;
+                    }
+                };
+                let real_record = record.is_some() && user.is_some();
+                let binding = match crate::opaque_auth::context(&login, &who.public, b"executor", sec.profile(), sec.channel_binding()) { Ok(v) => v, Err(_) => return };
+                let (state, response) = match crate::opaque_auth::login_response(store.setup(), record, &login, b"executor", &binding, &ke1) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                ke1.zeroize();
+                if !send_plain(&mut wr, &sec, Frame::new(wire::OPAQUE_LOGIN_RESPONSE, 0, response)).await { return }
+                let wait = login_deadline.saturating_duration_since(Instant::now());
+                let msg = match tokio::time::timeout(wait, read_msg(&mut rd)).await { Ok(Ok(m)) => m, _ => return };
+                let Ok(mut final_frame) = sec.open(&msg) else { return };
+                if final_frame.kind != wire::OPAQUE_LOGIN_FINISH { final_frame.payload.zeroize(); return }
+                let finish = crate::opaque_auth::login_server_finish(state, &login, b"executor", &binding, &final_frame.payload);
+                final_frame.payload.zeroize();
+                let granted = match (finish, real_record, user) {
+                    (Ok(_session_key), true, Some(user)) => Some(user.rights.into_iter().filter(|r| who.rights.contains(r)).collect::<Vec<_>>()),
+                    _ => None,
+                };
+                let Some(eff) = granted else {
+                    cfg.throttle.fail(&key_id); cfg.throttle.fail(&ip_id);
+                    cfg.rec(1, crate::auditlog::Event::new("opaque_login", crate::auditlog::LEVEL_NONE, crate::auditlog::RESULT_DENIED).device(&who.public));
+                    let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                    if attempts >= cfg.max_login_attempts { return }
+                    continue;
+                };
+                cfg.throttle.ok(&key_id); cfg.throttle.ok(&ip_id);
+                cfg.rec(1, crate::auditlog::Event::new("opaque_login", crate::auditlog::LEVEL_USER, crate::auditlog::RESULT_OK).device(&who.public).user(&typed_login));
+                let Some(resources) = cfg.resources.try_session(&who.public, &typed_login, cfg.max_sessions, cfg.max_sessions_per_key, cfg.max_sessions_per_account) else { let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await; return };
+                let Some(network) = cfg.resources.try_network_connection(&who.public, &typed_login) else { let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await; return };
+                let Some(auth) = crate::executor::auth_snapshot(&cfg.dir, &who.public, &typed_login) else { return };
+                let Some((to_exec, mut from_exec)) = crate::executor::direct_session(&cfg, &who.public, &typed_login, &eff).await else { let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await; return };
+                if crate::executor::auth_snapshot(&cfg.dir, &who.public, &typed_login).as_ref() != Some(&auth) { return }
+                let sid = new_sid();
+                let link = Link::new_budgeted(cfg.link_window, resources.link_budget());
+                let (in_tx, mut in_rx) = mpsc::channel::<Frame>(64);
+                let entry = Arc::new(SessionEntry { link: link.clone(), key: who.public.clone(), account: typed_login, auth, resources: Mutex::new(Some(resources)), inbound: Mutex::new(Some(in_tx)), attach_gen: Default::default() });
+                cfg.sessions.map.lock().unwrap().insert(sid, entry.clone());
+                let (watch, watch_cfg) = (entry.clone(), cfg.clone());
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_millis(200));
+                    loop {
+                        tick.tick().await;
+                        if watch.link.is_closed() { break }
+                        if crate::executor::auth_snapshot(&watch_cfg.dir, &watch.key, &watch.account).as_ref() != Some(&watch.auth) {
+                            let _ = tokio::time::timeout(Duration::from_millis(200), watch.link.push(&Frame::new(wire::CLOSE, 0, vec![]))).await;
+                            watch.end(); watch_cfg.sessions.remove(&sid); break;
+                        }
+                    }
+                });
+                let l2 = link.clone(); let (e2, cfg2) = (entry.clone(), cfg.clone());
+                tokio::spawn(async move {
+                    let up = async { while let Some(f) = in_rx.recv().await { if to_exec.send(f).await.is_err() { break } } };
+                    let down = async { while let Some(f) = from_exec.recv().await { if l2.push(&f).await.is_err() { break } } };
+                    tokio::select! { _ = up => {}, _ = down => {} }
+                    e2.end(); cfg2.sessions.remove(&sid);
+                });
+                if !send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_OK, 0, eff.join(",").into_bytes())).await || !send_plain(&mut wr, &sec, Frame::new(link::SESSION, 0, sid.to_vec())).await { entry.end(); cfg.sessions.remove(&sid); return }
+                run_connection(entry, rd, wr, sec, 0, sid, &cfg, network).await;
+                return;
             }
             _ => {
                 cfg.log(format!("closed '{}': a frame before the login", who.label));
