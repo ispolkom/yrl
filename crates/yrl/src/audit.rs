@@ -126,6 +126,12 @@ impl AuditService {
             )?;
             k
         };
+        crate::auditkeys::initialize(&base, &key.verifying_key())?;
+        crate::auditkeys::reconcile_private(dir, &key.verifying_key())?;
+        let history = crate::auditkeys::load(dir)?;
+        if history.current != key.verifying_key() {
+            bail!("Audit signing key generation is inconsistent");
+        }
         let vk = key.verifying_key();
         recover_rotation(&base, &key)?;
         let mut journals = vec![];
@@ -335,7 +341,11 @@ impl AuditService {
     }
 
     fn prune_locked(&self, journal: Journal) -> Result<()> {
-        let vk = self.key.verifying_key();
+        let state_dir = self
+            .base
+            .parent()
+            .context("Audit directory has no state parent")?;
+        let history = crate::auditkeys::load(state_dir)?;
         let mut seals = Vec::new();
         for entry in std::fs::read_dir(&self.base)? {
             let entry = entry?;
@@ -343,7 +353,8 @@ impl AuditService {
             let name = name.to_string_lossy();
             let prefix = format!("{}.", journal.file());
             if name.starts_with(&prefix) && name.ends_with(".seal") {
-                let seal = SegmentSeal::decode(&std::fs::read(entry.path())?, &vk)?;
+                let (seal, _, _) =
+                    auditsegments::decode_seal_any(&std::fs::read(entry.path())?, &history)?;
                 seals.push((seal.generation, entry.path(), seal));
             }
         }
@@ -419,6 +430,14 @@ impl AuditService {
             if g.journals[j as usize].since_cp > 0 {
                 self.checkpoint_locked(&mut g, j)?;
             }
+        }
+        Ok(())
+    }
+
+    pub fn rotate_all(&self) -> Result<()> {
+        let mut g = self.inner.lock().unwrap();
+        for journal in [Journal::Ordinary, Journal::Security] {
+            self.rotate_locked(&mut g, journal)?;
         }
         Ok(())
     }

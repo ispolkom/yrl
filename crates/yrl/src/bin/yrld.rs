@@ -47,6 +47,7 @@ async fn main() {
         Some("enroll") if a.get(2).map(String::as_str) == Some("enable") => enroll_enable(&a[3], &a).await,
         Some("audit") if a.get(2).map(String::as_str) == Some("verify") => audit_verify(&a[3], a.get(4)),
         Some("audit") if a.get(2).map(String::as_str) == Some("anchor") && a.len() == 5 => audit_anchor(&a[3], &a[4]).await,
+        Some("audit") if a.get(2).map(String::as_str) == Some("key") => audit_key_cmd(&a),
         Some("audit") if a.get(2).map(String::as_str) == Some("repair") => {
             let dir = PathBuf::from(&a[3]);
             yrl::keylife::service_guard(&dir).and_then(|_key_guard| yrl::audit::repair(&dir).map(|t| print!("{t}")))
@@ -466,7 +467,7 @@ fn audit_verify(dir: &str, anchor_path: Option<&String>) -> anyhow::Result<()> {
     let trusted = match anchor_path {
         Some(path) => Some(yrl::auditsegments::TrustAnchor::decode(
             &std::fs::read(path)?,
-            Some(&load_verifying_key(&dir)?),
+            None,
         )?),
         None => None,
     };
@@ -513,6 +514,16 @@ async fn audit_anchor(dir: &str, output: &str) -> anyhow::Result<()> {
     yrl::auditsegments::atomic_write(&output, &bytes, 0o600)?;
     println!("signed Audit checkpoint saved to {}", output.display());
     Ok(())
+}
+
+fn audit_key_cmd(a: &[String]) -> anyhow::Result<()> {
+    match a.get(3).map(String::as_str) {
+        Some("recovery") if a.len() == 8 => yrl::keylife::audit_register_recovery(&PathBuf::from(&a[4]), &a[5], &PathBuf::from(&a[6]), &a[7]),
+        Some("rotate") if a.len() == 7 => yrl::keylife::audit_rotate(&PathBuf::from(&a[4]), &PathBuf::from(&a[5]), &a[6]).map(|k| println!("new Audit signing key: {}", hex::encode(k))),
+        Some("emergency") if a.len() == 8 => yrl::keylife::audit_emergency_rotate(&PathBuf::from(&a[4]), &PathBuf::from(&a[5]), &PathBuf::from(&a[6]), &a[7]).map(|k| println!("new emergency Audit signing key: {}", hex::encode(k))),
+        Some("revoke") if a.len() == 9 => yrl::keylife::audit_revoke(&PathBuf::from(&a[4]), a[5].parse()?, &a[6], &PathBuf::from(&a[7]), &a[8]),
+        _ => anyhow::bail!("usage: yrld audit key recovery <state> <recovery-public> <backup> <recipient> | rotate <state> <backup> <recipient> | emergency <state> <recovery-seed-file> <backup> <recipient> | revoke <state> <generation> <reason> <backup> <recipient>"),
+    }
 }
 
 /// tells the audit process what the owner just did on the machine, if one has been set up here. `critical`: if it cannot be written down, do not do it.

@@ -24,8 +24,8 @@ pub fn verify(dir: &Path, anchor: Option<&TrustAnchor>) -> (Outcome, String) {
         );
     }
     match auditsegments::verify_chain(dir, anchor) {
-        Ok(r) if r.deleted == 0 => (Outcome::Full, format!("complete: {} archives and {} active records verify", r.archived, r.active_records)),
-        Ok(r) => (Outcome::Partial, format!("partial: {} retained archives, {} witnessed deletions and {} active records verify", r.archived, r.deleted, r.active_records)),
+        Ok(r) if r.deleted == 0 && r.revoked_key_segments == 0 => (Outcome::Full, format!("complete: {} archives and {} active records verify", r.archived, r.active_records)),
+        Ok(r) => (Outcome::Partial, format!("partial: {} retained archives, {} witnessed deletions, {} revoked-key segments and {} active records verify", r.archived, r.deleted, r.revoked_key_segments, r.active_records)),
         Err(e) => (Outcome::Damaged, format!("damaged: {e}")),
     }
 }
@@ -70,41 +70,60 @@ fn copy_snapshot(source: &Path, stage: &Path) -> Result<()> {
     let out = stage.join("audit");
     fs::create_dir(&out)?;
     fs::set_permissions(&out, fs::Permissions::from_mode(0o700))?;
-    let mut count = 0usize;
-    let mut total = 0u64;
-    for entry in fs::read_dir(source.join("audit"))? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_text = name.to_string_lossy();
-        if matches!(name_text.as_ref(), "sign.key" | "lock" | "audit.sock")
-            || name_text.ends_with(".pending")
-            || name_text.contains(".tmp-")
-        {
-            continue;
+    fn copy_dir(
+        src: &Path,
+        dst: &Path,
+        count: &mut usize,
+        total: &mut u64,
+        depth: usize,
+    ) -> Result<()> {
+        if depth > 3 {
+            bail!("Audit export directory depth exceeded");
         }
-        let meta = fs::symlink_metadata(entry.path())?;
-        if !meta.is_file() || meta.nlink() != 1 {
-            bail!("unsafe Audit export source {}", entry.path().display());
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_text = name.to_string_lossy();
+            if matches!(name_text.as_ref(), "sign.key" | "lock" | "audit.sock")
+                || name_text.ends_with(".pending")
+                || name_text.contains(".tmp-")
+            {
+                continue;
+            }
+            let meta = fs::symlink_metadata(entry.path())?;
+            if meta.is_dir() {
+                let child = dst.join(&name);
+                fs::create_dir(&child)?;
+                fs::set_permissions(&child, fs::Permissions::from_mode(0o700))?;
+                copy_dir(&entry.path(), &child, count, total, depth + 1)?;
+                continue;
+            }
+            if !meta.is_file() || meta.nlink() != 1 {
+                bail!("unsafe Audit export source {}", entry.path().display());
+            }
+            *count += 1;
+            *total = total
+                .checked_add(meta.len())
+                .context("Audit export size overflow")?;
+            if *count > 4096 || *total > 8 << 30 {
+                bail!("Audit export limit exceeded");
+            }
+            let bytes = fs::read(entry.path())?;
+            if bytes.len() as u64 != meta.len() {
+                bail!("Audit file changed during export");
+            }
+            let mut f = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(dst.join(name))?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
         }
-        count += 1;
-        total = total
-            .checked_add(meta.len())
-            .context("Audit export size overflow")?;
-        if count > 4096 || total > 8 << 30 {
-            bail!("Audit export limit exceeded");
-        }
-        let bytes = fs::read(entry.path())?;
-        if bytes.len() as u64 != meta.len() {
-            bail!("Audit file changed during export");
-        }
-        let mut f = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .open(out.join(name))?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
+        Ok(())
     }
+    let (mut count, mut total) = (0usize, 0u64);
+    copy_dir(&source.join("audit"), &out, &mut count, &mut total, 0)?;
     File::open(&out)?.sync_all()?;
     Ok(())
 }

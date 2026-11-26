@@ -25,8 +25,7 @@ async fn run(a: &[String]) -> Result<i32> {
                     return Ok(3);
                 }
             }
-            let key = yrl::auditlog::load_verifying_key(&dir).ok();
-            let anchor = match a.get(3) { Some(p) => Some(yrl::auditsegments::TrustAnchor::decode(&std::fs::read(p)?, key.as_ref())?), None => None };
+            let anchor = match a.get(3) { Some(p) => Some(yrl::auditsegments::TrustAnchor::decode(&std::fs::read(p)?, None)?), None => None };
             let (outcome, detail) = yrl::auditexport::verify(&dir, anchor.as_ref());
             println!("{detail}");
             Ok(match outcome { Outcome::Full => 0, Outcome::Partial => 2, Outcome::Damaged => 3, Outcome::Unverifiable => 4 })

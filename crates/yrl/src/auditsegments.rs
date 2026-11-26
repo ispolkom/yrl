@@ -294,7 +294,7 @@ fn deletion_body(d: &Deletion) -> String {
     )
 }
 
-pub fn read_deletions(base: &Path, key: &VerifyingKey) -> Result<BTreeMap<(u8, u64), Deletion>> {
+pub fn read_deletions(base: &Path, keys: &[VerifyingKey]) -> Result<BTreeMap<(u8, u64), Deletion>> {
     let text = match fs::read_to_string(base.join("deletions.log")) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
@@ -321,11 +321,13 @@ pub fn read_deletions(base: &Path, key: &VerifyingKey) -> Result<BTreeMap<(u8, u
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("invalid file hash"))?,
         };
-        key.verify(
-            deletion_body(&d).as_bytes(),
-            &Signature::from_slice(&hex::decode(f[6])?)?,
-        )
-        .context("invalid deletion witness signature")?;
+        let sig = Signature::from_slice(&hex::decode(f[6])?)?;
+        if !keys
+            .iter()
+            .any(|key| key.verify(deletion_body(&d).as_bytes(), &sig).is_ok())
+        {
+            bail!("invalid deletion witness signature");
+        }
         if out.insert((d.journal as u8, d.generation), d).is_some() {
             bail!("duplicate Audit deletion witness");
         }
@@ -423,6 +425,19 @@ pub struct ChainReport {
     pub archived: u64,
     pub deleted: u64,
     pub active_records: u64,
+    pub revoked_key_segments: u64,
+}
+
+pub fn decode_seal_any(
+    bytes: &[u8],
+    history: &crate::auditkeys::KeyHistory,
+) -> Result<(SegmentSeal, u64, VerifyingKey)> {
+    for (generation, key) in &history.keys {
+        if let Ok(seal) = SegmentSeal::decode(bytes, key) {
+            return Ok((seal, *generation, *key));
+        }
+    }
+    bail!("segment seal is not signed by a trusted Audit key generation")
 }
 
 fn hash_at(bytes: &[u8], seq: u64) -> Option<Hash> {
@@ -443,15 +458,18 @@ fn hash_at(bytes: &[u8], seq: u64) -> Option<Hash> {
 
 pub fn verify_chain(dir: &Path, external: Option<&TrustAnchor>) -> Result<ChainReport> {
     let base = dir.join("audit");
-    let key = crate::auditlog::load_verifying_key(dir)?;
-    if external.is_some_and(|a| a.key != key.to_bytes()) {
-        bail!("local Audit key does not match the trusted anchor");
+    let history = crate::auditkeys::load(dir)?;
+    let key = history.current;
+    if external.is_some_and(|a| !history.keys.values().any(|k| k.to_bytes() == a.key)) {
+        bail!("trusted anchor key is not in the Audit transition chain");
     }
-    let deletions = read_deletions(&base, &key)?;
+    let all_keys: Vec<_> = history.keys.values().copied().collect();
+    let deletions = read_deletions(&base, &all_keys)?;
     let mut out = ChainReport {
         archived: 0,
         deleted: 0,
         active_records: 0,
+        revoked_key_segments: 0,
     };
     for journal in [Journal::Ordinary, Journal::Security] {
         let active = read_active(&base, journal, &key, 0)?;
@@ -461,7 +479,7 @@ pub fn verify_chain(dir: &Path, external: Option<&TrustAnchor>) -> Result<ChainR
             if seal_path.exists() {
                 safe_regular(&seal_path)?;
                 let seal_bytes = fs::read(&seal_path)?;
-                let seal = SegmentSeal::decode(&seal_bytes, &key)?;
+                let (seal, key_generation, segment_key) = decode_seal_any(&seal_bytes, &history)?;
                 if seal.generation != generation
                     || seal.journal != journal
                     || seal.previous_seal != previous
@@ -475,7 +493,7 @@ pub fn verify_chain(dir: &Path, external: Option<&TrustAnchor>) -> Result<ChainR
                     bail!("Audit segment file hash mismatch");
                 }
                 let head = fs::read(archived(&base, journal, generation, "head")).ok();
-                let r = crate::auditlog::verify(&bytes, journal, &key, head.as_deref());
+                let r = crate::auditlog::verify(&bytes, journal, &segment_key, head.as_deref());
                 if r.fault.is_some()
                     || r.records != seal.records
                     || r.last != Some((seal.last_seq, seal.last_hash))
@@ -493,6 +511,9 @@ pub fn verify_chain(dir: &Path, external: Option<&TrustAnchor>) -> Result<ChainR
                 }
                 previous = *blake3::hash(&seal_bytes).as_bytes();
                 out.archived += 1;
+                if history.revoked.contains(&key_generation) {
+                    out.revoked_key_segments += 1;
+                }
             } else if let Some(d) = deletions.get(&(journal as u8, generation)) {
                 previous = d.seal_hash;
                 out.deleted += 1;
