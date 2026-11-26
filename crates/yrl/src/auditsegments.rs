@@ -3,6 +3,7 @@
 use crate::auditlog::{Hash, Journal};
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -271,4 +272,258 @@ pub fn safe_regular(path: &Path) -> Result<()> {
         bail!("unsafe Audit archive {}", path.display());
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Deletion {
+    pub journal: Journal,
+    pub generation: u64,
+    pub at: u64,
+    pub seal_hash: Hash,
+    pub file_hash: Hash,
+}
+
+fn deletion_body(d: &Deletion) -> String {
+    format!(
+        "YRL-AUDIT-DELETE-1 {} {} {} {} {}",
+        d.journal.file(),
+        d.generation,
+        d.at,
+        hex::encode(d.seal_hash),
+        hex::encode(d.file_hash)
+    )
+}
+
+pub fn read_deletions(base: &Path, key: &VerifyingKey) -> Result<BTreeMap<(u8, u64), Deletion>> {
+    let text = match fs::read_to_string(base.join("deletions.log")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let f: Vec<_> = line.split_whitespace().collect();
+        if f.len() != 7 || f[0] != "YRL-AUDIT-DELETE-1" {
+            bail!("invalid Audit deletion witness");
+        }
+        let d = Deletion {
+            journal: match f[1] {
+                "ordinary" => Journal::Ordinary,
+                "security" => Journal::Security,
+                _ => bail!("invalid deletion journal"),
+            },
+            generation: f[2].parse()?,
+            at: f[3].parse()?,
+            seal_hash: hex::decode(f[4])?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid seal hash"))?,
+            file_hash: hex::decode(f[5])?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid file hash"))?,
+        };
+        key.verify(
+            deletion_body(&d).as_bytes(),
+            &Signature::from_slice(&hex::decode(f[6])?)?,
+        )
+        .context("invalid deletion witness signature")?;
+        if out.insert((d.journal as u8, d.generation), d).is_some() {
+            bail!("duplicate Audit deletion witness");
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnchorPoint {
+    pub journal: Journal,
+    pub generation: u64,
+    pub seq: Option<u64>,
+    pub hash: Hash,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustAnchor {
+    pub created: u64,
+    pub key: [u8; 32],
+    pub points: [AnchorPoint; 2],
+}
+
+impl TrustAnchor {
+    fn body(&self) -> String {
+        let p = |x: &AnchorPoint| {
+            format!(
+                "{} {} {} {}",
+                x.journal.file(),
+                x.generation,
+                x.seq.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                hex::encode(x.hash)
+            )
+        };
+        format!(
+            "YRL-AUDIT-ANCHOR-1 {} {} {} {}",
+            self.created,
+            hex::encode(self.key),
+            p(&self.points[0]),
+            p(&self.points[1])
+        )
+    }
+    pub fn encode(&self, key: &SigningKey) -> Vec<u8> {
+        let body = self.body();
+        format!(
+            "{body} {} END\n",
+            hex::encode(key.sign(body.as_bytes()).to_bytes())
+        )
+        .into_bytes()
+    }
+    pub fn decode(bytes: &[u8], trusted: Option<&VerifyingKey>) -> Result<Self> {
+        let f: Vec<_> = std::str::from_utf8(bytes)?.split_whitespace().collect();
+        if f.len() != 13 || f[0] != "YRL-AUDIT-ANCHOR-1" || f[12] != "END" {
+            bail!("invalid Audit trust anchor");
+        }
+        let key_bytes: [u8; 32] = hex::decode(f[2])?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid anchor key"))?;
+        let key = VerifyingKey::from_bytes(&key_bytes)?;
+        if trusted.is_some_and(|t| t != &key) {
+            bail!("anchor is signed by an unexpected key");
+        }
+        let point = |at: usize, journal: Journal| -> Result<AnchorPoint> {
+            if f[at] != journal.file() {
+                bail!("anchor journals are out of order");
+            }
+            Ok(AnchorPoint {
+                journal,
+                generation: f[at + 1].parse()?,
+                seq: if f[at + 2] == "-" {
+                    None
+                } else {
+                    Some(f[at + 2].parse()?)
+                },
+                hash: hex::decode(f[at + 3])?
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("invalid anchor hash"))?,
+            })
+        };
+        let anchor = Self {
+            created: f[1].parse()?,
+            key: key_bytes,
+            points: [point(3, Journal::Ordinary)?, point(7, Journal::Security)?],
+        };
+        key.verify(
+            anchor.body().as_bytes(),
+            &Signature::from_slice(&hex::decode(f[11])?)?,
+        )
+        .context("invalid anchor signature")?;
+        Ok(anchor)
+    }
+}
+
+#[derive(Debug)]
+pub struct ChainReport {
+    pub archived: u64,
+    pub deleted: u64,
+    pub active_records: u64,
+}
+
+fn hash_at(bytes: &[u8], seq: u64) -> Option<Hash> {
+    let mut at = 0usize;
+    while at + 4 <= bytes.len() {
+        let n = u32::from_be_bytes(bytes[at..at + 4].try_into().ok()?) as usize;
+        if n < 64 || at + 4 + n > bytes.len() {
+            return None;
+        }
+        let rec = crate::auditlog::Record::parse(&bytes[at + 4..at + 4 + n - 64]).ok()?;
+        if rec.seq == seq {
+            return bytes[at + 4 + n - 32..at + 4 + n].try_into().ok();
+        }
+        at += 4 + n;
+    }
+    None
+}
+
+pub fn verify_chain(dir: &Path, external: Option<&TrustAnchor>) -> Result<ChainReport> {
+    let base = dir.join("audit");
+    let key = crate::auditlog::load_verifying_key(dir)?;
+    if external.is_some_and(|a| a.key != key.to_bytes()) {
+        bail!("local Audit key does not match the trusted anchor");
+    }
+    let deletions = read_deletions(&base, &key)?;
+    let mut out = ChainReport {
+        archived: 0,
+        deleted: 0,
+        active_records: 0,
+    };
+    for journal in [Journal::Ordinary, Journal::Security] {
+        let active = read_active(&base, journal, &key, 0)?;
+        let mut previous = [0u8; 32];
+        for generation in 0..active.generation {
+            let seal_path = archived(&base, journal, generation, "seal");
+            if seal_path.exists() {
+                safe_regular(&seal_path)?;
+                let seal_bytes = fs::read(&seal_path)?;
+                let seal = SegmentSeal::decode(&seal_bytes, &key)?;
+                if seal.generation != generation
+                    || seal.journal != journal
+                    || seal.previous_seal != previous
+                {
+                    bail!("broken Audit segment sequence");
+                }
+                let log = archived(&base, journal, generation, "log");
+                safe_regular(&log)?;
+                let bytes = fs::read(&log)?;
+                if *blake3::hash(&bytes).as_bytes() != seal.file_hash {
+                    bail!("Audit segment file hash mismatch");
+                }
+                let head = fs::read(archived(&base, journal, generation, "head")).ok();
+                let r = crate::auditlog::verify(&bytes, journal, &key, head.as_deref());
+                if r.fault.is_some()
+                    || r.records != seal.records
+                    || r.last != Some((seal.last_seq, seal.last_hash))
+                {
+                    bail!("Audit segment records do not match its seal");
+                }
+                if let Some(p) = external.and_then(|a| {
+                    a.points
+                        .iter()
+                        .find(|p| p.journal == journal && p.generation == generation)
+                }) {
+                    if p.seq.and_then(|s| hash_at(&bytes, s)) != p.seq.map(|_| p.hash) {
+                        bail!("Audit history does not extend trusted anchor");
+                    }
+                }
+                previous = *blake3::hash(&seal_bytes).as_bytes();
+                out.archived += 1;
+            } else if let Some(d) = deletions.get(&(journal as u8, generation)) {
+                previous = d.seal_hash;
+                out.deleted += 1;
+            } else {
+                bail!(
+                    "missing Audit segment {} generation {}",
+                    journal.file(),
+                    generation
+                );
+            }
+        }
+        if active.previous_seal != previous {
+            bail!("active Audit segment is detached from its history");
+        }
+        let bytes = fs::read(base.join(format!("{}.log", journal.file()))).unwrap_or_default();
+        let head = fs::read(base.join(format!("{}.head", journal.file()))).ok();
+        let r = crate::auditlog::verify(&bytes, journal, &key, head.as_deref());
+        if let Some(f) = r.fault {
+            bail!("active Audit journal fault: {f:?}");
+        }
+        if let Some(p) = external.and_then(|a| a.points.iter().find(|p| p.journal == journal)) {
+            if active.generation < p.generation {
+                bail!("Audit journal was rolled back before trusted generation");
+            }
+            if active.generation == p.generation
+                && p.seq.and_then(|s| hash_at(&bytes, s)) != p.seq.map(|_| p.hash)
+            {
+                bail!("active Audit journal does not extend trusted checkpoint");
+            }
+        }
+        out.active_records += r.records;
+    }
+    Ok(out)
 }

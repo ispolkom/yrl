@@ -25,6 +25,8 @@ use tokio::sync::Semaphore;
 pub const AUDIT_EVENT: u8 = 90;
 pub const AUDIT_ACK: u8 = 91;
 pub const AUDIT_REJECT: u8 = 92;
+pub const AUDIT_ANCHOR_REQUEST: u8 = 93;
+pub const AUDIT_ANCHOR_RESPONSE: u8 = 94;
 
 struct J {
     path: PathBuf,
@@ -149,6 +151,7 @@ impl AuditService {
             });
         }
         let [a, b]: [J; 2] = journals.try_into().ok().context("journals")?;
+        auditsegments::verify_chain(dir, None).context("Audit segment chain does not verify")?;
         let svc = Arc::new(AuditService {
             key,
             every: every.max(1),
@@ -167,6 +170,34 @@ impl AuditService {
 
     pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
         self.key.verifying_key()
+    }
+
+    /// Produces a portable signed checkpoint after sealing both current tails.
+    pub fn trust_anchor(&self) -> Result<Vec<u8>> {
+        let mut g = self.inner.lock().unwrap();
+        if g.broken {
+            bail!("the Audit journal is closed");
+        }
+        for journal in [Journal::Ordinary, Journal::Security] {
+            if g.journals[journal as usize].since_cp > 0 {
+                self.checkpoint_locked(&mut g, journal)?;
+            }
+        }
+        let point = |journal: Journal| {
+            let j = &g.journals[journal as usize];
+            auditsegments::AnchorPoint {
+                journal,
+                generation: j.active.generation,
+                seq: j.next.checked_sub(1),
+                hash: if j.next == 0 { [0; 32] } else { j.prev },
+            }
+        };
+        let anchor = auditsegments::TrustAnchor {
+            created: now(),
+            key: self.key.verifying_key().to_bytes(),
+            points: [point(Journal::Ordinary), point(Journal::Security)],
+        };
+        Ok(anchor.encode(&self.key))
     }
 
     /// writes one event; returns its number. Errors are real: the caller decides what that means for what it was about to do.
@@ -608,7 +639,24 @@ async fn handle(
     let (mut rd, mut wr) = stream.into_split();
     while let Ok(Ok(msg)) = tokio::time::timeout(IPC_IDLE_TIMEOUT, read_msg(&mut rd)).await {
         let Ok(f) = sec.open(&msg) else { break };
-        if f.kind != AUDIT_EVENT {
+        if f.kind == AUDIT_ANCHOR_REQUEST && f.payload.is_empty() && src == Source::Owner {
+            let svc = svc.clone();
+            let anchor = tokio::task::spawn_blocking(move || svc.trust_anchor())
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Audit anchor task failed")));
+            let out = match anchor {
+                Ok(a) => Frame::new(AUDIT_ANCHOR_RESPONSE, 0, a),
+                Err(_) => Frame::new(AUDIT_REJECT, 0, vec![]),
+            };
+            let Ok(m) = sec.seal(&out) else { break };
+            if !matches!(
+                tokio::time::timeout(IPC_WRITE_TIMEOUT, write_msg(&mut wr, &m)).await,
+                Ok(Ok(()))
+            ) {
+                break;
+            }
+            continue;
+        } else if f.kind != AUDIT_EVENT {
             break;
         }
         // Journal I/O and its process-wide chain lock must not occupy an async worker. Admission
@@ -762,6 +810,40 @@ impl AuditClient {
 
     pub fn lost(&self) -> u64 {
         self.lost.load(SeqCst)
+    }
+
+    /// Fetches a signed checkpoint over the authenticated local Noise channel.
+    pub async fn fetch_anchor(&self) -> Result<Vec<u8>> {
+        let mut g = self.critical_conn.lock().await;
+        if g.is_none() {
+            let mut s =
+                tokio::time::timeout(self.timeout, UnixStream::connect(&self.socket)).await??;
+            let sec = tokio::time::timeout(
+                self.timeout,
+                client_handshake(&mut s, &self.key, &self.audit_public, REKEY_EVERY),
+            )
+            .await??;
+            let (r, w) = s.into_split();
+            *g = Some((sec, r, w));
+        }
+        let (sec, rd, wr) = g.as_mut().unwrap();
+        let result: Result<Vec<u8>> = async {
+            tokio::time::timeout(
+                self.timeout,
+                write_msg(wr, &sec.seal(&Frame::new(AUDIT_ANCHOR_REQUEST, 0, vec![]))?),
+            )
+            .await??;
+            let f = sec.open(&tokio::time::timeout(self.timeout, read_msg(rd)).await??)?;
+            if f.kind != AUDIT_ANCHOR_RESPONSE {
+                bail!("the Audit service refused the checkpoint request");
+            }
+            Ok(f.payload)
+        }
+        .await;
+        if result.is_err() {
+            *g = None;
+        }
+        result
     }
 }
 

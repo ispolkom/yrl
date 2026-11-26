@@ -1,4 +1,5 @@
 //! yrld init <dir> | yrld authorize <dir> <client-public-hex> <label> <rights> | yrld serve <dir> <bind addr:port>
+use anyhow::Context;
 use std::path::PathBuf;
 use yrl::{keys, server};
 
@@ -44,7 +45,8 @@ async fn main() {
         Some("word") => word_set(&a).await,
         Some("unlock") => unlock(&a).await,
         Some("enroll") if a.get(2).map(String::as_str) == Some("enable") => enroll_enable(&a[3], &a).await,
-        Some("audit") if a.get(2).map(String::as_str) == Some("verify") => audit_verify(&a[3]),
+        Some("audit") if a.get(2).map(String::as_str) == Some("verify") => audit_verify(&a[3], a.get(4)),
+        Some("audit") if a.get(2).map(String::as_str) == Some("anchor") && a.len() == 5 => audit_anchor(&a[3], &a[4]).await,
         Some("audit") if a.get(2).map(String::as_str) == Some("repair") => {
             let dir = PathBuf::from(&a[3]);
             yrl::keylife::service_guard(&dir).and_then(|_key_guard| yrl::audit::repair(&dir).map(|t| print!("{t}")))
@@ -69,7 +71,8 @@ async fn serve(dir: &str, bind: &str, relay: Option<String>) -> anyhow::Result<(
     let _key_guard = yrl::keylife::service_guard(&dir)?;
     let me = keys::load(&dir)?;
     let mut cfg = server::ServerConfig::new(dir);
-    cfg.set_resource_limits(yrl::resources::ResourceLimits::from_env()?).map_err(|e| anyhow::anyhow!(e))?;
+    cfg.set_resource_limits(yrl::resources::ResourceLimits::from_env()?)
+        .map_err(|e| anyhow::anyhow!(e))?;
     cfg.set_disk_limits(yrl::disk::DiskLimits::from_env()?)?;
     cfg.set_operation_limits(yrl::opjournal::Limits::from_env()?)?;
     match relay {
@@ -93,7 +96,6 @@ async fn serve(dir: &str, bind: &str, relay: Option<String>) -> anyhow::Result<(
 }
 
 /// the part that does things on the machine; listens only on the local socket `<dir>/ipc.sock`
-
 
 /// the installation on a machine with separate system users: `accounts` and `tmpfiles` only PRINT (the owner reads them, then runs them); `layout` gives owners and modes (as root); `check` finds every difference
 fn install_cmd(a: &[String]) -> anyhow::Result<()> {
@@ -138,29 +140,46 @@ fn peer_exe(opt: &Option<String>) -> anyhow::Result<Option<PathBuf>> {
     Ok(match opt.as_deref() {
         Some("-") => None,
         Some(p) => Some(std::fs::canonicalize(p)?),
-        None => std::env::current_exe().ok().and_then(|p| std::fs::canonicalize(p).ok()),
+        None => std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::canonicalize(p).ok()),
     })
 }
 
 async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
     let _key_guard = yrl::keylife::service_guard(&dir)?;
-    let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
-    let uid = opt("--gate-uid").map(|u| yrl::ipc::uid_arg(&u)).transpose()?;
+    let opt = |name: &str| {
+        a.iter()
+            .position(|x| x == name)
+            .and_then(|i| a.get(i + 1))
+            .cloned()
+    };
+    let uid = opt("--gate-uid")
+        .map(|u| yrl::ipc::uid_arg(&u))
+        .transpose()?;
     let exe = peer_exe(&opt("--gate-exe"))?;
     let ipc = yrl::ipc::load_executor(&dir, uid, exe)?;
     let listener = yrl::ipc::bind_socket(&ipc.socket)?;
     let mut cfg = server::ServerConfig::new(dir.clone());
-    cfg.set_resource_limits(yrl::resources::ResourceLimits::from_env()?).map_err(|e| anyhow::anyhow!(e))?;
+    cfg.set_resource_limits(yrl::resources::ResourceLimits::from_env()?)
+        .map_err(|e| anyhow::anyhow!(e))?;
     cfg.set_disk_limits(yrl::disk::DiskLimits::from_env()?)?;
     cfg.set_operation_limits(yrl::opjournal::Limits::from_env()?)?;
     cfg.exec_identity = Some(ipc.key.clone());
     cfg.session_cgroup_limits = yrl::cgroup::SessionLimits::from_env()?;
-    cfg.lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&yrl::ipc::state_dir(&dir, "exec"), "sudo"));
+    cfg.lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(
+        &yrl::ipc::state_dir(&dir, "exec"),
+        "sudo",
+    ));
     cfg.broker = yrl::ipc::load_executor_to_broker(&dir).ok(); // without a broker every ROOT step-up is refused
     cfg.audit.exec = yrl::ipc::audit_client(&dir, "executor"); // reports to the audit process, if one has been set up
-    if std::env::var_os("YRL_SESSION_CGROUPS").is_some() { yrl::cgroup::verify_delegation_with(&cfg.session_cgroup_limits)?; }
-    if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply_executor()?; }
+    if std::env::var_os("YRL_SESSION_CGROUPS").is_some() {
+        yrl::cgroup::verify_delegation_with(&cfg.session_cgroup_limits)?;
+    }
+    if std::env::var_os("YRL_NO_SANDBOX").is_none() {
+        yrl::sandbox::apply_executor()?;
+    }
     eprintln!("[yrld] executor ready on {}", ipc.socket.display());
     yrl::watchdog::start();
     yrl::executor::serve_ipc(listener, cfg, ipc).await;
@@ -168,8 +187,18 @@ async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
 }
 
 /// the part that talks to the network; has no way to do anything on the machine except by asking the executor
-async fn gatekeeper(dir: &str, bind: &str, relay: Option<String>, a: &[String]) -> anyhow::Result<()> {
-    let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
+async fn gatekeeper(
+    dir: &str,
+    bind: &str,
+    relay: Option<String>,
+    a: &[String],
+) -> anyhow::Result<()> {
+    let opt = |name: &str| {
+        a.iter()
+            .position(|x| x == name)
+            .and_then(|i| a.get(i + 1))
+            .cloned()
+    };
     let dir = PathBuf::from(dir);
     let _key_guard = yrl::keylife::service_guard(&dir)?;
     let me = keys::load_shared(&dir)?; // the state directory is shared with the other parts: the file must be ours and private
@@ -177,15 +206,28 @@ async fn gatekeeper(dir: &str, bind: &str, relay: Option<String>, a: &[String]) 
     cfg.gate = Some(yrl::ipc::load_gatekeeper(&dir)?);
     cfg.audit.gate = yrl::ipc::audit_client(&dir, "gatekeeper");
     cfg.audit_enabled = false; // a separate gatekeeper never starts a journal of its own
-    // the network gate: one datagram port that never answers, and a firewall program that is the only one to touch the firewall
+                               // the network gate: one datagram port that never answers, and a firewall program that is the only one to touch the firewall
     let spa_task = match (opt("--spa"), opt("--work-port")) {
         (Some(udp), Some(port)) => {
             let ipc = yrl::ipc::load_gatekeeper_to_firewall(&dir)?;
-            let verifier = std::sync::Arc::new(yrl::spa::SpaVerifier::new(me.clone(), dir.clone(), yrl::spa::SpaConfig::default()));
+            let verifier = std::sync::Arc::new(yrl::spa::SpaVerifier::new(
+                me.clone(),
+                dir.clone(),
+                yrl::spa::SpaConfig::default(),
+            ));
             let sock = tokio::net::UdpSocket::bind(&udp).await?;
             eprintln!("[yrld] listening for knocks on {udp} (udp, never answers)");
-            let ttl: u32 = opt("--knock-ttl").map(|t| t.parse()).transpose()?.unwrap_or(30);
-            Some((sock, verifier, yrl::firewall::FirewallClient::new(ipc), port.parse::<u16>()?, ttl))
+            let ttl: u32 = opt("--knock-ttl")
+                .map(|t| t.parse())
+                .transpose()?
+                .unwrap_or(30);
+            Some((
+                sock,
+                verifier,
+                yrl::firewall::FirewallClient::new(ipc),
+                port.parse::<u16>()?,
+                ttl,
+            ))
         }
         _ => None,
     };
@@ -194,7 +236,14 @@ async fn gatekeeper(dir: &str, bind: &str, relay: Option<String>, a: &[String]) 
         yrl::sandbox::apply()?;
     }
     if let Some((sock, verifier, fw, port, ttl)) = spa_task {
-        tokio::spawn(yrl::gatenet::spa_listen(sock, verifier, fw, port, ttl, cfg.clone()));
+        tokio::spawn(yrl::gatenet::spa_listen(
+            sock,
+            verifier,
+            fw,
+            port,
+            ttl,
+            cfg.clone(),
+        ));
     }
     // the same server over UDP on the same port number (the firewall treats both alike): `--udp addr:port`
     if let Some(u) = opt("--udp") {
@@ -229,7 +278,8 @@ fn sandbox_selftest() -> i32 {
     let existing = std::thread::spawn(move || {
         if ready.recv().is_ok() {
             let (_, mode) = yrl::sandbox::status();
-            let _ = report.send(mode == 2 && std::process::Command::new("/bin/true").status().is_err());
+            let _ =
+                report.send(mode == 2 && std::process::Command::new("/bin/true").status().is_err());
         }
     });
     if let Err(e) = yrl::sandbox::apply() {
@@ -239,12 +289,18 @@ fn sandbox_selftest() -> i32 {
     let (nnp, mode) = yrl::sandbox::status();
     let exec_after = std::process::Command::new("/bin/true").status();
     let read_ok = std::fs::read_to_string("/proc/self/status").is_ok();
-    let sock_ok = std::os::unix::net::UnixListener::bind("/tmp/.yrl-selftest.sock").map(|_| { let _ = std::fs::remove_file("/tmp/.yrl-selftest.sock"); }).is_ok();
+    let sock_ok = std::os::unix::net::UnixListener::bind("/tmp/.yrl-selftest.sock")
+        .map(|_| {
+            let _ = std::fs::remove_file("/tmp/.yrl-selftest.sock");
+        })
+        .is_ok();
     let tcp_ok = std::net::TcpListener::bind("127.0.0.1:0").is_ok();
     let thread_ok = std::thread::spawn(|| {
         let (_, mode) = yrl::sandbox::status();
         mode == 2 && std::process::Command::new("/bin/true").status().is_err()
-    }).join().unwrap_or(false);
+    })
+    .join()
+    .unwrap_or(false);
     let _ = go.send(());
     let existing_thread_ok = checked.recv().unwrap_or(false);
     let _ = existing.join();
@@ -257,16 +313,28 @@ fn sandbox_selftest() -> i32 {
 async fn broker(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
     let _key_guard = yrl::keylife::service_guard(&dir)?;
-    let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
-    let uid = opt("--exec-uid").map(|u| yrl::ipc::uid_arg(&u)).transpose()?;
+    let opt = |name: &str| {
+        a.iter()
+            .position(|x| x == name)
+            .and_then(|i| a.get(i + 1))
+            .cloned()
+    };
+    let uid = opt("--exec-uid")
+        .map(|u| yrl::ipc::uid_arg(&u))
+        .transpose()?;
     let exe = peer_exe(&opt("--exec-exe"))?;
     let ipc = yrl::ipc::load_broker(&dir, uid, exe)?;
     let listener = yrl::ipc::bind_socket(&ipc.socket)?;
     eprintln!("[yrld] broker ready on {}", ipc.socket.display());
     let mut cfg = server::ServerConfig::new(dir.clone());
-    cfg.root_lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&yrl::ipc::state_dir(&dir, "broker"), "root"));
+    cfg.root_lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(
+        &yrl::ipc::state_dir(&dir, "broker"),
+        "root",
+    ));
     cfg.audit.broker = yrl::ipc::audit_client(&dir, "broker");
-    if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply()?; }
+    if std::env::var_os("YRL_NO_SANDBOX").is_none() {
+        yrl::sandbox::apply()?;
+    }
     yrl::watchdog::start();
     yrl::broker::serve_ipc(listener, cfg, ipc).await;
     Ok(())
@@ -277,23 +345,61 @@ async fn enroll_enable(dir: &str, a: &[String]) -> anyhow::Result<()> {
     use std::io::BufRead;
     let dir = PathBuf::from(dir);
     let _key_guard = yrl::keylife::service_guard(&dir)?;
-    let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
+    let opt = |name: &str| {
+        a.iter()
+            .position(|x| x == name)
+            .and_then(|i| a.get(i + 1))
+            .cloned()
+    };
     let ttl: u64 = opt("--ttl").map(|t| t.parse()).transpose()?.unwrap_or(120);
-    let rights: Vec<String> = opt("--rights").unwrap_or_else(|| "exec".into()).split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+    let rights: Vec<String> = opt("--rights")
+        .unwrap_or_else(|| "exec".into())
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
     let code = yrl::enroll::open_window(&dir, ttl, &rights)?;
-    owner_note(&dir, yrl::auditlog::Event::new("enroll_open", yrl::auditlog::LEVEL_NONE, yrl::auditlog::RESULT_OK).target(&format!("ttl={ttl} rights={}", rights.join(","))), false).await?;
+    owner_note(
+        &dir,
+        yrl::auditlog::Event::new(
+            "enroll_open",
+            yrl::auditlog::LEVEL_NONE,
+            yrl::auditlog::RESULT_OK,
+        )
+        .target(&format!("ttl={ttl} rights={}", rights.join(","))),
+        false,
+    )
+    .await?;
     println!("A window is open for {ttl} seconds. Tell the new device this code: {code}");
     println!("The new device will get these rights: {}", rights.join(","));
     let end = std::time::Instant::now() + std::time::Duration::from_secs(ttl);
     while std::time::Instant::now() < end {
         if let Some(req) = yrl::enroll::pending_request(&dir) {
-            println!("A device asks to be added: name '{}', fingerprint {}", req.label, yrl::enroll::fingerprint(&req.public));
+            println!(
+                "A device asks to be added: name '{}', fingerprint {}",
+                req.label,
+                yrl::enroll::fingerprint(&req.public)
+            );
             println!("Does the NEW DEVICE show exactly the same fingerprint? Add it? [y/N]");
             let mut line = String::new();
             std::io::stdin().lock().read_line(&mut line)?;
             let yes = line.trim().eq_ignore_ascii_case("y");
             // adding a device is written down BEFORE it happens; if that is impossible, nothing is added
-            let ev = yrl::auditlog::Event::new("enroll_decision", yrl::auditlog::LEVEL_NONE, if yes { yrl::auditlog::RESULT_OK } else { yrl::auditlog::RESULT_DENIED }).device(&req.public).target(&format!("{} {}", req.label, yrl::enroll::fingerprint(&req.public)));
+            let ev = yrl::auditlog::Event::new(
+                "enroll_decision",
+                yrl::auditlog::LEVEL_NONE,
+                if yes {
+                    yrl::auditlog::RESULT_OK
+                } else {
+                    yrl::auditlog::RESULT_DENIED
+                },
+            )
+            .device(&req.public)
+            .target(&format!(
+                "{} {}",
+                req.label,
+                yrl::enroll::fingerprint(&req.public)
+            ));
             if let Err(e) = owner_note(&dir, ev, yes).await {
                 yrl::enroll::decide(&dir, &req, false, &rights)?;
                 yrl::enroll::close_window(&dir);
@@ -315,13 +421,25 @@ async fn enroll_enable(dir: &str, a: &[String]) -> anyhow::Result<()> {
 async fn audit(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
     let _key_guard = yrl::keylife::service_guard(&dir)?;
-    let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
-    let every: u64 = opt("--checkpoint-every").map(|n| n.parse()).transpose()?.unwrap_or(100);
-    let uid = opt("--parts-uid").map(|u| yrl::ipc::uid_arg(&u)).transpose()?;
+    let opt = |name: &str| {
+        a.iter()
+            .position(|x| x == name)
+            .and_then(|i| a.get(i + 1))
+            .cloned()
+    };
+    let every: u64 = opt("--checkpoint-every")
+        .map(|n| n.parse())
+        .transpose()?
+        .unwrap_or(100);
+    let uid = opt("--parts-uid")
+        .map(|u| yrl::ipc::uid_arg(&u))
+        .transpose()?;
     let svc = yrl::audit::AuditService::open(&dir, every)?; // refuses to start on a journal that does not verify
     let ipc = yrl::ipc::load_audit(&dir, uid)?;
     let listener = yrl::ipc::bind_socket(&ipc.socket)?;
-    if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply()?; }
+    if std::env::var_os("YRL_NO_SANDBOX").is_none() {
+        yrl::sandbox::apply()?;
+    }
     eprintln!("[yrld] audit ready on {}", ipc.socket.display());
     let s2 = svc.clone();
     tokio::spawn(async move {
@@ -332,17 +450,40 @@ async fn audit(dir: &str, a: &[String]) -> anyhow::Result<()> {
         }
     });
     yrl::watchdog::start();
-    yrl::audit::serve_ipc(listener, svc, ipc, std::sync::Arc::new(|m| eprintln!("[yrld] {m}"))).await;
+    yrl::audit::serve_ipc(
+        listener,
+        svc,
+        ipc,
+        std::sync::Arc::new(|m| eprintln!("[yrld] {m}")),
+    )
+    .await;
     Ok(())
 }
 
-fn audit_verify(dir: &str) -> anyhow::Result<()> {
+fn audit_verify(dir: &str, anchor_path: Option<&String>) -> anyhow::Result<()> {
     use yrl::auditlog::*;
     let dir = PathBuf::from(dir);
+    let trusted = match anchor_path {
+        Some(path) => Some(yrl::auditsegments::TrustAnchor::decode(
+            &std::fs::read(path)?,
+            Some(&load_verifying_key(&dir)?),
+        )?),
+        None => None,
+    };
+    let chain = yrl::auditsegments::verify_chain(&dir, trusted.as_ref())?;
     let mut bad = false;
     for j in [Journal::Ordinary, Journal::Security] {
         let r = verify_dir(&dir, j)?;
-        println!("{}: {} records, {} checkpoints, {} not yet sealed{}", j.file(), r.records, r.checkpoints, r.unsealed, r.sealed.map(|(s, h)| format!(", sealed up to #{s} ({})", &hex::encode(h)[..16])).unwrap_or_default());
+        println!(
+            "{}: {} records, {} checkpoints, {} not yet sealed{}",
+            j.file(),
+            r.records,
+            r.checkpoints,
+            r.unsealed,
+            r.sealed
+                .map(|(s, h)| format!(", sealed up to #{s} ({})", &hex::encode(h)[..16]))
+                .unwrap_or_default()
+        );
         if let Some(f) = r.fault {
             println!("  PROBLEM: {f:?}");
             bad = true;
@@ -351,16 +492,43 @@ fn audit_verify(dir: &str) -> anyhow::Result<()> {
     if bad {
         anyhow::bail!("the journal does not verify");
     }
-    println!("all journals verify");
+    println!(
+        "all journals verify ({} archived, {} deletion witnesses, {} active records)",
+        chain.archived, chain.deleted, chain.active_records
+    );
+    Ok(())
+}
+
+async fn audit_anchor(dir: &str, output: &str) -> anyhow::Result<()> {
+    let dir = PathBuf::from(dir);
+    let client =
+        yrl::ipc::audit_client(&dir, "owner").context("Audit owner IPC is not configured")?;
+    let bytes = client.fetch_anchor().await?;
+    let key = yrl::auditlog::load_verifying_key(&dir)?;
+    yrl::auditsegments::TrustAnchor::decode(&bytes, Some(&key))?;
+    let output = PathBuf::from(output);
+    if output.exists() {
+        anyhow::bail!("checkpoint destination already exists");
+    }
+    yrl::auditsegments::atomic_write(&output, &bytes, 0o600)?;
+    println!("signed Audit checkpoint saved to {}", output.display());
     Ok(())
 }
 
 /// tells the audit process what the owner just did on the machine, if one has been set up here. `critical`: if it cannot be written down, do not do it.
-async fn owner_note(dir: &std::path::Path, ev: yrl::auditlog::Event, critical: bool) -> anyhow::Result<()> {
-    let Some(c) = yrl::ipc::audit_client(dir, "owner") else { return Ok(()) }; // no audit process set up in this directory
+async fn owner_note(
+    dir: &std::path::Path,
+    ev: yrl::auditlog::Event,
+    critical: bool,
+) -> anyhow::Result<()> {
+    let Some(c) = yrl::ipc::audit_client(dir, "owner") else {
+        return Ok(());
+    }; // no audit process set up in this directory
     match c.record_critical(ev).await {
         Ok(_) => Ok(()),
-        Err(e) if critical => anyhow::bail!("this is not done because it cannot be written to the audit journal: {e}"),
+        Err(e) if critical => {
+            anyhow::bail!("this is not done because it cannot be written to the audit journal: {e}")
+        }
         Err(e) => {
             eprintln!("warning: this could not be written to the audit journal ({e}); it is done all the same");
             Ok(())
@@ -371,7 +539,17 @@ async fn owner_note(dir: &std::path::Path, ev: yrl::auditlog::Event, critical: b
 async fn revoke_device_cmd(dir: &str, public: &str) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
     let _key_guard = yrl::keylife::service_guard(&dir)?;
-    owner_note(&dir, yrl::auditlog::Event::new("device_revoke", yrl::auditlog::LEVEL_NONE, yrl::auditlog::RESULT_OK).target(public), true).await?;
+    owner_note(
+        &dir,
+        yrl::auditlog::Event::new(
+            "device_revoke",
+            yrl::auditlog::LEVEL_NONE,
+            yrl::auditlog::RESULT_OK,
+        )
+        .target(public),
+        true,
+    )
+    .await?;
     yrl::keylife::revoke_device(&dir, public)
 }
 
@@ -384,11 +562,27 @@ async fn word_set(a: &[String]) -> anyhow::Result<()> {
     };
     let dir = PathBuf::from(&a[3]);
     let _key_guard = yrl::keylife::service_guard(&dir)?;
-    let phrase = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("phrase for {}: ", level.right()))?);
+    let phrase = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!(
+        "phrase for {}: ",
+        level.right()
+    ))?);
     // the fact is recorded first, the phrase never is
-    owner_note(&dir, yrl::auditlog::Event::new("word_set", yrl::auditlog::LEVEL_NONE, yrl::auditlog::RESULT_OK).target(level.right()), true).await?;
+    owner_note(
+        &dir,
+        yrl::auditlog::Event::new(
+            "word_set",
+            yrl::auditlog::LEVEL_NONE,
+            yrl::auditlog::RESULT_OK,
+        )
+        .target(level.right()),
+        true,
+    )
+    .await?;
     yrl::stepup::Verifier::set(&dir, level, &phrase)?;
-    println!("saved (only a verifier of the {} phrase is stored)", level.right());
+    println!(
+        "saved (only a verifier of the {} phrase is stored)",
+        level.right()
+    );
     Ok(())
 }
 
@@ -403,8 +597,21 @@ async fn unlock(a: &[String]) -> anyhow::Result<()> {
         _ => anyhow::bail!("usage: yrld unlock <dir> <sudo|root|all>"),
     };
     for n in names {
-        owner_note(&dir, yrl::auditlog::Event::new("unlock", yrl::auditlog::LEVEL_NONE, yrl::auditlog::RESULT_OK).target(n), false).await?;
-        yrl::stepup::Lockouts::reset_files(&yrl::ipc::state_dir(&dir, if n == "sudo" { "exec" } else { "broker" }), n)?;
+        owner_note(
+            &dir,
+            yrl::auditlog::Event::new(
+                "unlock",
+                yrl::auditlog::LEVEL_NONE,
+                yrl::auditlog::RESULT_OK,
+            )
+            .target(n),
+            false,
+        )
+        .await?;
+        yrl::stepup::Lockouts::reset_files(
+            &yrl::ipc::state_dir(&dir, if n == "sudo" { "exec" } else { "broker" }),
+            n,
+        )?;
         println!("lockouts for {n}: cleared");
     }
     Ok(())
@@ -414,24 +621,64 @@ async fn unlock(a: &[String]) -> anyhow::Result<()> {
 async fn firewall(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let dir = PathBuf::from(dir);
     let _key_guard = yrl::keylife::service_guard(&dir)?;
-    let opt = |name: &str| a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned();
-    let ports: Vec<u16> = opt("--ports").ok_or_else(|| anyhow::anyhow!("--ports is needed: the work ports that stay closed until a knock"))?.split(',').map(|p| p.parse()).collect::<Result<_, _>>()?;
-    let policy = yrl::firewall::Policy { work_ports: ports.clone(), max_ttl_secs: opt("--max-ttl").map(|t| t.parse()).transpose()?.unwrap_or(120), allow_loopback: a.iter().any(|x| x == "--allow-loopback"), ..Default::default() };
+    let opt = |name: &str| {
+        a.iter()
+            .position(|x| x == name)
+            .and_then(|i| a.get(i + 1))
+            .cloned()
+    };
+    let ports: Vec<u16> = opt("--ports")
+        .ok_or_else(|| {
+            anyhow::anyhow!("--ports is needed: the work ports that stay closed until a knock")
+        })?
+        .split(',')
+        .map(|p| p.parse())
+        .collect::<Result<_, _>>()?;
+    let policy = yrl::firewall::Policy {
+        work_ports: ports.clone(),
+        max_ttl_secs: opt("--max-ttl")
+            .map(|t| t.parse())
+            .transpose()?
+            .unwrap_or(120),
+        allow_loopback: a.iter().any(|x| x == "--allow-loopback"),
+        ..Default::default()
+    };
     let backend: Box<dyn yrl::firewall::Backend> = match opt("--backend").as_deref() {
         Some("mock") => Box::new(yrl::firewall::MockKernel::default()),
         _ => {
-            let mut b = yrl::firewall::NftBackend { runner: yrl::firewall::RealRunner };
+            let mut b = yrl::firewall::NftBackend {
+                runner: yrl::firewall::RealRunner,
+            };
             b.install(&ports)?; // the permanent rules: the work ports are dropped unless the source is in the set
             Box::new(b)
         }
     };
     let audit = yrl::ipc::audit_client(&dir, "firewall");
-    let svc = yrl::firewall::FirewallService::start(backend, policy, Box::new(yrl::gatenet::now_secs), audit)?;
-    let ipc = yrl::ipc::load_firewall(&dir, opt("--gate-uid").map(|u| yrl::ipc::uid_arg(&u)).transpose()?, peer_exe(&opt("--gate-exe"))?)?;
+    let svc = yrl::firewall::FirewallService::start(
+        backend,
+        policy,
+        Box::new(yrl::gatenet::now_secs),
+        audit,
+    )?;
+    let ipc = yrl::ipc::load_firewall(
+        &dir,
+        opt("--gate-uid")
+            .map(|u| yrl::ipc::uid_arg(&u))
+            .transpose()?,
+        peer_exe(&opt("--gate-exe"))?,
+    )?;
     let listener = yrl::ipc::bind_socket(&ipc.socket)?;
     eprintln!("[yrld] firewall ready on {}", ipc.socket.display());
-    if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply_firewall()?; }
+    if std::env::var_os("YRL_NO_SANDBOX").is_none() {
+        yrl::sandbox::apply_firewall()?;
+    }
     yrl::watchdog::start();
-    yrl::firewall::serve_ipc(listener, svc, ipc, std::sync::Arc::new(|m| eprintln!("[yrld] {m}"))).await;
+    yrl::firewall::serve_ipc(
+        listener,
+        svc,
+        ipc,
+        std::sync::Arc::new(|m| eprintln!("[yrld] {m}")),
+    )
+    .await;
     Ok(())
 }
