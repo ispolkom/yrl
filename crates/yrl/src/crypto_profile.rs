@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 pub type ProfileId = u32;
 pub const CLASSICAL_V1: ProfileId = 0x0001_0001;
+/// Reserved for a future reviewed X25519 + ML-KEM-768 construction. It is
+/// intentionally not returned by `suite` and therefore cannot be advertised.
+pub const HYBRID_X25519_MLKEM768_RESERVED: ProfileId = 0x0002_0001;
 pub const NEGOTIATION_VERSION: u8 = 1;
 pub const MAX_PROFILES: usize = 8;
 

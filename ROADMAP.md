@@ -25,6 +25,12 @@ The client keeps separate persistent profile high-water marks for each pinned pe
 
 The only registered suite at this point is `0x00010001`, the existing Noise IK / X25519 / ChaChaPoly / BLAKE2s construction. Negotiation is compiled only with the default-off `crypto-profiles` feature, preserving the installed wire format until Stage 8 validates migration. There is deliberately no opportunistic legacy fallback. Focused tests cover malformed, unknown, repeated, stripped and substituted profiles, role separation and persistent monotonic state; they are prepared but not run.
 
+### Substage 7.2: hybrid post-quantum transport
+
+Blocked rather than implemented unsafely. FIPS 203 standardizes ML-KEM-768, but it does not specify a hybrid Noise handshake. X-Wing draft 11 specifies a general X25519 + ML-KEM-768 KEM but remains an individual work-in-progress Internet-Draft, and Noise revision 34 has no KEM/X-Wing token or reviewed mapping. Injecting a locally composed KEM secret as a Noise PSK would be a new cryptographic construction prohibited by the stage requirements.
+
+Profile `0x00020001` is reserved but deliberately unknown to negotiation, including under the compile-only `pq-hybrid` feature. A negative regression test prevents accidental advertisement or acceptance. `docs/CRYPTOGRAPHY.md` records the exact standards, library assessment, threat boundary and unblock conditions. No PQ confidentiality or authentication is claimed, and the classical production profile is unchanged.
+
 ## Current Stage 5: Failure and overload resilience
 
 The initial Stage 5 investigation traced both the 5.9 MiB/s throughput regression and a missing final upload confirmation to one cause: Stage 4 wrapped every encoded Noise plaintext frame in `Zeroizing`, so an unoptimized build performed a costly volatile wipe for every 60 KiB bulk frame. Link already retains the same bulk payload until its authoritative ACK, so wiping that additional encoded copy did not shorten the payload's lifetime. Restricting this extra wipe to the LOGIN frame restored 70 MiB/s upload and 62 MiB/s download on the same host; Noise authentication, rekeying, pinned identities, ACK/SEQ and bounded Link retention are unchanged.

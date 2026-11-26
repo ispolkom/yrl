@@ -45,7 +45,7 @@ Key code: `client.rs` (route manager), `link.rs` (SEQ/ACK, bounded buffers, prio
 | 4 — key and secret lifecycle | Implemented in **`f69e4b7`**. Private-file checks, zeroizing buffers, separated role keys, offline encrypted recovery, Noise-key rotation, device revocation and migration. Services start without an interactive unlock. | `tests/keylife.rs`, `STAGE4_ACCEPTANCE.md`. Audit journal-signing-key rollover is not implemented. |
 | 5 — failure and overload resilience | In progress. Throughput/liveness correction and substages 5.1–5.6 are implemented: hierarchical budgets, containment, bounded IPC, network/disk admission and explicit crash/restart semantics. | Focused tests are prepared but intentionally not run. Final workspace and installed-host acceptance are pending. |
 | 6 — trusted audit and software delivery | Implemented through 6.1–6.6: signed segment rotation/retention, rollback anchors, offline verification/export, Audit key generations, offline-rooted releases and transactional downgrade-safe activation. | Focused tests compile but were intentionally not run. Real signed publication, service activation/recovery and final integration acceptance remain Stage 8. |
-| 7 — extended cryptographic protection | In progress: 7.1 provides authenticated, role-bound crypto-profile negotiation and per-peer downgrade high-water marks. | Default-off feature; focused tests are compile-only until Stage 8. Substages 7.2–7.6 are not yet claimed. |
+| 7 — extended cryptographic protection | In progress: 7.1 provides authenticated, role-bound crypto-profile negotiation and per-peer downgrade high-water marks. 7.2 is explicitly blocked because no stable reviewed hybrid Noise construction is available. | Default-off features; focused tests are compile-only until Stage 8. No PQ protection is claimed. |
 
 ## Stage 7.1 cryptographic profiles
 
@@ -54,6 +54,12 @@ Key code: `client.rs` (route manager), `link.rs` (SEQ/ACK, bounded buffers, prio
 The production CLI stores separate monotonic high-water marks by pinned public key and role under its private key directory. Writes are private, atomic and directory-synced. `YRL_CRYPTO_MIN_PROFILE` can raise the local floor. Gatekeeper and Executor still negotiate independently and retain separate pinned identities. Embedded library callers must set `ClientOptions::crypto_profile_store` if they require persistent downgrade memory.
 
 Only classical profile `0x00010001` is registered: Noise IK with X25519, ChaChaPoly and BLAKE2s. The new wire exchange is behind `crypto-profiles`, disabled by default, and has no automatic fallback to the old wire format. This is intentional until explicit migration and Stage 8 interoperability/performance acceptance. Prepared tests in `tests/crypto_profiles.rs` cover downgrade/stripping/substitution, context binding, feature-gated handshake and private persistent high-water state; they were not run.
+
+## Stage 7.2 hybrid transport blocker
+
+FIPS 203 provides ML-KEM-768, but not its composition with YRL's authenticated Noise IK. The current general X25519 + ML-KEM-768 X-Wing specification is draft 11, an individual work-in-progress Internet-Draft; Noise revision 34 defines neither KEM tokens nor a reviewed X-Wing mapping. Using a KEM output as a locally positioned Noise PSK would be project-specific cryptographic protocol design and is not accepted.
+
+Reserved profile `0x00020001` remains rejected even when `pq-hybrid` is compiled. No ML-KEM dependency was added and no PQ guarantee is claimed. The compile-only feature and negative test make accidental activation fail closed. See `docs/CRYPTOGRAPHY.md` for candidate dependency provenance, exact unblock conditions, required vectors/resource tests and the distinction between PQ confidentiality and the still-classical authentication required before 7.4.
 
 Stage 0 guarantees apply only while the Executor's server session remains alive. After a server-process restart or session-grace expiry, RESUME cannot recover it. Link retransmits stored logical frames after a fresh Noise handshake, so connection-local nonces are not reused. Confirmed frames are not re-executed, and control/interactive traffic has priority over unsent bulk file data within the bounded Link window. Stage 2 rechecks authority during a live session and before RESUME. Stages 3 and 4 must preserve these properties.
 

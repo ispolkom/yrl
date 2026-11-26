@@ -1,6 +1,7 @@
 use std::os::unix::fs::PermissionsExt;
 use yrl::crypto_profile::{
     parse_response, response, Context, Offer, Policy, ProfileStore, CLASSICAL_V1,
+    HYBRID_X25519_MLKEM768_RESERVED,
 };
 
 #[test]
@@ -53,6 +54,23 @@ fn selection_is_bound_to_context_and_exact_offer() {
         supported: vec![CLASSICAL_V1]
     }
     .validate()
+    .is_err());
+}
+
+#[test]
+fn reserved_pq_profile_is_never_advertised_or_accepted() {
+    assert!(yrl::crypto_profile::suite(HYBRID_X25519_MLKEM768_RESERVED).is_none());
+    assert!(Policy {
+        minimum: CLASSICAL_V1,
+        supported: vec![CLASSICAL_V1, HYBRID_X25519_MLKEM768_RESERVED],
+    }
+    .validate()
+    .is_err());
+    assert!(response(
+        Context::Executor,
+        HYBRID_X25519_MLKEM768_RESERVED,
+        [0u8; 32],
+    )
     .is_err());
 }
 
