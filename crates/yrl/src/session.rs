@@ -11,6 +11,17 @@ pub const HELLO: &[u8] = b"YRL1\x01";
 pub const REPLY: &[u8] = b"YRL1ok";
 pub const REKEY_EVERY: u64 = 1 << 20;
 
+#[cfg(feature = "pq-hybrid")]
+type PqTransport = clatter::transportstate::TransportState<clatter::crypto::cipher::ChaChaPoly, clatter::crypto::hash::Blake2s>;
+#[cfg(feature = "pq-hybrid")]
+type PqHandshake = clatter::PqHandshake<clatter::crypto::kem::rust_crypto_ml_kem::MlKem768, clatter::crypto::kem::rust_crypto_ml_kem::MlKem768, clatter::crypto::cipher::ChaChaPoly, clatter::crypto::hash::Blake2s>;
+
+enum TransportState {
+    Classical(snow::TransportState),
+    #[cfg(feature = "pq-hybrid")]
+    Hybrid(PqTransport),
+}
+
 /// `[u16 length][bytes]`; a zero length is not allowed.
 pub async fn read_msg<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Vec<u8>> {
     let mut l = [0u8; 2];
@@ -36,7 +47,7 @@ pub async fn write_msg<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> std::io
 
 /// The transport state with keys rotated by message count (both sides count the same messages, so they rekey at the same moment).
 pub struct Secure {
-    state: Mutex<snow::TransportState>,
+    state: Mutex<TransportState>,
     sent: AtomicU64,
     received: AtomicU64,
     rekey_every: u64,
@@ -52,14 +63,22 @@ impl Secure {
         Secure::new_profile(state, rekey_every, crate::crypto_profile::CLASSICAL_V1)
     }
     pub fn new_profile(state: snow::TransportState, rekey_every: u64, profile: crate::crypto_profile::ProfileId) -> Secure {
-        Secure { state: Mutex::new(state), sent: AtomicU64::new(0), received: AtomicU64::new(0), rekey_every, raw_mode: Default::default(), raw_out: AtomicU64::new(0), raw_in: AtomicU64::new(0), profile }
+        Secure { state: Mutex::new(TransportState::Classical(state)), sent: AtomicU64::new(0), received: AtomicU64::new(0), rekey_every, raw_mode: Default::default(), raw_out: AtomicU64::new(0), raw_in: AtomicU64::new(0), profile }
+    }
+    #[cfg(feature = "pq-hybrid")]
+    fn new_hybrid(state: PqTransport, rekey_every: u64) -> Secure {
+        Secure { state: Mutex::new(TransportState::Hybrid(state)), sent: AtomicU64::new(0), received: AtomicU64::new(0), rekey_every, raw_mode: Default::default(), raw_out: AtomicU64::new(0), raw_in: AtomicU64::new(0), profile: crate::crypto_profile::HYBRID_X25519_MLKEM768 }
     }
     pub fn profile(&self) -> crate::crypto_profile::ProfileId { self.profile }
     pub fn seal(&self, f: &Frame) -> Result<Vec<u8>> {
         let mut plain = f.encode().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let mut out = vec![0u8; plain.len() + 16];
         let mut st = self.state.lock().unwrap();
-        let sealed = st.write_message(&plain, &mut out);
+        let sealed = match &mut *st {
+            TransportState::Classical(st) => st.write_message(&plain, &mut out).map_err(anyhow::Error::from),
+            #[cfg(feature = "pq-hybrid")]
+            TransportState::Hybrid(st) => st.send(&plain, &mut out).map_err(|e| anyhow::anyhow!("hybrid transport: {e:?}")),
+        };
         // LOGIN is the protocol frame carrying a reusable credential in its plaintext
         // payload. Bulk frames remain retained by Link until ACK, so wiping this extra
         // encoded copy did not shorten their lifetime and made debug transfers an order slower.
@@ -69,7 +88,11 @@ impl Secure {
         let n = sealed?;
         out.truncate(n);
         if self.sent.fetch_add(1, Ordering::SeqCst) + 1 == self.rekey_every {
-            st.rekey_outgoing();
+            match &mut *st {
+                TransportState::Classical(st) => st.rekey_outgoing(),
+                #[cfg(feature = "pq-hybrid")]
+                TransportState::Hybrid(st) => st.rekey_sender().map_err(|e| anyhow::anyhow!("hybrid rekey: {e:?}"))?,
+            }
             self.sent.store(0, Ordering::SeqCst);
         }
         Ok(out)
@@ -80,18 +103,27 @@ impl Secure {
         }
         let mut plain = vec![0u8; msg.len()];
         let mut st = self.state.lock().unwrap();
-        let n = match st.read_message(msg, &mut plain) {
+        let opened = match &mut *st {
+            TransportState::Classical(st) => st.read_message(msg, &mut plain).map_err(anyhow::Error::from),
+            #[cfg(feature = "pq-hybrid")]
+            TransportState::Hybrid(st) => st.receive(msg, &mut plain).map_err(|e| anyhow::anyhow!("hybrid transport: {e:?}")),
+        };
+        let n = match opened {
             Ok(n) => n,
             Err(e) => {
                 // Authentication failures may leave unspecified bytes in the output
                 // buffer, so clear it before returning even though its kind is unknown.
                 plain.zeroize();
-                return Err(e.into());
+                return Err(e);
             }
         };
         plain.truncate(n);
         if self.received.fetch_add(1, Ordering::SeqCst) + 1 == self.rekey_every {
-            st.rekey_incoming();
+            match &mut *st {
+                TransportState::Classical(st) => st.rekey_incoming(),
+                #[cfg(feature = "pq-hybrid")]
+                TransportState::Hybrid(st) => st.rekey_receiver().map_err(|e| anyhow::anyhow!("hybrid rekey: {e:?}"))?,
+            }
             self.received.store(0, Ordering::SeqCst);
         }
         let frame = Frame::decode(&plain).map_err(|e| anyhow::anyhow!("{e:?}"));
@@ -137,6 +169,11 @@ pub async fn client_handshake_context<S: AsyncRead + AsyncWrite + Unpin>(s: &mut
     let selected = crate::crypto_profile::parse_response(&out[..m], &offer)?;
     #[cfg(not(feature = "crypto-profiles"))]
     let selected = crate::crypto_profile::CLASSICAL_V1;
+    #[cfg(feature = "pq-hybrid")]
+    if selected == crate::crypto_profile::HYBRID_X25519_MLKEM768 {
+        let binding = hs.get_handshake_hash().to_vec();
+        return pq_upgrade_client(s, hs.into_transport_mode()?, &binding, rekey_every).await;
+    }
     Ok(Secure::new_profile(hs.into_transport_mode()?, rekey_every, selected))
 }
 
@@ -193,5 +230,65 @@ pub async fn server_handshake_open_context<S: AsyncRead + AsyncWrite + Unpin>(s:
     write_msg(s, &out[..k]).await.map_err(|_| Silent)?;
     #[cfg(not(feature = "crypto-profiles"))]
     let selected = crate::crypto_profile::CLASSICAL_V1;
+    #[cfg(feature = "pq-hybrid")]
+    if selected == crate::crypto_profile::HYBRID_X25519_MLKEM768 {
+        let binding = hs.get_handshake_hash().to_vec();
+        let secure = pq_upgrade_server(s, hs.into_transport_mode().map_err(|_| Silent)?, &binding, rekey_every).await?;
+        return Ok((secure, who));
+    }
     Ok((Secure::new_profile(hs.into_transport_mode().map_err(|_| Silent)?, rekey_every, selected), who))
+}
+
+#[cfg(feature = "pq-hybrid")]
+fn pq_handshake(initiator: bool, binding: &[u8]) -> Result<PqHandshake> {
+    use clatter::traits::Handshaker;
+    let mut hs = PqHandshake::new(
+        clatter::handshakepattern::noise_pqnn(),
+        b"YRL hybrid profile 0x00020001",
+        initiator,
+        None,
+        None,
+        None,
+        None,
+    ).map_err(|e| anyhow::anyhow!("PQ Noise init: {e:?}"))?;
+    hs.get_state_mut().mix_hash(b"clatter.hybrid_dual_layer.outer");
+    hs.get_state_mut().mix_key_and_hash(binding);
+    Ok(hs)
+}
+
+#[cfg(feature = "pq-hybrid")]
+async fn pq_upgrade_client<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, mut outer: snow::TransportState, binding: &[u8], rekey_every: u64) -> Result<Secure> {
+    use clatter::traits::Handshaker;
+    let mut pq = pq_handshake(true, binding)?;
+    let mut pq_msg = vec![0u8; 4096];
+    let n = pq.write_message(&[], &mut pq_msg).map_err(|e| anyhow::anyhow!("PQ Noise request: {e:?}"))?;
+    let mut wrapped = vec![0u8; n + 16];
+    let w = outer.write_message(&pq_msg[..n], &mut wrapped)?;
+    write_msg(s, &wrapped[..w]).await?;
+    let reply = read_msg(s).await?;
+    if reply.len() > 4096 { bail!("oversized PQ Noise reply") }
+    let n = outer.read_message(&reply, &mut pq_msg)?;
+    let mut payload = [0u8; 1];
+    let p = pq.read_message(&pq_msg[..n], &mut payload).map_err(|e| anyhow::anyhow!("PQ Noise reply: {e:?}"))?;
+    if p != 0 || !pq.is_finished() { bail!("invalid PQ Noise completion") }
+    Ok(Secure::new_hybrid(pq.finalize().map_err(|e| anyhow::anyhow!("PQ Noise finalize: {e:?}"))?, rekey_every))
+}
+
+#[cfg(feature = "pq-hybrid")]
+async fn pq_upgrade_server<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, mut outer: snow::TransportState, binding: &[u8], rekey_every: u64) -> Result<Secure, Silent> {
+    use clatter::traits::Handshaker;
+    let request = read_msg(s).await.map_err(|_| Silent)?;
+    if request.len() > 4096 { return Err(Silent) }
+    let mut pq_msg = vec![0u8; 4096];
+    let n = outer.read_message(&request, &mut pq_msg).map_err(|_| Silent)?;
+    let mut pq = pq_handshake(false, binding).map_err(|_| Silent)?;
+    let mut payload = [0u8; 1];
+    let p = pq.read_message(&pq_msg[..n], &mut payload).map_err(|_| Silent)?;
+    if p != 0 { return Err(Silent) }
+    let n = pq.write_message(&[], &mut pq_msg).map_err(|_| Silent)?;
+    if !pq.is_finished() { return Err(Silent) }
+    let mut wrapped = vec![0u8; n + 16];
+    let w = outer.write_message(&pq_msg[..n], &mut wrapped).map_err(|_| Silent)?;
+    write_msg(s, &wrapped[..w]).await.map_err(|_| Silent)?;
+    Ok(Secure::new_hybrid(pq.finalize().map_err(|_| Silent)?, rekey_every))
 }

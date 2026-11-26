@@ -27,9 +27,9 @@ The only registered suite at this point is `0x00010001`, the existing Noise IK /
 
 ### Substage 7.2: hybrid post-quantum transport
 
-Blocked rather than implemented unsafely. FIPS 203 standardizes ML-KEM-768, but it does not specify a hybrid Noise handshake. X-Wing draft 11 specifies a general X25519 + ML-KEM-768 KEM but remains an individual work-in-progress Internet-Draft, and Noise revision 34 has no KEM/X-Wing token or reviewed mapping. Injecting a locally composed KEM secret as a Noise PSK would be a new cryptographic construction prohibited by the stage requirements.
+Implemented as default-off profile `0x00020001`. The existing authenticated Noise IK is the outer layer and negotiates the profile; a Clatter Noise `pqNN` exchange with RustCrypto ML-KEM-768 then runs encrypted inside it. The outer handshake hash is domain-separated and mixed into the PQ key schedule, following Clatter's documented hybrid dual-layer construction. Application frames use the resulting PQ transport state; ML-KEM is handshake-only.
 
-Profile `0x00020001` is reserved but deliberately unknown to negotiation, including under the compile-only `pq-hybrid` feature. A negative regression test prevents accidental advertisement or acceptance. `docs/CRYPTOGRAPHY.md` records the exact standards, library assessment, threat boundary and unblock conditions. No PQ confidentiality or authentication is claimed, and the classical production profile is unchanged.
+This preserves classical X25519 security, role/pinned-key separation, ACK/SEQ, RESUME and every transport. Expensive PQ work starts only after the classical device key is authorized. `YRL_CRYPTO_ENABLE_EXPERIMENTAL_PQ=1` is required on both sides and the feature is disabled by default pending Stage 8 vectors/interoperability/performance/review. Focused compile-only tests cover profile refusal without the feature and a complete bound ML-KEM-768 upgrade.
 
 ### Substage 7.3: OPAQUE password authentication
 

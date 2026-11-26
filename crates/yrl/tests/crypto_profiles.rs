@@ -1,7 +1,7 @@
 use std::os::unix::fs::PermissionsExt;
 use yrl::crypto_profile::{
     parse_response, response, Context, Offer, Policy, ProfileStore, CLASSICAL_V1,
-    HYBRID_X25519_MLKEM768_RESERVED,
+    HYBRID_X25519_MLKEM768,
 };
 
 #[test]
@@ -58,17 +58,30 @@ fn selection_is_bound_to_context_and_exact_offer() {
 }
 
 #[test]
-fn reserved_pq_profile_is_never_advertised_or_accepted() {
-    assert!(yrl::crypto_profile::suite(HYBRID_X25519_MLKEM768_RESERVED).is_none());
+fn pq_profile_availability_matches_the_build() {
+    #[cfg(not(feature = "pq-hybrid"))]
+    assert!(yrl::crypto_profile::suite(HYBRID_X25519_MLKEM768).is_none());
+    #[cfg(feature = "pq-hybrid")]
+    assert!(yrl::crypto_profile::suite(HYBRID_X25519_MLKEM768).is_some());
+    let policy = Policy {
+        minimum: CLASSICAL_V1,
+        supported: vec![CLASSICAL_V1, HYBRID_X25519_MLKEM768],
+    };
+    #[cfg(not(feature = "pq-hybrid"))]
+    assert!(policy.validate().is_err());
+    #[cfg(feature = "pq-hybrid")]
+    assert!(policy.validate().is_ok());
+    #[cfg(not(feature = "pq-hybrid"))]
     assert!(Policy {
         minimum: CLASSICAL_V1,
-        supported: vec![CLASSICAL_V1, HYBRID_X25519_MLKEM768_RESERVED],
+        supported: vec![CLASSICAL_V1, HYBRID_X25519_MLKEM768],
     }
     .validate()
     .is_err());
+    #[cfg(not(feature = "pq-hybrid"))]
     assert!(response(
         Context::Executor,
-        HYBRID_X25519_MLKEM768_RESERVED,
+        HYBRID_X25519_MLKEM768,
         [0u8; 32],
     )
     .is_err());
@@ -149,4 +162,19 @@ async fn transcript_bound_profile_handshake_uses_independent_contexts() {
     let (client_result, server_result) = tokio::join!(c, s);
     assert_eq!(client_result.unwrap().profile(), CLASSICAL_V1);
     assert_eq!(server_result.unwrap().0.profile(), CLASSICAL_V1);
+}
+
+#[cfg(feature = "pq-hybrid")]
+#[tokio::test]
+async fn hybrid_profile_completes_bound_mlkem768_upgrade() {
+    let client = yrl::keys::generate();
+    let server = yrl::keys::generate();
+    let auth = vec![yrl::keys::Authorized { public: client.public.clone(), label: "client".into(), rights: vec![] }];
+    let policy = Policy { minimum: HYBRID_X25519_MLKEM768, supported: vec![CLASSICAL_V1, HYBRID_X25519_MLKEM768] };
+    let (mut a, mut b) = tokio::io::duplex(8192);
+    let c = yrl::session::client_handshake_context(&mut a, &client, &server.public, yrl::session::REKEY_EVERY, Context::Executor, policy.clone());
+    let s = yrl::session::server_handshake_open_context(&mut b, &server, &auth, yrl::session::REKEY_EVERY, false, Context::Executor, policy);
+    let (client_result, server_result) = tokio::join!(c, s);
+    assert_eq!(client_result.unwrap().profile(), HYBRID_X25519_MLKEM768);
+    assert_eq!(server_result.unwrap().0.profile(), HYBRID_X25519_MLKEM768);
 }

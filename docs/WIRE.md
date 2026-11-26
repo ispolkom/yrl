@@ -32,7 +32,7 @@ The initiator payload is `"YRL-CRYPTO-OFFER" || version:u8 || role:u8 || minimum
 
 Profile `0x00010001` denotes the existing `Noise_IK_25519_ChaChaPoly_BLAKE2s` suite. Profile negotiation is independent for Gatekeeper and Executor and independent of UDP/TCP/Relay selection. There is no on-error downgrade or automatic retry with the legacy payload. The feature remains disabled in production pending Stage 8 migration acceptance.
 
-Profile `0x00020001` is reserved for X25519 + ML-KEM-768 but is not a valid wire profile. Peers must reject it as unknown. No ML-KEM ciphertext/public-key encoding or Noise hybrid key schedule is specified until a reviewed construction is adopted.
+Profile `0x00020001` is the default-off hybrid profile. After the classical profile-selection reply, the initiator sends a Noise `pqNN` ML-KEM-768 public-key message encrypted by the outer Noise transport; the responder returns the encrypted ML-KEM ciphertext message. Before that exchange, both sides apply `MixHash("clatter.hybrid_dual_layer.outer")` and `MixKeyAndHash(outer_handshake_hash)` to the PQ state. Empty PQ payloads are required. Subsequent YRL frames use the PQ Noise transport, not nested per-frame encryption.
 
 No OPAQUE registration or KE1/KE2/KE3 frame code is assigned. The `opaque-rfc9807` feature is not a wire capability and must not be advertised; current LOGIN remains Argon2-based. This prevents a partial peer from triggering a silent downgrade or an incomplete PAKE state machine.
 

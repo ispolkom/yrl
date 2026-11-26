@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 
 pub type ProfileId = u32;
 pub const CLASSICAL_V1: ProfileId = 0x0001_0001;
-/// Reserved for a future reviewed X25519 + ML-KEM-768 construction. It is
-/// intentionally not returned by `suite` and therefore cannot be advertised.
-pub const HYBRID_X25519_MLKEM768_RESERVED: ProfileId = 0x0002_0001;
+pub const HYBRID_X25519_MLKEM768: ProfileId = 0x0002_0001;
 pub const NEGOTIATION_VERSION: u8 = 1;
 pub const MAX_PROFILES: usize = 8;
 
@@ -48,9 +46,20 @@ pub const CLASSICAL: Suite = Suite {
     kdf: "BLAKE2s/Noise",
     aead: "ChaChaPoly",
 };
+#[cfg(feature = "pq-hybrid")]
+pub const HYBRID: Suite = Suite {
+    id: HYBRID_X25519_MLKEM768,
+    noise: "Noise_IK_25519_ChaChaPoly_BLAKE2s + bound Noise_pqNN_MLKEM768_ChaChaPoly_BLAKE2s",
+    authentication: "X25519 static IK",
+    kdf: "outer handshake hash mixed into PQ Noise; ML-KEM-768",
+    aead: "ChaChaPoly",
+};
 
 pub fn suite(id: ProfileId) -> Option<&'static Suite> {
-    (id == CLASSICAL_V1).then_some(&CLASSICAL)
+    if id == CLASSICAL_V1 { return Some(&CLASSICAL) }
+    #[cfg(feature = "pq-hybrid")]
+    if id == HYBRID_X25519_MLKEM768 { return Some(&HYBRID) }
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +78,10 @@ impl Default for Policy {
 impl Policy {
     pub fn from_env() -> Result<Self> {
         let mut p = Self::default();
+        #[cfg(feature = "pq-hybrid")]
+        if matches!(std::env::var("YRL_CRYPTO_ENABLE_EXPERIMENTAL_PQ").as_deref(), Ok("1" | "true" | "yes")) {
+            p.supported.push(HYBRID_X25519_MLKEM768);
+        }
         if let Ok(v) = std::env::var("YRL_CRYPTO_MIN_PROFILE") {
             p.minimum = parse_id(&v)?;
         }
