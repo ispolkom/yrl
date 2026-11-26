@@ -144,6 +144,8 @@ pub const OPAQUE_REG_START: u8 = 113;
 pub const OPAQUE_REG_RESPONSE: u8 = 114;
 pub const OPAQUE_REG_FINISH: u8 = 115;
 pub const OPAQUE_REG_OK: u8 = 116;
+pub const HYBRID_CLIENT_PROOF: u8 = 117;
+pub const HYBRID_SERVER_PROOF: u8 = 118;
 pub const MAX_LOGIN: usize = 64;
 pub const MAX_PASSWORD: usize = 256;
 

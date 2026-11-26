@@ -45,7 +45,7 @@ Key code: `client.rs` (route manager), `link.rs` (SEQ/ACK, bounded buffers, prio
 | 4 — key and secret lifecycle | Implemented in **`f69e4b7`**. Private-file checks, zeroizing buffers, separated role keys, offline encrypted recovery, Noise-key rotation, device revocation and migration. Services start without an interactive unlock. | `tests/keylife.rs`, `STAGE4_ACCEPTANCE.md`. Audit journal-signing-key rollover is not implemented. |
 | 5 — failure and overload resilience | In progress. Throughput/liveness correction and substages 5.1–5.6 are implemented: hierarchical budgets, containment, bounded IPC, network/disk admission and explicit crash/restart semantics. | Focused tests are prepared but intentionally not run. Final workspace and installed-host acceptance are pending. |
 | 6 — trusted audit and software delivery | Implemented through 6.1–6.6: signed segment rotation/retention, rollback anchors, offline verification/export, Audit key generations, offline-rooted releases and transactional downgrade-safe activation. | Focused tests compile but were intentionally not run. Real signed publication, service activation/recovery and final integration acceptance remain Stage 8. |
-| 7 — extended cryptographic protection | In progress: 7.1 profile negotiation and 7.2 opt-in hybrid ML-KEM-768 transport are implemented. | Default-off features; focused tests are compile-only until Stage 8. PQ authentication still depends on 7.4. |
+| 7 — extended cryptographic protection | In progress: 7.1 profiles, 7.2 hybrid transport, 7.3 OPAQUE and 7.4 hybrid signature engine are implemented. | Default-off features; focused tests are compile-only until Stage 8. FIDO2 and TPM follow. |
 
 ## Stage 7.1 cryptographic profiles
 
@@ -67,11 +67,11 @@ RFC 9807 authentication is implemented behind default-off `opaque-rfc9807` using
 
 An authenticated account can migrate with `yrl opaque-register`: the client performs Argon2id and sends only RFC registration messages. OPAQUE login requires explicit `YRL_AUTH_OPAQUE=1`; failure never retries Argon2 LOGIN. Prepared unit coverage exercises registration/login and matching keys; it was not run. `cargo check -p yrl --all-targets --features opaque-rfc9807` passes. Broker ROOT OPAQUE remains deliberately unavailable because it needs separate Broker secrets and operation-bound context; the existing independent step-up path remains in force.
 
-## Stage 7.4 hybrid-signature blocker
+## Stage 7.4 hybrid signatures
 
-FIPS 204 is final, but the RustCrypto ML-DSA implementation is an early 0.1 line without a published independent audit for these trust roots. More importantly, YRL has not adopted a reviewed canonical envelope that requires and binds both Ed25519 and ML-DSA-65 across identities, Noise authentication, Audit, releases, key transitions and recovery. Noise IK authenticates static DH keys and cannot be made hybrid merely by attaching an application signature.
+The default-off `hybrid-signatures` feature implements a single canonical Ed25519 + FIPS 204 ML-DSA-65 envelope with mandatory AND verification. Profile, purpose, generation, paired-key ID and exact message are signed by both algorithms. Purpose values separate identities, handshake proofs, Audit/checkpoints/deletions, release root/delegates, transitions and recovery. Truncation, member stripping, key substitution and cross-purpose use fail before acceptance.
 
-`hybrid-signatures` is compile-only and the support gate always fails closed. No key or dependency was added and no PQ authentication is claimed. Classical historical signatures remain identifiable and verifiable under their existing profiles. See `docs/CRYPTOGRAPHY.md` for envelope, migration, revocation, vector, size-limit and review requirements.
+Mutual handshake-proof helpers operate after Noise and bind pre-pinned hybrid keys to both X25519 identities, role, negotiated profile and transcript; no asymmetric signature is added per data frame. Key creation is explicit owner action; planned rotation requires old+new proof and emergency replacement requires a distinct Recovery key. Offline `yrl-release hybrid-keygen|hybrid-sign|hybrid-verify` commands use the same format for release and exported Audit artifacts. Existing historical formats stay classical rather than being relabelled. RustCrypto `ml-dsa` 0.1.2 is MIT/Apache-2.0 but explicitly unaudited, so the feature remains production-off pending Stage 8 vectors/review.
 
 ## Stage 7.5 FIDO2 blocker
 

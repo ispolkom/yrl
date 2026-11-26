@@ -120,7 +120,7 @@ Stage 7.2 uses a compound Noise construction rather than inventing KEM mixing: a
 
 OPAQUE is an Executor-owned multi-message protocol, not a replacement hash inside LOGIN. `opaque-ke` 4.0.1 performs RFC 9807 with Ristretto255/SHA-512 and client-side Argon2id. Its authenticated context binds account, device key, Executor role, profile and Noise transcript. Migration registration runs only after existing account authentication; records and the OPRF/AKE setup are private atomic state. OPAQUE login is explicit and cannot fall back. Broker step-up keeps its independent verifier until a separately keyed, operation-bound Broker OPAQUE protocol is designed and accepted.
 
-Hybrid signatures require one common canonical envelope and lifecycle across identity, Audit, releases and recovery. Partial contour upgrades are not labeled hybrid, and asymmetric signatures remain handshake-time/control-plane operations rather than per-frame work.
+Hybrid signatures use one canonical purpose-separated Ed25519 + ML-DSA-65 envelope across identity, handshake proof, Audit, releases, transitions and recovery. Verification is mandatory AND and pre-pinned paired keys are bound to existing X25519 identities and the Noise transcript. Partial or historical classical objects are not labeled hybrid, and asymmetric signatures remain handshake/control-plane operations rather than per-frame work.
 
 FIDO2 is an optional policy implemented through a real CTAP2 client and standards-compatible relying party. Hardware policy is fail-closed; users without an enabled policy keep existing authentication. Broker owns an independent, operation-bound ROOT assertion flow.
 

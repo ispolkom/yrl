@@ -143,6 +143,40 @@ fn sensitive_frame(kind: u8) -> bool {
     matches!(kind, crate::wire::LOGIN | crate::wire::OPAQUE_LOGIN_START | crate::wire::OPAQUE_LOGIN_FINISH | crate::wire::OPAQUE_REG_START | crate::wire::OPAQUE_REG_FINISH | crate::stepup::STEPUP_PROOF)
 }
 
+#[cfg(feature = "hybrid-signatures")]
+fn hybrid_proof_body(context: crate::crypto_profile::Context, sec: &Secure, initiator_x25519: &[u8], responder_x25519: &[u8], role: u8) -> Result<Vec<u8>> {
+    if initiator_x25519.len() != 32 || responder_x25519.len() != 32 || !matches!(role, b'I' | b'R') { bail!("invalid hybrid identity proof context") }
+    let mut body = b"YRL hybrid handshake authentication v1\0".to_vec();
+    body.push(context as u8); body.extend_from_slice(&sec.profile().to_be_bytes()); body.extend_from_slice(sec.channel_binding());
+    body.extend_from_slice(initiator_x25519); body.extend_from_slice(responder_x25519); body.push(role); Ok(body)
+}
+
+/// Additional mutually authenticated proof used by the mandatory-hybrid
+/// profile. Hybrid public keys are caller-supplied pins; accepting a key sent
+/// by the peer would reduce this to unauthenticated key exchange.
+#[cfg(feature = "hybrid-signatures")]
+pub async fn hybrid_auth_client<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, sec: &Secure, context: crate::crypto_profile::Context, initiator_x25519: &[u8], responder_x25519: &[u8], own: &crate::hybrid_signature::SigningKey, pinned_server: &crate::hybrid_signature::PublicKey) -> Result<()> {
+    if own.public().purpose != crate::hybrid_signature::Purpose::Handshake || pinned_server.purpose != crate::hybrid_signature::Purpose::Handshake { bail!("wrong hybrid handshake key purpose") }
+    let request = own.sign(&hybrid_proof_body(context, sec, initiator_x25519, responder_x25519, b'I')?)?.encode();
+    write_msg(s, &sec.seal(&Frame::new(crate::wire::HYBRID_CLIENT_PROOF, 0, request))?).await?;
+    let reply = sec.open(&read_msg(s).await?)?;
+    if reply.kind != crate::wire::HYBRID_SERVER_PROOF { bail!("missing hybrid server proof") }
+    let signature = crate::hybrid_signature::SignatureEnvelope::decode(&reply.payload)?;
+    pinned_server.verify(&hybrid_proof_body(context, sec, initiator_x25519, responder_x25519, b'R')?, &signature)
+}
+
+#[cfg(feature = "hybrid-signatures")]
+pub async fn hybrid_auth_server<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, sec: &Secure, context: crate::crypto_profile::Context, initiator_x25519: &[u8], responder_x25519: &[u8], own: &crate::hybrid_signature::SigningKey, pinned_client: &crate::hybrid_signature::PublicKey) -> Result<()> {
+    if own.public().purpose != crate::hybrid_signature::Purpose::Handshake || pinned_client.purpose != crate::hybrid_signature::Purpose::Handshake { bail!("wrong hybrid handshake key purpose") }
+    let request = sec.open(&read_msg(s).await?)?;
+    if request.kind != crate::wire::HYBRID_CLIENT_PROOF { bail!("missing hybrid client proof") }
+    let signature = crate::hybrid_signature::SignatureEnvelope::decode(&request.payload)?;
+    pinned_client.verify(&hybrid_proof_body(context, sec, initiator_x25519, responder_x25519, b'I')?, &signature)?;
+    let response = own.sign(&hybrid_proof_body(context, sec, initiator_x25519, responder_x25519, b'R')?)?.encode();
+    write_msg(s, &sec.seal(&Frame::new(crate::wire::HYBRID_SERVER_PROOF, 0, response))?).await?;
+    Ok(())
+}
+
 pub async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, me: &KeyPair, server_public: &[u8], rekey_every: u64) -> Result<Secure> {
     client_handshake_context(s, me, server_public, rekey_every, crate::crypto_profile::Context::LocalIpc, crate::crypto_profile::Policy::from_env()?).await
 }

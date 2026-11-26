@@ -14,6 +14,28 @@ fn main() {
 }
 fn run(a: &[String]) -> Result<()> {
     match a.get(1).map(String::as_str) {
+    #[cfg(feature="hybrid-signatures")]
+    Some("hybrid-keygen") if a.len()==6 => {
+        let purpose=yrl::hybrid_signature::Purpose::parse(&a[2])?;
+        let key=yrl::hybrid_signature::SigningKey::generate_files(&PathBuf::from(&a[4]),&PathBuf::from(&a[5]),purpose,n(&a[3])?)?;
+        println!("hybrid key id: {}",hex::encode(key.key_id));
+        Ok(())
+    },
+    #[cfg(feature="hybrid-signatures")]
+    Some("hybrid-sign") if a.len()==7 => {
+        let purpose=yrl::hybrid_signature::Purpose::parse(&a[2])?;
+        let key=yrl::hybrid_signature::SigningKey::load_files(&PathBuf::from(&a[3]),&PathBuf::from(&a[4]),purpose)?;
+        let sig=key.sign(&std::fs::read(&a[5])?)?;
+        std::fs::write(&a[6],format!("{}\n",hex::encode(sig.encode())))?;
+        Ok(())
+    },
+    #[cfg(feature="hybrid-signatures")]
+    Some("hybrid-verify") if a.len()==6 => {
+        let purpose=yrl::hybrid_signature::Purpose::parse(&a[2])?;
+        let public=yrl::hybrid_signature::PublicKey::load_file(&PathBuf::from(&a[3]),purpose)?;
+        let sig=yrl::hybrid_signature::SignatureEnvelope::decode(&hex::decode(std::fs::read_to_string(&a[5])?.trim())?)?;
+        public.verify(&std::fs::read(&a[4])?,&sig)?; println!("hybrid Ed25519 + ML-DSA-65 signature verifies"); Ok(())
+    },
     Some("keygen") if a.len()==4 => yrl::release::generate_key(&PathBuf::from(&a[2]),&PathBuf::from(&a[3])),
     Some("trust-init") if a.len()==4 => yrl::release::init_trust(&PathBuf::from(&a[2]),&PathBuf::from(&a[3])),
     Some("root-rotate") if a.len()==6 => yrl::release::rotate_root(&PathBuf::from(&a[2]),&PathBuf::from(&a[3]),&PathBuf::from(&a[4]),&PathBuf::from(&a[5])),

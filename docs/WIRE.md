@@ -36,7 +36,7 @@ Profile `0x00020001` is the default-off hybrid profile. After the classical prof
 
 With default-off `opaque-rfc9807`, frames 110/111/112 carry bounded RFC 9807 KE1/KE2/KE3 after the authenticated device-key Noise handshake. KE1 includes the bounded account name; KE2 is indistinguishable for absent accounts; KE3 must validate before a session opens. Frames 113–116 perform client-side password registration inside an already authenticated session and carry the existing request ID. The OPAQUE context binds account, device key, Executor role, negotiated profile and a hash of the Noise transcript. OPAQUE is selected explicitly and never falls back to LOGIN.
 
-No hybrid Ed25519 + ML-DSA-65 signature envelope is assigned. Existing signatures retain their classical format/profile. A verifier must not infer hybrid assurance from an attached unknown field or accept one valid member of a required future pair.
+Default-off hybrid signatures use `YHP1` public envelopes (purpose, generation, paired-key ID, 32-byte Ed25519 key, 1952-byte ML-DSA-65 key) and `YHS1` signature envelopes (same identity, 64-byte Ed25519 signature, 3309-byte ML-DSA-65 signature). Both members sign the canonical profile/purpose/generation/key/message TBS and both must verify. Frames 117/118 carry mutual handshake proofs bound to both X25519 identities, role, selected profile and transcript. Hybrid public keys are pre-pinned; these frames never introduce a trust anchor.
 
 No FIDO2 registration/assertion frame is assigned. In particular, ordinary YRL challenge/signature payloads must not be labeled CTAP2. A future ceremony will be explicitly versioned and bind RP ID, client data, account, device key and, for ROOT, the exact operation digest.
 

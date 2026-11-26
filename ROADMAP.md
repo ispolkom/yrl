@@ -13,7 +13,7 @@ This file distinguishes the **accepted implementation-stage sequence** from the 
 | **4. Key and secret lifecycle** | Protect role-private key files, clear secret buffers, support unattended services, offline encrypted recovery, safe Noise-key rotation, device revocation and protected migration. | Implemented in **`f69e4b7`**; deployment acceptance and the Audit journal-signing rollover limit are in `STAGE4_ACCEPTANCE.md`. |
 | **5. Failure and overload resilience** | Find and remove failure modes exposed by sustained load, repeated disconnects and bounded-resource operation without weakening authentication, cryptography or delivery guarantees. | In progress. The initial correction and substages 5.1–5.6 are implemented, including bounded admission, containment and explicit crash-recovery semantics. Final integration and deployment acceptance remain pending. |
 | **6. Trusted audit and software delivery** | Rotated and independently verifiable Audit history, signing-key lifecycle, signed releases and downgrade-safe updates. | Implemented through substages 6.1–6.6. Focused tests are prepared and compilation/unit policy verification pass; comprehensive and installed-host acceptance remain Stage 8. |
-| **7. Extended cryptographic protection** | Versioned profiles, hybrid post-quantum transport/signatures, OPAQUE, FIDO2 and optional TPM-backed key handling. | In progress. Substage 7.1 is implemented behind the default-off `crypto-profiles` feature; it is not enabled in production before Stage 8 acceptance. |
+| **7. Extended cryptographic protection** | Versioned profiles, hybrid post-quantum transport/signatures, OPAQUE, FIDO2 and optional TPM-backed key handling. | In progress. Substages 7.1–7.4 are implemented behind default-off feature gates; none is enabled in production before Stage 8 acceptance. |
 
 ## Current Stage 7: extended cryptographic protection
 
@@ -39,9 +39,9 @@ OPAQUE login is explicit (`YRL_AUTH_OPAQUE=1`) and never falls back to legacy LO
 
 ### Substage 7.4: hybrid post-quantum signatures
 
-Blocked at the mandatory cross-contour composition boundary. FIPS 204 is final and RustCrypto offers ML-DSA-65, but its current 0.1 implementation has no published independent audit suitable for YRL trust roots. YRL also lacks a reviewed canonical hybrid envelope and a standardized way to bind Ed25519 + ML-DSA authentication into the existing Noise IK handshake. Concatenating signatures locally would be project-specific protocol design.
+Implemented behind default-off `hybrid-signatures` with RustCrypto `ml-dsa` 0.1.2 (FIPS 204 ML-DSA-65) and the existing Ed25519 implementation. The bounded `YHP1` public-key and `YHS1` signature formats bind profile, purpose, generation, both public keys, derived key ID and a length-delimited message. Verification has only AND semantics: malformed, truncated, stripped, cross-purpose, cross-generation or single-valid-member envelopes are rejected.
 
-The compile-only `hybrid-signatures` feature activates nothing; the support gate fails closed. No production or test owner key is generated, and existing Ed25519 history remains explicitly classical. `docs/CRYPTOGRAPHY.md` records the required both-signatures policy, purpose/key/generation binding, migration across identity/Audit/release/recovery contours and unblock conditions. No PQ authentication is claimed.
+Purposes independently cover device/server identity, handshake proof, Audit entries/checkpoints/deletions, release root/delegates, transitions and recovery. Mutual handshake-proof helpers bind pinned paired keys to both X25519 identities, role, negotiated profile and Noise transcript; they are control-plane only. Owner-driven key files are purpose-separated, bounded and zeroized; planned transitions require old and new hybrid signatures, while emergency transitions require a separately pre-trusted recovery key. `yrl-release hybrid-*` provides offline generation/sign/verification without embedding production keys. Historical Ed25519 objects remain explicitly classical. Production activation waits for Stage 8 because the exact RustCrypto release is unaudited.
 
 ### Substage 7.5: FIDO2 hardware confirmation
 

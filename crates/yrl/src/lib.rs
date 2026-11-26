@@ -35,6 +35,8 @@ pub mod sandbox;
 pub mod cgroup;
 pub mod crypto_profile;
 pub mod crypto_support;
+#[cfg(feature = "hybrid-signatures")]
+pub mod hybrid_signature;
 #[cfg(feature = "opaque-rfc9807")]
 pub mod opaque_auth;
 pub mod server;
