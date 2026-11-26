@@ -49,6 +49,12 @@ Blocked at the real CTAP2 backend and native relying-party model. The developmen
 
 The compile-only `fido2` feature always fails closed and cannot silently use a password. No credential or fake authenticator is created. `docs/CRYPTOGRAPHY.md` records UP/UV/PIN, counter, multiple-token, revocation, recovery, account/device binding and operation-bound Broker requirements. Existing users remain unaffected because no FIDO2 policy can yet be enabled.
 
+### Substage 7.6: TPM 2.0 key protection
+
+Blocked at the standard backend and hardware-lifecycle acceptance boundary. Current `tss-esapi` head is alpha, and this host has neither TPM2-TSS development libraries nor swtpm. Adding a feature that cannot compile or be exercised would violate the required feature matrix. No TPM, PCR, NV or firmware state was touched.
+
+The compile-only `tpm2` feature always fails closed and cannot fall back to software storage. Documentation distinguishes TPM-native non-exportable operations from sealing software X25519/Ed25519/ML-KEM/ML-DSA secrets. `docs/CRYPTOGRAPHY.md` records PCR-update, anti-rollback, timeout, rotation, revocation, swtpm and hardware-replacement recovery requirements. Software-only YRL remains unchanged.
+
 ## Current Stage 5: Failure and overload resilience
 
 The initial Stage 5 investigation traced both the 5.9 MiB/s throughput regression and a missing final upload confirmation to one cause: Stage 4 wrapped every encoded Noise plaintext frame in `Zeroizing`, so an unoptimized build performed a costly volatile wipe for every 60 KiB bulk frame. Link already retains the same bulk payload until its authoritative ACK, so wiping that additional encoded copy did not shorten the payload's lifetime. Restricting this extra wipe to the LOGIN frame restored 70 MiB/s upload and 62 MiB/s download on the same host; Noise authentication, rekeying, pinned identities, ACK/SEQ and bounded Link retention are unchanged.

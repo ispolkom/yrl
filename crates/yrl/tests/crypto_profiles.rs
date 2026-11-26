@@ -96,6 +96,11 @@ fn unavailable_fido2_backend_never_falls_back() {
 }
 
 #[test]
+fn unavailable_tpm_backend_never_uses_software_fallback() {
+    assert!(yrl::crypto_support::require(yrl::crypto_support::Mechanism::Tpm2).is_err());
+}
+
+#[test]
 fn peer_high_water_mark_is_private_persistent_and_monotonic() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state").join("profiles");

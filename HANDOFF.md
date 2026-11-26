@@ -79,6 +79,14 @@ No real CTAP2 backend is available in the build environment: libfido2 is not ins
 
 `fido2` is compile-only; `require(Fido2)` always fails closed and there is no password fallback or proprietary challenge imitation. Existing users cannot enable a FIDO2 policy yet. Exact libfido2 packaging, UP/UV/PIN, credential/counter, revocation/recovery and Broker binding requirements are in `docs/CRYPTOGRAPHY.md`.
 
+## Stage 7.6 TPM 2.0 blocker
+
+The current standard Rust TSS binding is an alpha line, and this host has neither TPM2-TSS development libraries nor swtpm. A real backend and its PCR/recovery behavior therefore cannot be compiled and validated here. No working-host TPM/PCR/NV/firmware state was read or changed.
+
+`tpm2` is compile-only and `require(Tpm2)` always fails closed, with no automatic software fallback. TPM-native keys are explicitly distinct from sealed software secrets; common TPMs do not execute YRL's X25519, Ed25519, ML-KEM or ML-DSA. Exact backend, simulator, PCR update, NV anti-rollback, rotation/revocation and hardware-replacement recovery requirements are in `docs/CRYPTOGRAPHY.md`.
+
+Stage 7 outcome at this point is intentionally partial: 7.1 is implemented and published; 7.2–7.6 have precise security blockers and fail-closed compile-only gates, not claimed implementations. This follows the requirement to avoid unsafe imitations and continue independent substages.
+
 Stage 0 guarantees apply only while the Executor's server session remains alive. After a server-process restart or session-grace expiry, RESUME cannot recover it. Link retransmits stored logical frames after a fresh Noise handshake, so connection-local nonces are not reused. Confirmed frames are not re-executed, and control/interactive traffic has priority over unsent bulk file data within the bounded Link window. Stage 2 rechecks authority during a live session and before RESUME. Stages 3 and 4 must preserve these properties.
 
 ## Stage 4 operating model

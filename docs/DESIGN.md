@@ -123,3 +123,5 @@ OPAQUE will require an Executor-owned multi-message protocol and independent Bro
 Hybrid signatures require one common canonical envelope and lifecycle across identity, Audit, releases and recovery. Partial contour upgrades are not labeled hybrid, and asymmetric signatures remain handshake-time/control-plane operations rather than per-frame work.
 
 FIDO2 is an optional policy implemented through a real CTAP2 client and standards-compatible relying party. Hardware policy is fail-closed; users without an enabled policy keep existing authentication. Broker owns an independent, operation-bound ROOT assertion flow.
+
+TPM support is an optional local key backend. Policy records whether a role uses a TPM-native operation or a sealed software secret. Required TPM policy never falls back; absent policy keeps software operation. PCR binding is optional and must include an update/recovery workflow before activation.
