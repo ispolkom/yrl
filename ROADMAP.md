@@ -43,6 +43,12 @@ Blocked at the mandatory cross-contour composition boundary. FIPS 204 is final a
 
 The compile-only `hybrid-signatures` feature activates nothing; the support gate fails closed. No production or test owner key is generated, and existing Ed25519 history remains explicitly classical. `docs/CRYPTOGRAPHY.md` records the required both-signatures policy, purpose/key/generation binding, migration across identity/Audit/release/recovery contours and unblock conditions. No PQ authentication is claimed.
 
+### Substage 7.5: FIDO2 hardware confirmation
+
+Blocked at the real CTAP2 backend and native relying-party model. The development/build environment has no libfido2, while server-only WebAuthn libraries do not supply YRL CLI's authenticator interaction. Adding a home-grown signed challenge would not be FIDO2. The project also needs a reviewed native RP ID/origin decision and persistent one-use ceremony/credential/recovery state.
+
+The compile-only `fido2` feature always fails closed and cannot silently use a password. No credential or fake authenticator is created. `docs/CRYPTOGRAPHY.md` records UP/UV/PIN, counter, multiple-token, revocation, recovery, account/device binding and operation-bound Broker requirements. Existing users remain unaffected because no FIDO2 policy can yet be enabled.
+
 ## Current Stage 5: Failure and overload resilience
 
 The initial Stage 5 investigation traced both the 5.9 MiB/s throughput regression and a missing final upload confirmation to one cause: Stage 4 wrapped every encoded Noise plaintext frame in `Zeroizing`, so an unoptimized build performed a costly volatile wipe for every 60 KiB bulk frame. Link already retains the same bulk payload until its authoritative ACK, so wiping that additional encoded copy did not shorten the payload's lifetime. Restricting this extra wipe to the LOGIN frame restored 70 MiB/s upload and 62 MiB/s download on the same host; Noise authentication, rekeying, pinned identities, ACK/SEQ and bounded Link retention are unchanged.

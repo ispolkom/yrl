@@ -91,6 +91,11 @@ fn unavailable_hybrid_signature_backend_fails_closed() {
 }
 
 #[test]
+fn unavailable_fido2_backend_never_falls_back() {
+    assert!(yrl::crypto_support::require(yrl::crypto_support::Mechanism::Fido2).is_err());
+}
+
+#[test]
 fn peer_high_water_mark_is_private_persistent_and_monotonic() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state").join("profiles");

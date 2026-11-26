@@ -37,3 +37,5 @@ Profile `0x00020001` is reserved for X25519 + ML-KEM-768 but is not a valid wire
 No OPAQUE registration or KE1/KE2/KE3 frame code is assigned. The `opaque-rfc9807` feature is not a wire capability and must not be advertised; current LOGIN remains Argon2-based. This prevents a partial peer from triggering a silent downgrade or an incomplete PAKE state machine.
 
 No hybrid Ed25519 + ML-DSA-65 signature envelope is assigned. Existing signatures retain their classical format/profile. A verifier must not infer hybrid assurance from an attached unknown field or accept one valid member of a required future pair.
+
+No FIDO2 registration/assertion frame is assigned. In particular, ordinary YRL challenge/signature payloads must not be labeled CTAP2. A future ceremony will be explicitly versioned and bind RP ID, client data, account, device key and, for ROOT, the exact operation digest.

@@ -121,3 +121,5 @@ The 7.2 assessment does not treat availability of the FIPS 203 primitive as a co
 OPAQUE will require an Executor-owned multi-message protocol and independent Broker-owned step-up protocol, not a replacement hash inside LOGIN. Until the exact RFC implementation and integration are reviewed, the feature gate is intentionally unavailable and cannot fall back to legacy authentication after selection.
 
 Hybrid signatures require one common canonical envelope and lifecycle across identity, Audit, releases and recovery. Partial contour upgrades are not labeled hybrid, and asymmetric signatures remain handshake-time/control-plane operations rather than per-frame work.
+
+FIDO2 is an optional policy implemented through a real CTAP2 client and standards-compatible relying party. Hardware policy is fail-closed; users without an enabled policy keep existing authentication. Broker owns an independent, operation-bound ROOT assertion flow.

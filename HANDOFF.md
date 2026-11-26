@@ -73,6 +73,12 @@ FIPS 204 is final, but the RustCrypto ML-DSA implementation is an early 0.1 line
 
 `hybrid-signatures` is compile-only and the support gate always fails closed. No key or dependency was added and no PQ authentication is claimed. Classical historical signatures remain identifiable and verifiable under their existing profiles. See `docs/CRYPTOGRAPHY.md` for envelope, migration, revocation, vector, size-limit and review requirements.
 
+## Stage 7.5 FIDO2 blocker
+
+No real CTAP2 backend is available in the build environment: libfido2 is not installed, its Rust crates are FFI bindings, and server-side WebAuthn libraries do not operate a native client's token. YRL also requires an explicit native RP ID/origin model and reviewed ceremony persistence before it can safely verify credentials or operation-bound ROOT assertions.
+
+`fido2` is compile-only; `require(Fido2)` always fails closed and there is no password fallback or proprietary challenge imitation. Existing users cannot enable a FIDO2 policy yet. Exact libfido2 packaging, UP/UV/PIN, credential/counter, revocation/recovery and Broker binding requirements are in `docs/CRYPTOGRAPHY.md`.
+
 Stage 0 guarantees apply only while the Executor's server session remains alive. After a server-process restart or session-grace expiry, RESUME cannot recover it. Link retransmits stored logical frames after a fresh Noise handshake, so connection-local nonces are not reused. Confirmed frames are not re-executed, and control/interactive traffic has priority over unsent bulk file data within the bounded Link window. Stage 2 rechecks authority during a live session and before RESUME. Stages 3 and 4 must preserve these properties.
 
 ## Stage 4 operating model

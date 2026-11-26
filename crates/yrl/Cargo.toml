@@ -50,6 +50,7 @@ crypto-profiles = []
 pq-hybrid = ["crypto-profiles"]
 opaque-rfc9807 = []
 hybrid-signatures = []
+fido2 = []
 
 [dev-dependencies]
 tempfile = "3"
