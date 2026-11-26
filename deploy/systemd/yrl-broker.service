@@ -1,12 +1,14 @@
 [Unit]
 Description=YRL broker (the only part that does typed privileged operations)
 After=yrl-audit.service
-Requires=yrl-audit.service
+Wants=yrl-audit.service
 StartLimitIntervalSec=60s
 StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
 User=yrl-broker
 Group=yrl-broker
 SupplementaryGroups=yrl-to-audit yrl-to-broker

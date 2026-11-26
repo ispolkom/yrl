@@ -11,6 +11,14 @@ pub const STDERR: u8 = 4;
 pub const EXIT: u8 = 5;
 pub const ERROR: u8 = 6;
 pub const CLOSE: u8 = 7;
+pub const OP_STATUS: u8 = 17;
+pub const OP_STATUS_RESULT: u8 = 18;
+pub const OP_ACCEPTED: u8 = 19;
+pub const OP_RESULT_ACK: u8 = 26;
+
+pub const E_OPERATION_RECORDED: u16 = 30;
+pub const E_OPERATION_JOURNAL: u16 = 31;
+pub const E_SESSION_LOST: u16 = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {

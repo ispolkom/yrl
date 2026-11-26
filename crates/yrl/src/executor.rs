@@ -85,6 +85,8 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
     cfg.rec(1, ev("session_open", RESULT_OK));
     let mut step_server = stepup::StepServer::default();
     let mut root_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let root_guards = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<u64, crate::opjournal::Guard>::new()));
+    let root_proofs = Arc::new(std::sync::Mutex::new(std::collections::HashSet::<u64>::new()));
     let mut broker_pipe: Option<mpsc::Sender<Frame>> = None;
     let target = Some(target);
     let slots = Arc::new(Semaphore::new(cfg.max_exec_per_connection));
@@ -99,6 +101,18 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
         match frame.kind {
             wire::PING => {
                 let _ = tx.send(Frame::new(wire::PONG, frame.stream, frame.payload)).await;
+            }
+            wire::OP_STATUS => {
+                let Ok(id) = <[u8; 8]>::try_from(frame.payload.as_slice()).map(u64::from_be_bytes) else { break };
+                let status = cfg.operations.as_ref().and_then(|j| j.status(&who.public, &account, id));
+                match status {
+                    Some(status) => { let _ = tx.send(Frame::new(wire::OP_STATUS_RESULT, 0, crate::opjournal::encode_status(&status))).await; }
+                    None => { let _ = tx.send(denied(wire::E_OPERATION_JOURNAL, b"no retained operation status", id)).await; }
+                }
+            }
+            wire::OP_RESULT_ACK => {
+                let Ok(id) = <[u8; 8]>::try_from(frame.payload.as_slice()).map(u64::from_be_bytes) else { break };
+                let _ = cfg.operations.as_ref().is_some_and(|j| j.acknowledge(&who.public, &account, id));
             }
             wire::EXEC_REQ => {
                 let Ok(req) = ExecReq::decode(&frame.payload) else {
@@ -120,6 +134,33 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     let _ = tx.send(denied(5, b"server operation budget exhausted", id)).await;
                     continue;
                 };
+                let Some(journal) = cfg.operations.as_ref() else {
+                    let _ = tx.send(denied(wire::E_OPERATION_JOURNAL, b"operation journal unavailable", id)).await;
+                    continue;
+                };
+                let guard = match journal.accept(&who.public, &account, id, crate::opjournal::KIND_EXEC, &frame.payload) {
+                    Ok(guard) => guard,
+                    Err(crate::opjournal::Refusal::Duplicate(status)) => {
+                        let text = format!("operation already recorded as {:?}", status.state);
+                        let _ = tx.send(denied(wire::E_OPERATION_RECORDED, text.as_bytes(), id)).await;
+                        continue;
+                    }
+                    Err(crate::opjournal::Refusal::Conflict) => {
+                        let _ = tx.send(denied(wire::E_OPERATION_RECORDED, b"request id was already used for another operation", id)).await;
+                        continue;
+                    }
+                    Err(crate::opjournal::Refusal::Full | crate::opjournal::Refusal::State) => {
+                        let _ = tx.send(denied(wire::E_OPERATION_JOURNAL, b"operation journal unavailable", id)).await;
+                        continue;
+                    }
+                };
+                // ACCEPTED is durable before this acknowledgement enters Link, and before the
+                // command can be marked RUNNING or spawned.
+                if tx.send(Frame::new(wire::OP_ACCEPTED, 0, id.to_be_bytes().to_vec())).await.is_err() { continue }
+                if !guard.running() {
+                    let _ = tx.send(denied(wire::E_OPERATION_JOURNAL, b"operation state could not be committed", id)).await;
+                    continue;
+                }
                 cfg.log(format!("exec started via '{}'", who.label));
                 {
                     let name = req.argv.first().map(|a| String::from_utf8_lossy(a.rsplit(|c| *c == b'/').next().unwrap_or(a)).into_owned()).unwrap_or_default();
@@ -129,7 +170,16 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 let Some(t) = target.clone() else { break };
                 let cgroup = session_cgroup.as_ref().map(|cg| cg.attachment());
                 jobs.spawn(async move {
-                    exec::run(req, t, tx2, cgroup).await;
+                    let outcome = exec::run(req, t, tx2.clone(), cgroup).await;
+                    let state = if outcome.started { crate::opjournal::State::Completed } else { crate::opjournal::State::Failed };
+                    if guard.finish(state, Some(outcome.code)) {
+                        match outcome.error {
+                            Some((code, text)) => { let _ = tx2.send(denied(code, text.as_bytes(), id)).await; }
+                            None => { let _ = tx2.send(Frame::new(wire::EXIT, 0, with_id(id, &outcome.code.to_be_bytes()))).await; }
+                        }
+                    } else {
+                        let _ = tx2.send(denied(wire::E_OPERATION_JOURNAL, b"operation result could not be committed", id)).await;
+                    }
                     drop(permit);
                     drop(resource);
                 });
@@ -346,21 +396,38 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 // ROOT is the broker's business, end to end: the executor only carries those bytes. SUDO is answered here.
                 let is_root = if frame.kind == stepup::STEPUP_BEGIN { stepup::decode_begin(&frame.payload).map(|b| b.1 == stepup::Level::Root).unwrap_or(false) } else { root_ids.contains(&stepup::decode_msg(&frame.payload).map(|m| m.0).unwrap_or(0)) };
                 if is_root {
-                    let rid = if frame.kind == stepup::STEPUP_BEGIN { stepup::decode_begin(&frame.payload).map(|b| b.0).unwrap_or(0) } else { stepup::decode_msg(&frame.payload).map(|m| m.0).unwrap_or(0) };
+                    let decoded = if frame.kind == stepup::STEPUP_BEGIN { stepup::decode_begin(&frame.payload).ok() } else { None };
+                    let rid = decoded.as_ref().map(|b| b.0).unwrap_or_else(|| stepup::decode_msg(&frame.payload).map(|m| m.0).unwrap_or(0));
                     if frame.kind == stepup::STEPUP_BEGIN {
+                        let Some((_, _, op, _)) = decoded else { break };
+                        let guard = cfg.operations.as_ref().and_then(|j| j.accept(&who.public, &account, rid, crate::opjournal::KIND_ROOT, &op.encode()).ok());
+                        let Some(guard) = guard else {
+                            let _ = tx.send(Frame::new(stepup::STEPUP_RESULT, 0, stepup::encode_result(rid, stepup::R_UNKNOWN, ""))).await;
+                            continue;
+                        };
+                        root_guards.lock().unwrap().insert(rid, guard);
                         root_ids.insert(rid);
+                        let _ = tx.send(Frame::new(wire::OP_ACCEPTED, 0, rid.to_be_bytes().to_vec())).await;
                     } else {
                         root_ids.remove(&rid);
+                        let running = root_guards.lock().unwrap().get(&rid).is_some_and(crate::opjournal::Guard::running);
+                        if !running {
+                            if let Some(g) = root_guards.lock().unwrap().remove(&rid) { g.finish(crate::opjournal::State::Unknown, None); }
+                            let _ = tx.send(Frame::new(stepup::STEPUP_RESULT, 0, stepup::encode_result(rid, stepup::R_UNKNOWN, ""))).await;
+                            continue;
+                        }
+                        root_proofs.lock().unwrap().insert(rid);
                     }
                     if broker_pipe.as_ref().is_some_and(mpsc::Sender::is_closed) {
                         broker_pipe = None;
                     }
                     if broker_pipe.is_none() && frame.kind == stepup::STEPUP_BEGIN {
                         broker_pipe = match &cfg.broker {
-                            Some(b) => open_broker(b, &who.public, &account, &session_rights, tx.clone()).await,
+                            Some(b) => open_broker(b, &who.public, &account, &session_rights, tx.clone(), root_guards.clone(), root_proofs.clone()).await,
                             None => None,
                         };
                     }
+                    let was_proof = frame.kind == stepup::STEPUP_PROOF;
                     let sent = match &broker_pipe {
                         Some(to_broker) => to_broker.send(frame).await.is_ok(),
                         None => false,
@@ -368,7 +435,13 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     if !sent {
                         broker_pipe = None;
                         root_ids.remove(&rid);
-                        let _ = tx.send(Frame::new(stepup::STEPUP_RESULT, 0, stepup::encode_result(rid, stepup::R_DENIED, ""))).await;
+                        root_proofs.lock().unwrap().remove(&rid);
+                        if let Some(g) = root_guards.lock().unwrap().remove(&rid) {
+                            let state = if was_proof { crate::opjournal::State::Unknown } else { crate::opjournal::State::Failed };
+                            g.finish(state, None);
+                        }
+                        let status = if was_proof { stepup::R_UNKNOWN } else { stepup::R_DENIED };
+                        let _ = tx.send(Frame::new(stepup::STEPUP_RESULT, 0, stepup::encode_result(rid, status, ""))).await;
                     }
                     continue;
                 }
@@ -568,13 +641,34 @@ pub(crate) async fn direct_session(cfg: &ServerConfig, key: &[u8], account: &str
 
 
 /// the executor's pipe to the broker for one session: whatever the broker answers goes straight to the client
-async fn open_broker(b: &crate::ipc::GatekeeperIpc, key: &[u8], account: &str, rights: &[String], to_client: mpsc::Sender<Frame>) -> Option<mpsc::Sender<Frame>> {
+async fn open_broker(b: &crate::ipc::GatekeeperIpc, key: &[u8], account: &str, rights: &[String], to_client: mpsc::Sender<Frame>, guards: Arc<std::sync::Mutex<std::collections::HashMap<u64, crate::opjournal::Guard>>>, proofs: Arc<std::sync::Mutex<std::collections::HashSet<u64>>>) -> Option<mpsc::Sender<Frame>> {
     let (to_broker, mut from_broker) = open_session(b, key, account, rights).await?;
     tokio::spawn(async move {
         while let Some(f) = from_broker.recv().await {
+            if f.kind == crate::stepup::STEPUP_RESULT {
+                if let Ok((id, result, _)) = crate::stepup::decode_result(&f.payload) {
+                    proofs.lock().unwrap().remove(&id);
+                    let guard = { guards.lock().unwrap().remove(&id) };
+                    if let Some(g) = guard {
+                        let state = if result == crate::stepup::R_OK { crate::opjournal::State::Completed } else { crate::opjournal::State::Failed };
+                        if !g.finish(state, Some(result as i32)) {
+                            let _ = to_client.send(Frame::new(crate::stepup::STEPUP_RESULT, 0, crate::stepup::encode_result(id, crate::stepup::R_UNKNOWN, ""))).await;
+                            continue;
+                        }
+                    }
+                }
+            }
             if to_client.send(f).await.is_err() {
                 break;
             }
+        }
+        let uncertain: std::collections::HashSet<_> = proofs.lock().unwrap().drain().collect();
+        let remaining: Vec<_> = guards.lock().unwrap().drain().collect();
+        for (id, g) in remaining {
+            let unknown = uncertain.contains(&id);
+            g.finish(if unknown { crate::opjournal::State::Unknown } else { crate::opjournal::State::Failed }, None);
+            let status = if unknown { crate::stepup::R_UNKNOWN } else { crate::stepup::R_DENIED };
+            let _ = to_client.send(Frame::new(crate::stepup::STEPUP_RESULT, 0, crate::stepup::encode_result(id, status, ""))).await;
         }
     });
     Some(to_broker)

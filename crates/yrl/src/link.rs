@@ -90,6 +90,10 @@ fn priority_kind(kind: u8) -> Priority {
             | crate::wire::EXIT
             | crate::wire::ERROR
             | crate::wire::CLOSE
+            | crate::wire::OP_STATUS
+            | crate::wire::OP_STATUS_RESULT
+            | crate::wire::OP_ACCEPTED
+            | crate::wire::OP_RESULT_ACK
             | crate::wire::PTY_OPEN
             | crate::wire::PTY_IN
             | crate::wire::PTY_OUT

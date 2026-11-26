@@ -71,6 +71,7 @@ async fn serve(dir: &str, bind: &str, relay: Option<String>) -> anyhow::Result<(
     let mut cfg = server::ServerConfig::new(dir);
     cfg.set_resource_limits(yrl::resources::ResourceLimits::from_env()?).map_err(|e| anyhow::anyhow!(e))?;
     cfg.set_disk_limits(yrl::disk::DiskLimits::from_env()?)?;
+    cfg.set_operation_limits(yrl::opjournal::Limits::from_env()?)?;
     match relay {
         // behind NAT: only dial out; the address `-` means no listening port at all
         Some(r) => {
@@ -152,6 +153,7 @@ async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let mut cfg = server::ServerConfig::new(dir.clone());
     cfg.set_resource_limits(yrl::resources::ResourceLimits::from_env()?).map_err(|e| anyhow::anyhow!(e))?;
     cfg.set_disk_limits(yrl::disk::DiskLimits::from_env()?)?;
+    cfg.set_operation_limits(yrl::opjournal::Limits::from_env()?)?;
     cfg.exec_identity = Some(ipc.key.clone());
     cfg.session_cgroup_limits = yrl::cgroup::SessionLimits::from_env()?;
     cfg.lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&yrl::ipc::state_dir(&dir, "exec"), "sudo"));
@@ -160,6 +162,7 @@ async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
     if std::env::var_os("YRL_SESSION_CGROUPS").is_some() { yrl::cgroup::verify_delegation_with(&cfg.session_cgroup_limits)?; }
     if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply_executor()?; }
     eprintln!("[yrld] executor ready on {}", ipc.socket.display());
+    yrl::watchdog::start();
     yrl::executor::serve_ipc(listener, cfg, ipc).await;
     Ok(())
 }
@@ -206,11 +209,13 @@ async fn gatekeeper(dir: &str, bind: &str, relay: Option<String>, a: &[String]) 
                 let listener = tokio::net::TcpListener::bind(bind).await?;
                 tokio::spawn(server::serve(listener, me.clone(), cfg.clone()));
             }
+            yrl::watchdog::start();
             server::serve_via_relay(r, me, cfg, 2).await;
         }
         None => {
             let listener = tokio::net::TcpListener::bind(bind).await?;
             eprintln!("[yrld] gatekeeper listening on {bind}");
+            yrl::watchdog::start();
             server::serve(listener, me, cfg).await;
         }
     }
@@ -262,6 +267,7 @@ async fn broker(dir: &str, a: &[String]) -> anyhow::Result<()> {
     cfg.root_lockouts = std::sync::Arc::new(yrl::stepup::Lockouts::persistent(&yrl::ipc::state_dir(&dir, "broker"), "root"));
     cfg.audit.broker = yrl::ipc::audit_client(&dir, "broker");
     if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply()?; }
+    yrl::watchdog::start();
     yrl::broker::serve_ipc(listener, cfg, ipc).await;
     Ok(())
 }
@@ -325,6 +331,7 @@ async fn audit(dir: &str, a: &[String]) -> anyhow::Result<()> {
             let _ = s2.seal();
         }
     });
+    yrl::watchdog::start();
     yrl::audit::serve_ipc(listener, svc, ipc, std::sync::Arc::new(|m| eprintln!("[yrld] {m}"))).await;
     Ok(())
 }
@@ -424,6 +431,7 @@ async fn firewall(dir: &str, a: &[String]) -> anyhow::Result<()> {
     let listener = yrl::ipc::bind_socket(&ipc.socket)?;
     eprintln!("[yrld] firewall ready on {}", ipc.socket.display());
     if std::env::var_os("YRL_NO_SANDBOX").is_none() { yrl::sandbox::apply_firewall()?; }
+    yrl::watchdog::start();
     yrl::firewall::serve_ipc(listener, svc, ipc, std::sync::Arc::new(|m| eprintln!("[yrld] {m}"))).await;
     Ok(())
 }

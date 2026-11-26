@@ -32,6 +32,7 @@ pub const R_OK: u8 = 0;
 pub const R_DENIED: u8 = 1;
 pub const R_LOCKED: u8 = 2;
 pub const R_EXPIRED: u8 = 3;
+pub const R_UNKNOWN: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Level {

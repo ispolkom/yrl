@@ -226,6 +226,7 @@ async fn shell(c: &Client) -> anyhow::Result<i32> {
                 PtyEvent::Exit(code) => return Ok(code),
                 PtyEvent::Error(code, text) => { drop(_raw); anyhow::bail!("server error {code}: {text}") }
                 PtyEvent::Closed => { drop(_raw); anyhow::bail!("the link closed") }
+                PtyEvent::SessionLost => { drop(_raw); anyhow::bail!("SESSION_LOST") }
             },
         }
     }

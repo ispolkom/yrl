@@ -1,14 +1,16 @@
 [Unit]
 Description=YRL executor (acts for the logged-in person, as that person's system user)
 After=yrl-audit.service yrl-broker.service
-Requires=yrl-audit.service
+Wants=yrl-audit.service yrl-broker.service
 StartLimitIntervalSec=60s
 StartLimitBurst=5
 
 # This part runs as root on purpose: it has to become the account's system user, which only root may do.
 # Its capability set holds nothing but that right. No file-system sandbox here: it works in the people's own directories.
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
 User=root
 Group=root
 SupplementaryGroups=yrl-conf yrl-to-audit yrl-to-broker yrl-to-exec

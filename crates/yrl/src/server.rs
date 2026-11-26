@@ -32,6 +32,8 @@ pub struct ServerConfig {
     pub resources: Arc<crate::resources::ResourceManager>,
     /// persistent FILE_PUT reservations shared by every Executor session
     pub disk: Option<Arc<crate::disk::DiskManager>>,
+    /// crash-stable accepted-operation states, opened only by Executor
+    pub operations: Option<Arc<crate::opjournal::Journal>>,
     pub sessions: Arc<Registry>,
     /// how this gatekeeper reaches its executor; None = start an executor inside this process on a private socket (single-process mode)
     pub gate: Option<crate::ipc::GatekeeperIpc>,
@@ -100,6 +102,7 @@ impl ServerConfig {
             // Opened only by Executor (or by single-process `ensure_executor`); Gatekeeper must not
             // need read or write access to the persistent reservation ledger.
             disk: None,
+            operations: None,
             sessions: Arc::new(Registry::default()),
             gate: None,
             lockouts: Arc::new(crate::stepup::Lockouts::default()),
@@ -139,6 +142,11 @@ impl ServerConfig {
     pub fn set_disk_limits(&mut self, limits: crate::disk::DiskLimits) -> anyhow::Result<()> {
         let ledger = crate::ipc::state_dir(&self.dir, "exec").join("disk-reservations");
         self.disk = Some(Arc::new(crate::disk::DiskManager::open(ledger, limits)?));
+        Ok(())
+    }
+    pub fn set_operation_limits(&mut self, limits: crate::opjournal::Limits) -> anyhow::Result<()> {
+        let path = crate::ipc::state_dir(&self.dir, "exec").join("operation-states");
+        self.operations = Some(Arc::new(crate::opjournal::Journal::open(path, limits)?));
         Ok(())
     }
     pub(crate) fn log(&self, line: String) {
@@ -620,6 +628,9 @@ pub async fn ensure_executor(cfg: &mut ServerConfig) {
     }
     if cfg.disk.is_none() {
         cfg.set_disk_limits(crate::disk::DiskLimits::default()).expect("cannot open the Executor disk reservation ledger");
+    }
+    if cfg.operations.is_none() {
+        cfg.set_operation_limits(crate::opjournal::Limits::default()).expect("cannot open the Executor operation journal");
     }
     // the broker first (the executor is its client), then the executor
     let exec_key = cfg.exec_identity.clone().unwrap_or_else(crate::keys::generate);

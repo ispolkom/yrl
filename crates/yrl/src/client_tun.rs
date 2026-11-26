@@ -1,6 +1,6 @@
 //! Client side of tunnels: one tunnel = one TCP connection made by the server; plus the two ways to use them
 //! (a local port that leads to a fixed destination, and a SOCKS5 proxy that leads wherever the application asks).
-use crate::client::{Client, ServerError};
+use crate::client::{Client, ServerError, SessionLost};
 use crate::tunwire::*;
 use crate::wire::{self, split_id, with_id, Frame};
 use anyhow::{bail, Result};
@@ -31,6 +31,7 @@ impl Client {
                     Ok((_, r)) if r.len() >= 2 => Err(ServerError(u16::from_be_bytes([r[0], r[1]]), String::from_utf8_lossy(&r[2..]).into_owned()).into()),
                     _ => bail!("malformed error"),
                 },
+                _ if self.session_lost() => Err(SessionLost.into()),
                 _ => bail!("no answer to the tunnel request"),
             }
         }

@@ -2,12 +2,14 @@
 Description=YRL firewall program (the only one that changes the packet filter)
 After=yrl-audit.service network-pre.target
 Before=network.target
-Requires=yrl-audit.service
+Wants=yrl-audit.service
 StartLimitIntervalSec=60s
 StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
 User=yrl-fw
 Group=yrl-fw
 SupplementaryGroups=yrl-to-audit yrl-to-fw

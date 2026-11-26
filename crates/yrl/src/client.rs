@@ -405,7 +405,7 @@ impl Client {
             waiting: Arc::new(Mutex::new(HashMap::new())),
             pongs: Mutex::new(pong_rx),
             pong_tx,
-            next_id: std::sync::atomic::AtomicU64::new(1),
+            next_id: std::sync::atomic::AtomicU64::new(random_request_id()),
             pre: Mutex::new(Some(Pre { rd, wr, sec: Arc::new(sec), route: selected })),
             ident,
             running: std::sync::atomic::AtomicBool::new(false),
@@ -438,7 +438,7 @@ impl Client {
         if !self.running.load(std::sync::atomic::Ordering::SeqCst) {
             bail!("not logged in");
         }
-        self.link.push(f).await.map_err(|_| anyhow::anyhow!(if self.session_lost() { "session lost" } else { "the session is closed" }))
+        self.link.push(f).await.map_err(|_| if self.session_lost() { anyhow::Error::new(SessionLost) } else { anyhow::anyhow!("the session is closed") })
     }
 
     /// ends the session on the server (terminals hung up, tunnels closed), politely
@@ -495,7 +495,7 @@ impl Client {
                     wire::PONG => {
                         let _ = pong_tx.send(f).await;
                     }
-                    wire::STDOUT | wire::STDERR | wire::EXIT | wire::ERROR | wire::PTY_OUT | wire::PTY_EXIT | fw::FILE_DATA | fw::FILE_READY | fw::FILE_END | crate::fsops::FS_RESP | crate::fsops::FS_DONE | crate::stepup::STEPUP_CHALLENGE | crate::stepup::STEPUP_RESULT | crate::tunwire::TUN_READY | crate::tunwire::TUN_DATA | crate::tunwire::TUN_EOF | crate::tunwire::TUN_CLOSE => {
+                    wire::STDOUT | wire::STDERR | wire::EXIT | wire::ERROR | wire::OP_ACCEPTED | wire::OP_STATUS_RESULT | wire::PTY_OUT | wire::PTY_EXIT | fw::FILE_DATA | fw::FILE_READY | fw::FILE_END | crate::fsops::FS_RESP | crate::fsops::FS_DONE | crate::stepup::STEPUP_CHALLENGE | crate::stepup::STEPUP_RESULT | crate::tunwire::TUN_READY | crate::tunwire::TUN_DATA | crate::tunwire::TUN_EOF | crate::tunwire::TUN_CLOSE => {
                         if let Ok((id, _)) = split_id(&f.payload) {
                             let t = waiting.lock().await.get(&id).cloned();
                             if let Some(t) = t {
@@ -506,7 +506,7 @@ impl Client {
                     _ => {}
                 }
             }
-            waiting.lock().await.clear(); // wakes everybody waiting: the session is gone
+            finish_waiters(&waiting, lost.load(std::sync::atomic::Ordering::SeqCst)).await;
         });
         self.running.store(true, std::sync::atomic::Ordering::SeqCst);
         tokio::spawn(manage(self.link.clone(), self.ident.clone(), sess.payload, pre, sink, self.lost.clone()));
@@ -521,8 +521,16 @@ impl Client {
         }
     }
 
+    pub fn request_id(&self) -> u64 { self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst) }
+
     pub async fn exec(&self, argv: &[&[u8]], timeout_ms: u32, wait: Duration) -> Result<ExecResult> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let id = self.request_id();
+        self.exec_with_id(id, argv, timeout_ms, wait).await
+    }
+
+    /// Explicit id lets a caller query this operation after re-authentication. Reusing it never
+    /// executes the command again; Executor returns the retained state instead.
+    pub async fn exec_with_id(&self, id: u64, argv: &[&[u8]], timeout_ms: u32, wait: Duration) -> Result<ExecResult> {
         let (tx, mut rx) = mpsc::channel(256);
         self.waiting.lock().await.insert(id, tx);
         let req = ExecReq { request_id: id, timeout_ms, argv: argv.iter().map(|a| a.to_vec()).collect() };
@@ -532,16 +540,21 @@ impl Client {
             while let Some(f) = rx.recv().await {
                 let (_, rest) = split_id(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?;
                 match f.kind {
+                    wire::OP_ACCEPTED => {}
                     wire::STDOUT => res.stdout.extend_from_slice(rest),
                     wire::STDERR => res.stderr.extend_from_slice(rest),
                     wire::ERROR if rest.len() >= 2 => {
-                        res.error = Some((u16::from_be_bytes([rest[0], rest[1]]), String::from_utf8_lossy(&rest[2..]).into_owned()));
-                        if res.error.as_ref().map(|e| e.0) == Some(1) || res.error.as_ref().map(|e| e.0) == Some(2) || res.error.as_ref().map(|e| e.0) == Some(5) {
+                        let code = u16::from_be_bytes([rest[0], rest[1]]);
+                        if code == wire::E_SESSION_LOST { return Err(SessionLost.into()) }
+                        res.error = Some((code, String::from_utf8_lossy(&rest[2..]).into_owned()));
+                        if matches!(code, 1 | 2 | 5 | wire::E_OPERATION_RECORDED | wire::E_OPERATION_JOURNAL) {
+                            if code == 2 { let _ = self.send(&Frame::new(wire::OP_RESULT_ACK, 0, id.to_be_bytes().to_vec())).await; }
                             return Ok::<bool, anyhow::Error>(true);
                         }
                     }
                     wire::EXIT if rest.len() == 4 => {
                         res.code = i32::from_be_bytes(rest.try_into().unwrap());
+                        let _ = self.send(&Frame::new(wire::OP_RESULT_ACK, 0, id.to_be_bytes().to_vec())).await;
                         return Ok(true);
                     }
                     _ => {}
@@ -553,11 +566,71 @@ impl Client {
         self.waiting.lock().await.remove(&id);
         match finished {
             Ok(Ok(true)) => Ok(res),
+            Ok(Ok(false)) if self.session_lost() => Err(SessionLost.into()),
             Ok(Ok(false)) => bail!("the link closed before the request finished"),
             Ok(Err(e)) => Err(e),
             Err(_) => bail!("timed out waiting for the result"),
         }
     }
+
+    pub async fn operation_status(&self, id: u64, wait: Duration) -> Result<crate::opjournal::Status> {
+        let (tx, mut rx) = mpsc::channel(4);
+        self.waiting.lock().await.insert(id, tx);
+        let r = async {
+            self.send(&Frame::new(wire::OP_STATUS, 0, id.to_be_bytes().to_vec())).await?;
+            match tokio::time::timeout(wait, rx.recv()).await {
+                Ok(Some(f)) if f.kind == wire::OP_STATUS_RESULT => {
+                    let status = crate::opjournal::decode_status(&f.payload).ok_or_else(|| anyhow::anyhow!("bad operation status"))?;
+                    let _ = self.send(&Frame::new(wire::OP_RESULT_ACK, 0, id.to_be_bytes().to_vec())).await;
+                    Ok(status)
+                }
+                Ok(Some(f)) if f.kind == wire::ERROR => Err(server_error(&f)),
+                _ if self.session_lost() => Err(SessionLost.into()),
+                _ => bail!("no operation status"),
+            }
+        }.await;
+        self.waiting.lock().await.remove(&id);
+        r
+    }
+}
+
+async fn finish_waiters(waiting: &Arc<Mutex<HashMap<u64, mpsc::Sender<Frame>>>>, lost: bool) {
+    let mut waiting = waiting.lock().await;
+    if lost {
+        for (id, waiter) in waiting.iter() {
+            let mut p = wire::E_SESSION_LOST.to_be_bytes().to_vec(); p.extend_from_slice(b"SESSION_LOST");
+            let _ = waiter.try_send(Frame::new(wire::ERROR, 0, with_id(*id, &p)));
+        }
+    }
+    waiting.clear();
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn every_pending_waiter_gets_explicit_session_lost() {
+        let waiting = Arc::new(Mutex::new(HashMap::new()));
+        let mut receivers = Vec::new();
+        for id in [7, 8, 9] {
+            let (tx, rx) = mpsc::channel(1);
+            waiting.lock().await.insert(id, tx);
+            receivers.push((id, rx));
+        }
+        finish_waiters(&waiting, true).await;
+        for (id, mut rx) in receivers {
+            let f = rx.recv().await.unwrap();
+            let (got, rest) = split_id(&f.payload).unwrap();
+            assert_eq!((f.kind, got, u16::from_be_bytes(rest[..2].try_into().unwrap())), (wire::ERROR, id, wire::E_SESSION_LOST));
+        }
+        assert!(waiting.lock().await.is_empty());
+    }
+}
+
+fn random_request_id() -> u64 {
+    use argon2::password_hash::rand_core::{OsRng, RngCore};
+    OsRng.next_u64().max(1)
 }
 
 #[allow(dead_code)]
@@ -572,6 +645,7 @@ pub enum PtyEvent {
     Error(u16, String),
     /// the link is gone
     Closed,
+    SessionLost,
 }
 
 /// an interactive terminal on the server
@@ -607,12 +681,16 @@ impl Pty<'_> {
     }
     pub async fn next(&mut self) -> PtyEvent {
         loop {
-            let Some(f) = self.rx.recv().await else { return PtyEvent::Closed };
+            let Some(f) = self.rx.recv().await else { return if self.client.session_lost() { PtyEvent::SessionLost } else { PtyEvent::Closed } };
             let Ok((_, rest)) = split_id(&f.payload) else { continue };
             match f.kind {
                 wire::PTY_OUT => return PtyEvent::Output(rest.to_vec()),
                 wire::PTY_EXIT if rest.len() == 4 => return PtyEvent::Exit(i32::from_be_bytes(rest.try_into().unwrap())),
-                wire::ERROR if rest.len() >= 2 => return PtyEvent::Error(u16::from_be_bytes([rest[0], rest[1]]), String::from_utf8_lossy(&rest[2..]).into_owned()),
+                wire::ERROR if rest.len() >= 2 => {
+                    let code = u16::from_be_bytes([rest[0], rest[1]]);
+                    if code == wire::E_SESSION_LOST { return PtyEvent::SessionLost }
+                    return PtyEvent::Error(code, String::from_utf8_lossy(&rest[2..]).into_owned());
+                }
                 _ => {}
             }
         }
@@ -652,6 +730,11 @@ impl std::fmt::Display for ServerError {
 }
 impl std::error::Error for ServerError {}
 
+#[derive(Debug)]
+pub struct SessionLost;
+impl std::fmt::Display for SessionLost { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("SESSION_LOST") } }
+impl std::error::Error for SessionLost {}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Transfer {
     /// bytes that went over the link in this run
@@ -662,6 +745,7 @@ pub struct Transfer {
 
 fn server_error(f: &Frame) -> anyhow::Error {
     match split_id(&f.payload) {
+        Ok((_, rest)) if rest.len() >= 2 && u16::from_be_bytes([rest[0], rest[1]]) == wire::E_SESSION_LOST => SessionLost.into(),
         Ok((_, rest)) if rest.len() >= 2 => ServerError(u16::from_be_bytes([rest[0], rest[1]]), String::from_utf8_lossy(&rest[2..]).into_owned()).into(),
         _ => anyhow::anyhow!("malformed error from the server"),
     }
@@ -728,6 +812,7 @@ impl Client {
             let offset = match tokio::time::timeout(wait, rx.recv()).await {
                 Ok(Some(f)) if f.kind == fw::FILE_READY => split_id(&f.payload).ok().and_then(|(_, r)| r.try_into().ok()).map(u64::from_be_bytes).ok_or_else(|| anyhow::anyhow!("bad READY"))?,
                 Ok(Some(f)) if f.kind == wire::ERROR => return Err(server_error(&f)),
+                _ if self.session_lost() => return Err(SessionLost.into()),
                 _ => bail!("no answer to the upload request"),
             };
             let mut file = tokio::fs::File::open(local).await?;
@@ -752,6 +837,7 @@ impl Client {
                     Ok(Some(f)) if f.kind == fw::FILE_END => return Ok(Transfer { bytes: sent, resumed_from: offset }),
                     Ok(Some(f)) if f.kind == wire::ERROR => return Err(server_error(&f)),
                     Ok(Some(_)) => {}
+                    _ if self.session_lost() => return Err(SessionLost.into()),
                     _ => bail!("no confirmation of the upload"),
                 }
             }
@@ -785,6 +871,7 @@ impl Client {
             let size = match tokio::time::timeout(wait, rx.recv()).await {
                 Ok(Some(f)) if f.kind == fw::FILE_READY => split_id(&f.payload).ok().and_then(|(_, r)| r.try_into().ok()).map(u64::from_be_bytes).ok_or_else(|| anyhow::anyhow!("bad READY"))?,
                 Ok(Some(f)) if f.kind == wire::ERROR => return Err(server_error(&f)),
+                _ if self.session_lost() => return Err(SessionLost.into()),
                 _ => bail!("no answer to the download request"),
             };
             let mut file = tokio::fs::OpenOptions::new().create(true).write(true).truncate(false).open(part).await?;
@@ -803,6 +890,7 @@ impl Client {
                     }
                     Ok(Some(f)) if f.kind == fw::FILE_END => break split_id(&f.payload).ok().and_then(|(_, r)| r.try_into().ok()).ok_or_else(|| anyhow::anyhow!("bad END"))?,
                     Ok(Some(f)) if f.kind == wire::ERROR => return Err(server_error(&f)),
+                    _ if self.session_lost() => return Err(SessionLost.into()),
                     _ => bail!("the download stopped"),
                 }
             };
@@ -849,6 +937,7 @@ impl Client {
                     Ok(Some(f)) if f.kind == FS_DONE => return Ok(all),
                     Ok(Some(f)) if f.kind == wire::ERROR => return Err(server_error(&f)),
                     Ok(Some(_)) => {}
+                    _ if self.session_lost() => return Err(SessionLost.into()),
                     _ => bail!("no answer to the directory request"),
                 }
             }
@@ -897,13 +986,18 @@ impl Client {
             let mut buf = vec![0u8; 512];
             let n = hs.write_message(&[], &mut buf)?;
             self.send(&Frame::new(STEPUP_BEGIN, 0, encode_begin(id, level, op, &buf[..n]))).await?;
-            let msg2 = match tokio::time::timeout(wait, rx.recv()).await {
-                Ok(Some(f)) if f.kind == STEPUP_CHALLENGE => decode_msg(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?.1.to_vec(),
-                Ok(Some(f)) if f.kind == STEPUP_RESULT => {
-                    let (_, st, _) = decode_result(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-                    bail!("{}", result_text(st));
+            let msg2 = loop {
+                match tokio::time::timeout(wait, rx.recv()).await {
+                    Ok(Some(f)) if f.kind == wire::OP_ACCEPTED => continue,
+                    Ok(Some(f)) if f.kind == STEPUP_CHALLENGE => break decode_msg(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?.1.to_vec(),
+                    Ok(Some(f)) if f.kind == STEPUP_RESULT => {
+                        let (_, st, _) = decode_result(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                        bail!("{}", result_text(st));
+                    }
+                    Ok(Some(f)) if f.kind == wire::ERROR => return Err(server_error(&f)),
+                    _ if self.session_lost() => return Err(SessionLost.into()),
+                    _ => bail!("no answer to the step-up request"),
                 }
-                _ => bail!("no answer to the step-up request"),
             };
             let mut scratch = vec![0u8; 512];
             hs.read_message(&msg2, &mut scratch)?; // the executor proves its key here: a different one fails
@@ -912,8 +1006,13 @@ impl Client {
             match tokio::time::timeout(wait, rx.recv()).await {
                 Ok(Some(f)) if f.kind == STEPUP_RESULT => {
                     let (_, st, text) = decode_result(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-                    if st == R_OK { Ok(text) } else { bail!("{}", result_text(st)) }
+                    if st == R_OK {
+                        let _ = self.send(&Frame::new(wire::OP_RESULT_ACK, 0, id.to_be_bytes().to_vec())).await;
+                        Ok(text)
+                    } else { bail!("{}", result_text(st)) }
                 }
+                Ok(Some(f)) if f.kind == wire::ERROR => Err(server_error(&f)),
+                _ if self.session_lost() => Err(SessionLost.into()),
                 _ => bail!("no answer to the step-up proof"),
             }
         }
@@ -927,6 +1026,7 @@ fn result_text(status: u8) -> &'static str {
     match status {
         crate::stepup::R_LOCKED => "step-up locked",
         crate::stepup::R_EXPIRED => "step-up expired",
+        crate::stepup::R_UNKNOWN => "operation result is UNKNOWN",
         _ => "step-up denied",
     }
 }

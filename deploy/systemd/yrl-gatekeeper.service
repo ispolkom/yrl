@@ -1,12 +1,14 @@
 [Unit]
 Description=YRL gatekeeper (the only part that talks to the network)
 After=yrl-audit.service yrl-executor.service yrl-firewall.service
-Requires=yrl-audit.service yrl-executor.service yrl-firewall.service
+Wants=yrl-audit.service yrl-executor.service yrl-firewall.service
 StartLimitIntervalSec=60s
 StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
 User=yrl-gate
 Group=yrl-gate
 SupplementaryGroups=yrl-conf yrl-to-audit yrl-to-exec yrl-to-fw

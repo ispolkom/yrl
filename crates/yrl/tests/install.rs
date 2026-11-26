@@ -236,10 +236,10 @@ fn i5_the_unit_files_agree_with_the_table() {
     assert!(unit("yrl-executor.service").contains("--gate-uid yrl-gate --gate-exe -"));
     assert!(unit("yrl-firewall.service").contains("--gate-uid yrl-gate --gate-exe -"));
     assert!(unit("yrl-broker.service").contains("--exec-uid root --exec-exe -"));
-    // the gatekeeper does not start without the parts it asks things of
+    // Ordering is retained, but a component restart must not cascade-stop live Executor sessions.
     let g = unit("yrl-gatekeeper.service");
     for part in ["yrl-audit", "yrl-executor", "yrl-firewall"] {
-        assert!(val(&g, "Requires").iter().any(|r| r.contains(&format!("{part}.service"))), "{part}");
+        assert!(val(&g, "Wants").iter().any(|r| r.contains(&format!("{part}.service"))), "{part}");
     }
 }
 
@@ -250,6 +250,9 @@ fn i5b_services_have_global_budgets_and_restart_storm_protection() {
         assert_eq!(val(&text, "StartLimitIntervalSec"), vec!["60s"], "{file}: restart window");
         assert_eq!(val(&text, "StartLimitBurst"), vec!["5"], "{file}: restart burst");
         assert_eq!(val(&text, "Restart"), vec!["on-failure"], "{file}");
+        assert_eq!(val(&text, "Type"), vec!["notify"], "{file}: readiness is explicit");
+        assert_eq!(val(&text, "NotifyAccess"), vec!["main"], "{file}");
+        assert_eq!(val(&text, "WatchdogSec"), vec!["30s"], "{file}: hung event loop is restarted");
         assert!(!val(&text, "MemoryHigh").is_empty(), "{file}: soft memory budget");
         assert!(!val(&text, "MemoryMax").is_empty(), "{file}: hard memory budget");
         assert!(!val(&text, "TasksMax").is_empty(), "{file}: process budget");

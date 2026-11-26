@@ -31,7 +31,11 @@ impl Drop for ProcessGroup {
     fn drop(&mut self) { self.kill(); }
 }
 
-pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) {
+pub struct Outcome { pub started: bool, pub code: i32, pub error: Option<(u16, &'static str)> }
+
+/// Cancellation aborts the future, allowing the caller's journal guard to become UNKNOWN. The
+/// terminal frame is deliberately returned to Executor: it persists the result before sending it.
+pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>, cgroup: Option<crate::cgroup::Attachment>) -> Outcome {
     let id = req.request_id;
     let err = |code: u16, text: &str| {
         let mut p = code.to_be_bytes().to_vec();
@@ -54,8 +58,7 @@ pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>, cgroup: 
         Ok(c) => c,
         Err(e) => {
             let text = if cgroup.is_some() { crate::cgroup::SessionCgroup::spawn_error(&e) } else { "cannot start the program" };
-            let _ = tx.send(err(2, text)).await;
-            return;
+            return Outcome { started: false, code: -1, error: Some((2, text)) };
         }
     };
     let mut group = ProcessGroup::new(child.id());
@@ -118,7 +121,7 @@ pub async fn run(req: ExecReq, target: Target, tx: mpsc::Sender<Frame>, cgroup: 
     if cgroup_before.zip(cgroup.as_ref().map(|cg| cg.events())).is_some_and(|(before, after)| after.oom_kill > before.oom_kill) {
         let _ = tx.send(err(7, "session memory limit exceeded")).await;
     }
-    let _ = tx.send(Frame::new(wire::EXIT, 0, with_id(id, &code.to_be_bytes()))).await;
+    Outcome { started: true, code, error: None }
 }
 
 /// the same for every program a session starts: a small known environment, the user's home, and the switch to the user's identity (from root only)
