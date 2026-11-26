@@ -27,6 +27,8 @@ pub const AUDIT_ACK: u8 = 91;
 pub const AUDIT_REJECT: u8 = 92;
 pub const AUDIT_ANCHOR_REQUEST: u8 = 93;
 pub const AUDIT_ANCHOR_RESPONSE: u8 = 94;
+pub const AUDIT_EXPORT_SIGN_REQUEST: u8 = 95;
+pub const AUDIT_EXPORT_SIGN_RESPONSE: u8 = 96;
 
 struct J {
     path: PathBuf,
@@ -198,6 +200,18 @@ impl AuditService {
             points: [point(Journal::Ordinary), point(Journal::Security)],
         };
         Ok(anchor.encode(&self.key))
+    }
+
+    pub fn sign_export(&self, digest: &[u8; 32]) -> Result<Vec<u8>> {
+        use ed25519_dalek::Signer;
+        let anchor = self.trust_anchor()?;
+        let mut message = b"yrl-audit-export-v1".to_vec();
+        message.extend_from_slice(digest);
+        message.extend_from_slice(blake3::hash(&anchor).as_bytes());
+        let mut out = (anchor.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(&anchor);
+        out.extend_from_slice(&self.key.sign(&message).to_bytes());
+        Ok(out)
     }
 
     /// writes one event; returns its number. Errors are real: the caller decides what that means for what it was about to do.
@@ -656,6 +670,27 @@ async fn handle(
                 break;
             }
             continue;
+        } else if f.kind == AUDIT_EXPORT_SIGN_REQUEST
+            && f.payload.len() == 32
+            && src == Source::Owner
+        {
+            let digest: [u8; 32] = f.payload.as_slice().try_into().unwrap();
+            let svc = svc.clone();
+            let signed = tokio::task::spawn_blocking(move || svc.sign_export(&digest))
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Audit export-sign task failed")));
+            let out = match signed {
+                Ok(v) => Frame::new(AUDIT_EXPORT_SIGN_RESPONSE, 0, v),
+                Err(_) => Frame::new(AUDIT_REJECT, 0, vec![]),
+            };
+            let Ok(m) = sec.seal(&out) else { break };
+            if !matches!(
+                tokio::time::timeout(IPC_WRITE_TIMEOUT, write_msg(&mut wr, &m)).await,
+                Ok(Ok(()))
+            ) {
+                break;
+            }
+            continue;
         } else if f.kind != AUDIT_EVENT {
             break;
         }
@@ -836,6 +871,42 @@ impl AuditClient {
             let f = sec.open(&tokio::time::timeout(self.timeout, read_msg(rd)).await??)?;
             if f.kind != AUDIT_ANCHOR_RESPONSE {
                 bail!("the Audit service refused the checkpoint request");
+            }
+            Ok(f.payload)
+        }
+        .await;
+        if result.is_err() {
+            *g = None;
+        }
+        result
+    }
+
+    pub async fn sign_export_digest(&self, digest: [u8; 32]) -> Result<Vec<u8>> {
+        let mut g = self.critical_conn.lock().await;
+        if g.is_none() {
+            let mut s =
+                tokio::time::timeout(self.timeout, UnixStream::connect(&self.socket)).await??;
+            let sec = tokio::time::timeout(
+                self.timeout,
+                client_handshake(&mut s, &self.key, &self.audit_public, REKEY_EVERY),
+            )
+            .await??;
+            let (r, w) = s.into_split();
+            *g = Some((sec, r, w));
+        }
+        let (sec, rd, wr) = g.as_mut().unwrap();
+        let result: Result<Vec<u8>> = async {
+            tokio::time::timeout(
+                self.timeout,
+                write_msg(
+                    wr,
+                    &sec.seal(&Frame::new(AUDIT_EXPORT_SIGN_REQUEST, 0, digest.to_vec()))?,
+                ),
+            )
+            .await??;
+            let f = sec.open(&tokio::time::timeout(self.timeout, read_msg(rd)).await??)?;
+            if f.kind != AUDIT_EXPORT_SIGN_RESPONSE {
+                bail!("the Audit service refused export signing");
             }
             Ok(f.payload)
         }
