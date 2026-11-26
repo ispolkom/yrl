@@ -6,11 +6,13 @@ use anyhow::{bail, Result};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mechanism {
     OpaqueRfc9807,
+    HybridEd25519MlDsa65,
 }
 
 /// A feature flag never makes an unavailable security mechanism usable.
 pub fn require(mechanism: Mechanism) -> Result<()> {
     match mechanism {
         Mechanism::OpaqueRfc9807 => bail!("OPAQUE RFC 9807 backend is unavailable"),
+        Mechanism::HybridEd25519MlDsa65 => bail!("hybrid Ed25519 + ML-DSA-65 backend is unavailable"),
     }
 }

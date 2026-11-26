@@ -49,6 +49,7 @@ default = []
 crypto-profiles = []
 pq-hybrid = ["crypto-profiles"]
 opaque-rfc9807 = []
+hybrid-signatures = []
 
 [dev-dependencies]
 tempfile = "3"

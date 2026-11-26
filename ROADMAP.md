@@ -37,6 +37,12 @@ Blocked at the reviewed-backend/integration boundary. RFC 9807 is final, but ups
 
 The compile-only `opaque-rfc9807` feature does not activate authentication: the support gate always returns an explicit unavailable error. There is no fallback from requested OPAQUE to Argon2. `docs/CRYPTOGRAPHY.md` records migration and lifecycle requirements and separately assesses Broker ROOT step-up. Current key+Argon2 authentication is unchanged; OPAQUE security is not claimed.
 
+### Substage 7.4: hybrid post-quantum signatures
+
+Blocked at the mandatory cross-contour composition boundary. FIPS 204 is final and RustCrypto offers ML-DSA-65, but its current 0.1 implementation has no published independent audit suitable for YRL trust roots. YRL also lacks a reviewed canonical hybrid envelope and a standardized way to bind Ed25519 + ML-DSA authentication into the existing Noise IK handshake. Concatenating signatures locally would be project-specific protocol design.
+
+The compile-only `hybrid-signatures` feature activates nothing; the support gate fails closed. No production or test owner key is generated, and existing Ed25519 history remains explicitly classical. `docs/CRYPTOGRAPHY.md` records the required both-signatures policy, purpose/key/generation binding, migration across identity/Audit/release/recovery contours and unblock conditions. No PQ authentication is claimed.
+
 ## Current Stage 5: Failure and overload resilience
 
 The initial Stage 5 investigation traced both the 5.9 MiB/s throughput regression and a missing final upload confirmation to one cause: Stage 4 wrapped every encoded Noise plaintext frame in `Zeroizing`, so an unoptimized build performed a costly volatile wipe for every 60 KiB bulk frame. Link already retains the same bulk payload until its authoritative ACK, so wiping that additional encoded copy did not shorten the payload's lifetime. Restricting this extra wipe to the LOGIN frame restored 70 MiB/s upload and 62 MiB/s download on the same host; Noise authentication, rekeying, pinned identities, ACK/SEQ and bounded Link retention are unchanged.

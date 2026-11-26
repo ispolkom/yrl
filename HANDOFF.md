@@ -67,6 +67,12 @@ RFC 9807 is final, but the current upstream Rust implementation line has not pub
 
 `opaque-rfc9807` is compile-only and `crypto_support::require(OpaqueRfc9807)` deliberately fails closed. Existing Argon2 records are neither silently migrated nor used as fallback after an OPAQUE request. Broker ROOT step-up would require separate Broker-owned OPAQUE secrets and operation-bound context; it cannot reuse Executor login state. Exact unblock conditions and security limits are in `docs/CRYPTOGRAPHY.md`.
 
+## Stage 7.4 hybrid-signature blocker
+
+FIPS 204 is final, but the RustCrypto ML-DSA implementation is an early 0.1 line without a published independent audit for these trust roots. More importantly, YRL has not adopted a reviewed canonical envelope that requires and binds both Ed25519 and ML-DSA-65 across identities, Noise authentication, Audit, releases, key transitions and recovery. Noise IK authenticates static DH keys and cannot be made hybrid merely by attaching an application signature.
+
+`hybrid-signatures` is compile-only and the support gate always fails closed. No key or dependency was added and no PQ authentication is claimed. Classical historical signatures remain identifiable and verifiable under their existing profiles. See `docs/CRYPTOGRAPHY.md` for envelope, migration, revocation, vector, size-limit and review requirements.
+
 Stage 0 guarantees apply only while the Executor's server session remains alive. After a server-process restart or session-grace expiry, RESUME cannot recover it. Link retransmits stored logical frames after a fresh Noise handshake, so connection-local nonces are not reused. Confirmed frames are not re-executed, and control/interactive traffic has priority over unsent bulk file data within the bounded Link window. Stage 2 rechecks authority during a live session and before RESUME. Stages 3 and 4 must preserve these properties.
 
 ## Stage 4 operating model

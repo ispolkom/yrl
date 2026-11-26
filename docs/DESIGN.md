@@ -119,3 +119,5 @@ Stage 7 additions are opt-in build features until Stage 8 acceptance. A failed h
 The 7.2 assessment does not treat availability of the FIPS 203 primitive as a complete transport protocol. X-Wing draft 11 and Noise revision 34 do not currently define a stable reviewed hybrid Noise IK construction, so YRL reserves an ID but refuses it. This preserves the existing independent Gatekeeper/Executor contours without introducing an unaudited KEM-to-Noise key schedule.
 
 OPAQUE will require an Executor-owned multi-message protocol and independent Broker-owned step-up protocol, not a replacement hash inside LOGIN. Until the exact RFC implementation and integration are reviewed, the feature gate is intentionally unavailable and cannot fall back to legacy authentication after selection.
+
+Hybrid signatures require one common canonical envelope and lifecycle across identity, Audit, releases and recovery. Partial contour upgrades are not labeled hybrid, and asymmetric signatures remain handshake-time/control-plane operations rather than per-frame work.

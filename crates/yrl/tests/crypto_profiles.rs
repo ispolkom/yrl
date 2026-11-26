@@ -83,6 +83,14 @@ fn unavailable_opaque_backend_fails_closed_even_when_compiled() {
 }
 
 #[test]
+fn unavailable_hybrid_signature_backend_fails_closed() {
+    assert!(yrl::crypto_support::require(
+        yrl::crypto_support::Mechanism::HybridEd25519MlDsa65
+    )
+    .is_err());
+}
+
+#[test]
 fn peer_high_water_mark_is_private_persistent_and_monotonic() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state").join("profiles");
