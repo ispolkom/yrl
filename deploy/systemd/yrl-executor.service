@@ -18,7 +18,7 @@ Environment=YRL_RUN=/run/yrl
 Environment=YRL_SOCKET_GROUP=yrl-to-exec
 Environment=YRL_SESSION_CGROUPS=required
 EnvironmentFile=-/etc/yrl/yrl.env
-ExecStart=/usr/local/bin/yrld executor /var/lib/yrl --gate-uid yrl-gate --gate-exe -
+ExecStart=/opt/yrl/current/yrld executor /var/lib/yrl --gate-uid yrl-gate --gate-exe -
 Restart=on-failure
 RestartSec=2
 OOMPolicy=continue

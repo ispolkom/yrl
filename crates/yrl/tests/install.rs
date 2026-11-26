@@ -203,7 +203,7 @@ fn i5_the_unit_files_agree_with_the_table() {
         assert!(val(&t, "Environment").contains(&"YRL_RUN=/run/yrl".to_string()), "{file}");
         let exec = val(&t, "ExecStart");
         assert_eq!(exec.len(), 1);
-        assert!(exec[0].starts_with(&format!("/usr/local/bin/yrld {prog} /var/lib/yrl")), "{file}: {}", exec[0]);
+        assert!(exec[0].starts_with(&format!("/opt/yrl/current/yrld {prog} /var/lib/yrl")), "{file}: {}", exec[0]);
         assert_eq!(val(&t, "NoNewPrivileges"), vec!["yes"], "{file}");
         assert_eq!(val(&t, "LimitCORE"), vec!["0"], "{file}: keys must not reach core dumps");
         assert_eq!(val(&t, "KillMode"), vec!["control-group"], "{file}: stop must include descendants");
@@ -241,6 +241,18 @@ fn i5_the_unit_files_agree_with_the_table() {
     for part in ["yrl-audit", "yrl-executor", "yrl-firewall"] {
         assert!(val(&g, "Wants").iter().any(|r| r.contains(&format!("{part}.service"))), "{part}");
     }
+}
+
+#[test]
+fn i6_update_service_is_manual_offline_and_narrowly_writable() {
+    let t = unit("yrl-update.service");
+    assert_eq!(val(&t, "Type"), vec!["oneshot"]);
+    assert!(val(&t, "ExecStart")[0].starts_with("/opt/yrl/current/yrl-update apply "));
+    assert!(val(&t, "RestrictAddressFamilies").contains(&"AF_UNIX".to_string()));
+    assert!(val(&t, "CapabilityBoundingSet").iter().all(|v| v.is_empty()));
+    let rw = words(val(&t, "ReadWritePaths"));
+    assert_eq!(rw, ["/opt/yrl".to_string(), "/var/lib/yrl-update".to_string()].into());
+    assert!(!t.contains("[Install]"), "the updater must not be enabled automatically");
 }
 
 #[test]

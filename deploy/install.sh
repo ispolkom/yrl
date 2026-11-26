@@ -1,17 +1,19 @@
 #!/bin/bash
 # YRL: install with separate system users. Run as root: sudo ./install.sh <command>
-#   prepare <path-to-yrld> prepare everything WITHOUT starting it (users, directories, permissions, units)
+#   prepare <artifact-directory> prepare everything WITHOUT starting it (users, directories, permissions, units)
 #   fix                    restore owners and permissions (after yrld authorize / passwd / word set), then verify
 #   check                  verify only
 #   status                 show service and firewall-rule status
-#   update <path-to-yrld>  install a new binary and restart every component
+#   update                 refused: use a verified bundle with yrl-update
 #   start | stop           start or stop every component
 #   remove [--purge]       remove units, rules, and service users; keep data and keys unless --purge is given
 set -euo pipefail
 
 STATE=/var/lib/yrl
 RUN=/run/yrl
-BIN=/usr/local/bin/yrld
+INSTALL=/opt/yrl
+BOOT_RELEASE="$INSTALL/releases/00000000000000000000/artifacts"
+BIN="$INSTALL/current/yrld"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [ "$(id -u)" = 0 ] || { echo "Run as root: sudo $0 $*"; exit 1; }
@@ -20,11 +22,11 @@ ask() { read -r -p "$1 [y/N] " a; [ "$a" = y ] || [ "$a" = Y ] || { echo "Stoppe
 
 case "${1:-}" in
 prepare)
-  SRC="${2:?provide the path to the built yrld binary}"
-  [ -x "$SRC" ] || { echo "$SRC was not found or is not executable"; exit 1; }
+  SRC="${2:?provide the directory containing the built YRL binaries}"
+  [ -x "$SRC/yrld" ] && [ -x "$SRC/yrl-update" ] || { echo "$SRC does not contain executable yrld and yrl-update binaries"; exit 1; }
   cat <<TXT
 The following changes will be made (nothing will be started):
-  1. copy the yrld binary to $BIN
+  1. install the bootstrap yrld as release 0 under $INSTALL
   2. create login-disabled system users yrl-gate, yrl-fw, yrl-audit, yrl-broker, and yrl-* groups
   3. create $STATE with service keys (yrld init)
   4. apply owners and permissions from the layout table (yrld install layout)
@@ -32,7 +34,11 @@ The following changes will be made (nothing will be started):
 Firewall rules and ports remain untouched until you start the services yourself.
 TXT
   ask "Continue?"
-  install -m 0755 -o root -g root "$SRC" "$BIN"
+  mkdir -p -m 0755 "$BOOT_RELEASE"
+  for name in yrl yrld yrl-relay yrl-audit yrl-release yrl-update; do
+    [ ! -e "$SRC/$name" ] || install -m 0755 -o root -g root "$SRC/$name" "$BOOT_RELEASE/$name"
+  done
+  if [ ! -e "$INSTALL/current" ]; then ln -s "releases/00000000000000000000/artifacts" "$INSTALL/current"; fi
   "$BIN" install accounts | sh
   if [ ! -e "$STATE/static.key" ]; then
     mkdir -p -m 700 "$STATE"
@@ -75,14 +81,8 @@ start)
   systemctl --no-pager --lines=0 status yrl-audit yrl-broker yrl-executor yrl-firewall yrl-gatekeeper || true
   ;;
 update)
-  SRC="${2:?provide the path to the built yrld binary}"
-  [ -x "$SRC" ] || { echo "$SRC was not found or is not executable"; exit 1; }
-  install -m 0755 -o root -g root "$SRC" "$BIN"
-  "$BIN" install layout "$STATE" "$RUN"
-  "$BIN" install check "$STATE" "$RUN" || { echo "Permissions do not match; services will not be restarted"; exit 1; }
-  for s in yrl-audit yrl-broker yrl-executor yrl-firewall yrl-gatekeeper; do systemctl restart $s; done
-  sleep 2
-  systemctl --no-pager --lines=0 status yrl-audit yrl-broker yrl-executor yrl-firewall yrl-gatekeeper | grep -E "●|Active" || true
+  echo "Unsigned in-place updates are disabled. Verify a complete signed bundle and use yrl-update as documented in docs/UPDATES.md." >&2
+  exit 1
   ;;
 stop)
   systemctl stop yrl.target yrl-gatekeeper yrl-firewall yrl-executor yrl-broker yrl-audit || true
@@ -97,7 +97,7 @@ remove)
   rm -rf "$RUN"
   if [ "${2:-}" = "--purge" ]; then
     ask "Delete ALL data and keys in $STATE, along with yrl-* users and groups?"
-    rm -rf "$STATE" /etc/yrl
+    rm -rf "$STATE" /etc/yrl /var/lib/yrl-update "$INSTALL"
     for u in yrl-gate yrl-fw yrl-audit yrl-broker; do userdel "$u" 2>/dev/null || true; done
     for g in yrl-conf yrl-to-audit yrl-to-exec yrl-to-broker yrl-to-fw; do groupdel "$g" 2>/dev/null || true; done
   fi

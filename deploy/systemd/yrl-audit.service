@@ -13,7 +13,7 @@ Group=yrl-audit
 SupplementaryGroups=yrl-to-audit
 Environment=YRL_RUN=/run/yrl
 Environment=YRL_SOCKET_GROUP=yrl-to-audit
-ExecStart=/usr/local/bin/yrld audit /var/lib/yrl
+ExecStart=/opt/yrl/current/yrld audit /var/lib/yrl
 Restart=on-failure
 RestartSec=2
 OOMPolicy=stop

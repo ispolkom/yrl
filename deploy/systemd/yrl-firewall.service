@@ -16,7 +16,7 @@ SupplementaryGroups=yrl-to-audit yrl-to-fw
 EnvironmentFile=/etc/yrl/yrl.env
 Environment=YRL_RUN=/run/yrl
 Environment=YRL_SOCKET_GROUP=yrl-to-fw
-ExecStart=/usr/local/bin/yrld firewall /var/lib/yrl --ports ${YRL_PORT} --gate-uid yrl-gate --gate-exe - --max-ttl 120
+ExecStart=/opt/yrl/current/yrld firewall /var/lib/yrl --ports ${YRL_PORT} --gate-uid yrl-gate --gate-exe - --max-ttl 120
 Restart=on-failure
 RestartSec=2
 OOMPolicy=stop

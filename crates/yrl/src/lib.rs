@@ -40,6 +40,7 @@ pub mod session;
 pub mod throttle;
 pub mod tunnel;
 pub mod udp;
+pub mod update;
 pub mod tunwire;
 pub mod watchdog;
 pub mod users;

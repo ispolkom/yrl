@@ -28,6 +28,10 @@ path = "src/bin/yrl_audit.rs"
 name = "yrl-release"
 path = "src/bin/yrl_release.rs"
 
+[[bin]]
+name = "yrl-update"
+path = "src/bin/yrl_update.rs"
+
 [dependencies]
 snow = "0.9"
 tokio = { version = "1.40", features = ["full"] }

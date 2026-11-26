@@ -55,7 +55,7 @@ impl Source {
             Source::Gatekeeper => matches!(op, "enroll_guest" | "audit_degraded" | "spa_ok" | "spa_rejected" | "spa_error"),
             Source::Executor => matches!(op, "login" | "resume" | "session_open" | "session_close" | "exec" | "pty" | "file" | "fs" | "tunnel" | "denied" | "stepup_sudo" | "peer_refused" | "replay" | "lockout_tamper" | "audit_degraded"),
             Source::Broker => matches!(op, "stepup_root" | "broker_op" | "peer_refused" | "replay" | "lockout_tamper" | "global_root_off" | "audit_degraded"),
-            Source::Owner => matches!(op, "unlock" | "enroll_open" | "enroll_decision" | "word_set" | "init" | "audit_degraded"),
+            Source::Owner => matches!(op, "unlock" | "enroll_open" | "enroll_decision" | "word_set" | "init" | "audit_degraded" | "update_prepare" | "update_activate" | "update_rollback" | "update_failed"),
             Source::Firewall => matches!(op, "firewall_open" | "firewall_close" | "firewall_refused" | "firewall_reset" | "peer_refused" | "audit_degraded"),
             Source::Audit => matches!(op, "checkpoint" | "start" | "audit_degraded" | "repair"),
         }
@@ -74,7 +74,7 @@ pub enum Journal {
 impl Journal {
     pub fn of(op: &str) -> Journal {
         match op {
-            "peer_refused" | "lockout_tamper" | "unlock" | "enroll_open" | "enroll_decision" | "enroll_guest" | "word_set" | "global_root_off" | "replay" | "audit_degraded" | "repair" | "init" | "start" | "spa_ok" | "spa_rejected" | "spa_error" | "firewall_open" | "firewall_close" | "firewall_refused" | "firewall_reset" => Journal::Security,
+            "peer_refused" | "lockout_tamper" | "unlock" | "enroll_open" | "enroll_decision" | "enroll_guest" | "word_set" | "global_root_off" | "replay" | "audit_degraded" | "repair" | "init" | "start" | "spa_ok" | "spa_rejected" | "spa_error" | "firewall_open" | "firewall_close" | "firewall_refused" | "firewall_reset" | "update_prepare" | "update_activate" | "update_rollback" | "update_failed" => Journal::Security,
             _ => Journal::Ordinary,
         }
     }

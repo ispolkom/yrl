@@ -14,7 +14,7 @@ Group=yrl-gate
 SupplementaryGroups=yrl-conf yrl-to-audit yrl-to-exec yrl-to-fw
 EnvironmentFile=/etc/yrl/yrl.env
 Environment=YRL_RUN=/run/yrl
-ExecStart=/usr/local/bin/yrld gatekeeper /var/lib/yrl ${YRL_BIND} --spa ${YRL_SPA} --work-port ${YRL_PORT} --knock-ttl ${YRL_KNOCK_TTL}
+ExecStart=/opt/yrl/current/yrld gatekeeper /var/lib/yrl ${YRL_BIND} --spa ${YRL_SPA} --work-port ${YRL_PORT} --knock-ttl ${YRL_KNOCK_TTL}
 Restart=on-failure
 RestartSec=2
 OOMPolicy=stop

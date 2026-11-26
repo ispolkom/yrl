@@ -350,6 +350,7 @@ pub struct Manifest {
     pub arch: String,
     pub data_min: u32,
     pub data_max: u32,
+    pub data_target: u32,
     pub created: u64,
     pub expires: u64,
     pub delegation: u64,
@@ -358,13 +359,14 @@ pub struct Manifest {
 impl Manifest {
     pub fn encode(&self) -> Vec<u8> {
         let mut s = format!(
-            "{MANIFEST_MAGIC} {} {} {} {} {} {} {} {} {} {}\n",
+            "{MANIFEST_MAGIC} {} {} {} {} {} {} {} {} {} {} {}\n",
             self.number,
             self.version,
             self.platform,
             self.arch,
             self.data_min,
             self.data_max,
+            self.data_target,
             self.created,
             self.expires,
             self.delegation,
@@ -383,10 +385,10 @@ impl Manifest {
             .context("empty release manifest")?
             .split_whitespace()
             .collect();
-        if h.len() != 11 || h[0] != MANIFEST_MAGIC {
+        if h.len() != 12 || h[0] != MANIFEST_MAGIC {
             bail!("invalid release manifest header");
         }
-        let count: usize = h[10].parse()?;
+        let count: usize = h[11].parse()?;
         let mut files = Vec::new();
         for line in lines {
             let f: Vec<_> = line.split_whitespace().collect();
@@ -413,9 +415,10 @@ impl Manifest {
             arch: h[4].into(),
             data_min: h[5].parse()?,
             data_max: h[6].parse()?,
-            created: h[7].parse()?,
-            expires: h[8].parse()?,
-            delegation: h[9].parse()?,
+            data_target: h[7].parse()?,
+            created: h[8].parse()?,
+            expires: h[9].parse()?,
+            delegation: h[10].parse()?,
             files,
         })
     }
@@ -441,12 +444,18 @@ pub fn create_manifest(
     arch: &str,
     data_min: u32,
     data_max: u32,
+    data_target: u32,
     created: u64,
     expires: u64,
     delegation: u64,
     output: &Path,
 ) -> Result<()> {
-    if number == 0 || expires <= created || data_max < data_min {
+    if number == 0
+        || expires <= created
+        || data_max < data_min
+        || data_target < data_min
+        || data_target > data_max
+    {
         bail!("invalid release metadata bounds");
     }
     for v in [version, platform, arch] {
@@ -485,6 +494,7 @@ pub fn create_manifest(
             arch: arch.into(),
             data_min,
             data_max,
+            data_target,
             created,
             expires,
             delegation,

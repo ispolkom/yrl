@@ -16,13 +16,15 @@ The doors between components are sockets under `/run/yrl/<door>/`, each with its
 
 ## Steps
 
-1. Build the program: `cargo build --release -p yrl`; the result is `target/release/yrld`.
-2. Prepare it: `sudo ./deploy/install.sh prepare /path/to/yrld`. The script first prints what it will do and asks for `y`.
+1. Build the bootstrap binaries: `cargo build --release --locked -p yrl --bins`.
+2. Prepare them: `sudo ./deploy/install.sh prepare target/release`. The script first prints what it will do and asks for `y`. This locally built release 0 is the bootstrap trust boundary; subsequent updates must use the signed-release workflow in `docs/RELEASES.md` and `docs/UPDATES.md`.
 3. Add your device and account.
 4. Run `sudo ./deploy/install.sh fix` to restore the intended owners and permissions after those commands.
 5. Run `sudo ./deploy/install.sh start`, then `sudo ./deploy/install.sh status`.
 
 Remove the installation with `sudo ./deploy/install.sh remove` (data and keys remain) or `remove --purge`.
+
+Unsigned `install.sh update` replacement is disabled. After bootstrap, install `/etc/yrl/release-trust` from an independently authenticated root, copy `deploy/update.env.example` to root-owned `/etc/yrl/update.env`, set its local offline bundle path, and follow `docs/UPDATES.md`. No update service is enabled automatically.
 
 ## Verified on a real machine (2026-10-05, systemd, separate users)
 

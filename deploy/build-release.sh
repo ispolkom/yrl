@@ -5,7 +5,7 @@ out=$1
 test ! -e "$out"
 mkdir -m 0700 "$out"
 cargo build --release --locked -p yrl --bins
-for name in yrl yrld yrl-relay yrl-audit yrl-release; do
+for name in yrl yrld yrl-relay yrl-audit yrl-release yrl-update; do
     install -m 0755 "target/release/$name" "$out/$name"
 done
 {

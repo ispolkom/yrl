@@ -14,7 +14,7 @@ Group=yrl-broker
 SupplementaryGroups=yrl-to-audit yrl-to-broker
 Environment=YRL_RUN=/run/yrl
 Environment=YRL_SOCKET_GROUP=yrl-to-broker
-ExecStart=/usr/local/bin/yrld broker /var/lib/yrl --exec-uid root --exec-exe -
+ExecStart=/opt/yrl/current/yrld broker /var/lib/yrl --exec-uid root --exec-exe -
 Restart=on-failure
 RestartSec=2
 OOMPolicy=stop

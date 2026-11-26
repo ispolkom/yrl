@@ -36,7 +36,7 @@ fn r65_signed_release_binds_the_complete_component_set_and_delegation() {
         .unwrap();
     let manifest = d.path().join("manifest");
     yrl::release::create_manifest(
-        &artifacts, 42, "1.2.3", "linux", "x86_64", 1, 1, 200, 900, 7, &manifest,
+        &artifacts, 42, "1.2.3", "linux", "x86_64", 1, 1, 1, 200, 900, 7, &manifest,
     )
     .unwrap();
     let signature = d.path().join("manifest.sig");

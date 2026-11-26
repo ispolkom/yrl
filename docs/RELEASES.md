@@ -23,7 +23,7 @@ yrl-release delegate release-trust root.key delegated.pub 1 VALID_FROM VALID_UNT
 Create one manifest for the entire directory and sign it with the delegated key:
 
 ```text
-yrl-release manifest artifacts RELEASE VERSION linux x86_64 DATA_MIN DATA_MAX CREATED EXPIRES DELEGATION_GENERATION manifest.txt
+yrl-release manifest artifacts RELEASE VERSION linux x86_64 DATA_MIN DATA_MAX DATA_TARGET CREATED EXPIRES DELEGATION_GENERATION manifest.txt
 yrl-release sign manifest.txt delegation.txt delegated.key manifest.sig release-trust
 yrl-release verify artifacts manifest.txt manifest.sig delegation.txt release-trust NOW
 ```
