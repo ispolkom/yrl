@@ -1,6 +1,7 @@
 //! YRL v0.1 (docs/WIRE.md, docs/THREATS.md): a direct TCP connection protected by Noise IK, authorized keys, login + password, structured exec. No NAT, no relay: those come later.
 pub mod audit;
 pub mod auditlog;
+pub mod auditsegments;
 pub mod broker;
 pub mod client;
 pub mod client_tun;

@@ -12,6 +12,7 @@ This file distinguishes the **accepted implementation-stage sequence** from the 
 | **3. Component isolation** | Gatekeeper, Executor, Broker, Audit and Firewall have separate privileges and filesystem policies; seccomp covers all threads; user children join a per-session cgroup before execution and are killed with that session. | Implemented; deployment acceptance remains in `STAGE3_ACCEPTANCE.md`. |
 | **4. Key and secret lifecycle** | Protect role-private key files, clear secret buffers, support unattended services, offline encrypted recovery, safe Noise-key rotation, device revocation and protected migration. | Implemented in **`f69e4b7`**; deployment acceptance and the Audit journal-signing rollover limit are in `STAGE4_ACCEPTANCE.md`. |
 | **5. Failure and overload resilience** | Find and remove failure modes exposed by sustained load, repeated disconnects and bounded-resource operation without weakening authentication, cryptography or delivery guarantees. | In progress. The initial correction and substages 5.1–5.6 are implemented, including bounded admission, containment and explicit crash-recovery semantics. Final integration and deployment acceptance remain pending. |
+| **6. Trusted audit and software delivery** | Rotated and independently verifiable Audit history, signing-key lifecycle, signed releases and downgrade-safe updates. | In progress. Substage 6.1 rotation and bounded retention is implemented; later substages remain pending. |
 
 ## Current Stage 5: Failure and overload resilience
 
@@ -80,6 +81,14 @@ All five installed services now use `Type=notify` and a 30-second systemd watchd
 The comprehensive workspace run, installed-service checks, real nftables and recovery on another host are reserved for final acceptance. Do not lower performance requirements or extend operation deadlines to mask overload or liveness defects.
 
 Private Discovery is deferred and is not part of Stage 5. Multipath, route racing, NAT hole punching, UDP relay, GUI/desktop, other operating systems and YANDI NODE changes also remain outside this stage.
+
+## Current Stage 6: trusted audit and software delivery
+
+### Substage 6.1: Audit rotation and bounded retention
+
+Audit keeps the existing record/checkpoint format and rotates each active journal into monotonically numbered segments. A signed segment envelope binds the journal name, generation, start/end times, record count, final sequence/hash, complete file hash and previous signed segment digest. The old segment is checkpointed before a crash-safe pending-seal/rename transaction; startup completes an interrupted transaction rather than creating a new chain. Active-state files are signed and published atomically.
+
+Rotation defaults to 64 MiB or 24 hours, with a 4 GiB Audit-directory ceiling, 64 retained segments and a 256 MiB free-space reserve. Environment overrides are validated. Retention never silently removes history: a signed deletion witness containing the removed generation and hashes is synced before an archive is unlinked, and at least two recent archives are retained. Unsafe links are refused. If rotation, pruning or the storage reserve cannot complete, the service marks the journal broken and rejects further events, preserving fail-closed behavior for mandatory records. Focused rotation, signed-boundary and deletion-witness tests are prepared but not run.
 
 ## Long-term product plan: original order retained
 
