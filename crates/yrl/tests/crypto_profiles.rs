@@ -75,6 +75,14 @@ fn reserved_pq_profile_is_never_advertised_or_accepted() {
 }
 
 #[test]
+fn unavailable_opaque_backend_fails_closed_even_when_compiled() {
+    assert!(yrl::crypto_support::require(
+        yrl::crypto_support::Mechanism::OpaqueRfc9807
+    )
+    .is_err());
+}
+
+#[test]
 fn peer_high_water_mark_is_private_persistent_and_monotonic() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state").join("profiles");

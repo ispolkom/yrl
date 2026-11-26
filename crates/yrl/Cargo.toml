@@ -48,6 +48,7 @@ zeroize = "1"
 default = []
 crypto-profiles = []
 pq-hybrid = ["crypto-profiles"]
+opaque-rfc9807 = []
 
 [dev-dependencies]
 tempfile = "3"

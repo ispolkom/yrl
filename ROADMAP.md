@@ -31,6 +31,12 @@ Blocked rather than implemented unsafely. FIPS 203 standardizes ML-KEM-768, but 
 
 Profile `0x00020001` is reserved but deliberately unknown to negotiation, including under the compile-only `pq-hybrid` feature. A negative regression test prevents accidental advertisement or acceptance. `docs/CRYPTOGRAPHY.md` records the exact standards, library assessment, threat boundary and unblock conditions. No PQ confidentiality or authentication is claimed, and the classical production profile is unchanged.
 
+### Substage 7.3: OPAQUE password authentication
+
+Blocked at the reviewed-backend/integration boundary. RFC 9807 is final, but upstream `opaque-ke` 5.x is pre-release and its cited independent audit covered a substantially older pre-RFC implementation. Treating that audit as assurance for the current RFC code would be misleading. The existing single LOGIN frame also cannot safely carry OPAQUE registration and KE1/KE2/KE3 without a reviewed state machine, fake-record enumeration defense and channel/identity binding.
+
+The compile-only `opaque-rfc9807` feature does not activate authentication: the support gate always returns an explicit unavailable error. There is no fallback from requested OPAQUE to Argon2. `docs/CRYPTOGRAPHY.md` records migration and lifecycle requirements and separately assesses Broker ROOT step-up. Current key+Argon2 authentication is unchanged; OPAQUE security is not claimed.
+
 ## Current Stage 5: Failure and overload resilience
 
 The initial Stage 5 investigation traced both the 5.9 MiB/s throughput regression and a missing final upload confirmation to one cause: Stage 4 wrapped every encoded Noise plaintext frame in `Zeroizing`, so an unoptimized build performed a costly volatile wipe for every 60 KiB bulk frame. Link already retains the same bulk payload until its authoritative ACK, so wiping that additional encoded copy did not shorten the payload's lifetime. Restricting this extra wipe to the LOGIN frame restored 70 MiB/s upload and 62 MiB/s download on the same host; Noise authentication, rekeying, pinned identities, ACK/SEQ and bounded Link retention are unchanged.

@@ -117,3 +117,5 @@ Cryptographic agility is represented by complete, versioned profiles rather than
 Stage 7 additions are opt-in build features until Stage 8 acceptance. A failed handshake never causes an automatic weaker retry. New post-quantum, password, hardware-token and TPM profiles may be registered only when their standardized construction and maintained library satisfy the documented threat model; reserved or proposed algorithms are not advertised as supported.
 
 The 7.2 assessment does not treat availability of the FIPS 203 primitive as a complete transport protocol. X-Wing draft 11 and Noise revision 34 do not currently define a stable reviewed hybrid Noise IK construction, so YRL reserves an ID but refuses it. This preserves the existing independent Gatekeeper/Executor contours without introducing an unaudited KEM-to-Noise key schedule.
+
+OPAQUE will require an Executor-owned multi-message protocol and independent Broker-owned step-up protocol, not a replacement hash inside LOGIN. Until the exact RFC implementation and integration are reviewed, the feature gate is intentionally unavailable and cannot fall back to legacy authentication after selection.

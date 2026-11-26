@@ -1,0 +1,16 @@
+//! Compile-time visibility for Stage 7 mechanisms that must remain fail-closed
+//! until their reviewed backend and protocol integration are available.
+
+use anyhow::{bail, Result};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mechanism {
+    OpaqueRfc9807,
+}
+
+/// A feature flag never makes an unavailable security mechanism usable.
+pub fn require(mechanism: Mechanism) -> Result<()> {
+    match mechanism {
+        Mechanism::OpaqueRfc9807 => bail!("OPAQUE RFC 9807 backend is unavailable"),
+    }
+}

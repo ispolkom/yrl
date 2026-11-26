@@ -61,6 +61,12 @@ FIPS 203 provides ML-KEM-768, but not its composition with YRL's authenticated N
 
 Reserved profile `0x00020001` remains rejected even when `pq-hybrid` is compiled. No ML-KEM dependency was added and no PQ guarantee is claimed. The compile-only feature and negative test make accidental activation fail closed. See `docs/CRYPTOGRAPHY.md` for candidate dependency provenance, exact unblock conditions, required vectors/resource tests and the distinction between PQ confidentiality and the still-classical authentication required before 7.4.
 
+## Stage 7.3 OPAQUE blocker
+
+RFC 9807 is final, but the current upstream Rust implementation line has not published an independent audit covering its final-RFC code; the referenced 2021 audit covered 0.5.0. Integrating OPAQUE additionally requires a new bounded registration/KE1/KE2/KE3 state machine, unknown-user fake records, inner-Noise channel/role/device/account binding and crash-safe record/server-secret lifecycle. Those guarantees cannot be supplied by adding the primitive dependency alone.
+
+`opaque-rfc9807` is compile-only and `crypto_support::require(OpaqueRfc9807)` deliberately fails closed. Existing Argon2 records are neither silently migrated nor used as fallback after an OPAQUE request. Broker ROOT step-up would require separate Broker-owned OPAQUE secrets and operation-bound context; it cannot reuse Executor login state. Exact unblock conditions and security limits are in `docs/CRYPTOGRAPHY.md`.
+
 Stage 0 guarantees apply only while the Executor's server session remains alive. After a server-process restart or session-grace expiry, RESUME cannot recover it. Link retransmits stored logical frames after a fresh Noise handshake, so connection-local nonces are not reused. Confirmed frames are not re-executed, and control/interactive traffic has priority over unsent bulk file data within the bounded Link window. Stage 2 rechecks authority during a live session and before RESUME. Stages 3 and 4 must preserve these properties.
 
 ## Stage 4 operating model
