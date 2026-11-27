@@ -26,6 +26,8 @@ Stage 8.5 focused key/Audit/release suite: 43 tests passed across `keylife`, `au
 
 Stage 8.6 available four-feature focused tests: 10 profile tests and 29 library tests passed; OPAQUE context and hybrid-signature AND unit checks included. Full enabled-profile workspace suites remain FAIL due raw handshake fixtures; FIDO2/TPM builds blocked by absent native libraries and swtpm. Source review still shows hybrid-signature helpers unused by claimed handshake/Audit/update paths (FAIL). Physical device/PCR/NV acceptance remains BLOCKED and no real TPM state was changed. 8.5 was published as `0cde962`. Continue with 8.7 measured performance, 8.8 isolated install, and feature integration defects.
 
+Stage 8.7 single debug-test-profile TCP loopback measurement: 64 MiB upload 67 MiB/s, download 63 MiB/s on i5-8500/Linux 6.1; child max RSS 124860 KiB, aggregate child CPU 3.201 s. UDP/Relay, EXEC/PTY latency, parallelism, overload, crypto cost, repeated breaks and release-profile measurements remain NOT RUN. 8.6 was published as `38413dd`. Continue with 8.8 isolated installation and final acceptance inventory.
+
 ## Architecture at the baseline
 
 ```text
