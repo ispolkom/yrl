@@ -4,9 +4,11 @@
 //! were accepted/running when the process died become UNKNOWN on open and are never run again.
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +94,11 @@ pub struct Journal {
     path: PathBuf,
     limits: Limits,
     records: Mutex<HashMap<RecordKey, Record>>,
+    // Once persistence becomes uncertain, no operation may be
+    // admitted or dispatched until the journal is reopened.
+    faulted: AtomicBool,
+    // Keep exclusive ownership for the lifetime of the journal.
+    _ownership: std::fs::File,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -110,6 +117,7 @@ pub struct Guard {
 
 impl Journal {
     pub fn open(path: PathBuf, limits: Limits) -> anyhow::Result<Self> {
+        let ownership = acquire_ownership(&path)?;
         let mut records = read(&path)?;
         let now = now();
         for r in records.values_mut() {
@@ -126,6 +134,8 @@ impl Journal {
             path,
             limits,
             records: Mutex::new(records),
+            faulted: AtomicBool::new(false),
+            _ownership: ownership,
         };
         journal.persist()?;
         Ok(journal)
@@ -145,6 +155,11 @@ impl Journal {
         let rk = (key.to_vec(), account.to_string(), id);
         let digest = *blake3::hash(payload).as_bytes();
         let mut records = self.records.lock().unwrap();
+
+        if self.faulted.load(Ordering::SeqCst) {
+            return Err(Refusal::State);
+        }
+
         if let Some(r) = records.get(&rk) {
             let status = Status {
                 id,
@@ -176,7 +191,14 @@ impl Journal {
             },
         );
         if persist(&self.path, &records).is_err() {
-            records.remove(&rk);
+            // Publication may already have happened. Never remove
+            // the replay record or continue admitting operations.
+            if let Some(r) = records.get_mut(&rk) {
+                r.state = State::Unknown;
+                r.result = None;
+            }
+            self.faulted.store(true, Ordering::SeqCst);
+            eprintln!("[yrld] operation journal faulted: admission persistence failed");
             return Err(Refusal::State);
         }
         Ok(Guard {
@@ -188,6 +210,11 @@ impl Journal {
 
     pub fn status(&self, key: &[u8], account: &str, id: u64) -> Option<Status> {
         let records = self.records.lock().unwrap();
+
+        if self.faulted.load(Ordering::SeqCst) {
+            return None;
+        }
+
         let r = records.get(&(key.to_vec(), account.to_string(), id))?;
         Some(Status {
             id,
@@ -200,18 +227,25 @@ impl Journal {
 
     fn set(&self, key: &RecordKey, state: State, result: Option<i32>) -> bool {
         let mut records = self.records.lock().unwrap();
+
+        if self.faulted.load(Ordering::SeqCst) {
+            return false;
+        }
+
         let Some(r) = records.get_mut(key) else {
             return false;
         };
-        let (old_state, old_updated, old_result) = (r.state, r.updated, r.result);
         r.state = state;
         r.updated = now();
         r.result = result;
         if persist(&self.path, &records).is_err() {
+            // The persistent state is uncertain. Do not claim
+            // rollback or attempt another state publication.
             let r = records.get_mut(key).unwrap();
-            r.state = old_state;
-            r.updated = old_updated;
-            r.result = old_result;
+            r.state = State::Unknown;
+            r.result = None;
+            self.faulted.store(true, Ordering::SeqCst);
+            eprintln!("[yrld] operation journal faulted: transition persistence failed");
             return false;
         }
         true
@@ -266,10 +300,70 @@ fn now() -> u64 {
         .as_secs()
 }
 
+fn journal_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn acquire_ownership(path: &Path) -> anyhow::Result<std::fs::File> {
+    std::fs::create_dir_all(journal_parent(path))?;
+
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(
+            libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
+        )
+        .open(PathBuf::from(name))?;
+
+    let meta = lock.metadata()?;
+
+    if !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.mode() & 0o077 != 0
+    {
+        anyhow::bail!("unsafe operation journal lock");
+    }
+
+    loop {
+        let rc = unsafe {
+            libc::flock(
+                lock.as_raw_fd(),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        };
+
+        if rc == 0 {
+            return Ok(lock);
+        }
+
+        let error = std::io::Error::last_os_error();
+
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            anyhow::bail!("operation journal already owned");
+        }
+
+        return Err(error.into());
+    }
+}
+
 fn read(path: &Path) -> anyhow::Result<HashMap<RecordKey, Record>> {
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(
+            libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
+        )
         .open(path)
     {
         Ok(f) => f,
@@ -323,41 +417,79 @@ fn read(path: &Path) -> anyhow::Result<HashMap<RecordKey, Record>> {
     Ok(records)
 }
 
-fn persist(path: &Path, records: &HashMap<RecordKey, Record>) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+fn persist(
+    path: &Path,
+    records: &HashMap<RecordKey, Record>,
+) -> anyhow::Result<()> {
+    let parent = journal_parent(path);
+    std::fs::create_dir_all(parent)?;
+
     let random = hex::encode(crate::keys::generate().public);
-    let tmp = path.with_extension(format!("tmp-{}-{random}", std::process::id()));
+    let tmp = path.with_extension(
+        format!("tmp-{}-{random}", std::process::id())
+    );
+
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&tmp)?;
-    let mut rows: Vec<_> = records.values().collect();
-    rows.sort_by(|a, b| (&a.key, &a.account, a.id).cmp(&(&b.key, &b.account, b.id)));
-    for r in rows {
-        writeln!(
-            f,
-            "{} {} {} {} {} {} {} {}",
-            hex::encode(&r.key),
-            hex::encode(r.account.as_bytes()),
-            r.id,
-            r.kind,
-            hex::encode(r.digest),
-            r.state as u8,
-            r.updated,
-            r.result
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "-".into())
-        )?;
+
+    let result = (|| -> anyhow::Result<()> {
+        let mut rows: Vec<_> = records.values().collect();
+
+        rows.sort_by(|a, b| {
+            (&a.key, &a.account, a.id)
+                .cmp(&(&b.key, &b.account, b.id))
+        });
+
+        for r in rows {
+            writeln!(
+                f,
+                "{} {} {} {} {} {} {} {}",
+                hex::encode(&r.key),
+                hex::encode(r.account.as_bytes()),
+                r.id,
+                r.kind,
+                hex::encode(r.digest),
+                r.state as u8,
+                r.updated,
+                r.result
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "-".into())
+            )?;
+        }
+
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        sync_directory(parent)?;
+        Ok(())
+    })();
+
+    // Only remove the temporary file created by this invocation.
+    // After a successful rename this path no longer exists.
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)?;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
+
+    result
+}
+
+// Fault injection exists only in the unit-test build.
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_DIRECTORY_SYNC.with(|flag| flag.replace(false)) {
+        return Err(std::io::Error::from_raw_os_error(libc::EIO));
     }
-    Ok(())
+
+    std::fs::File::open(path)?.sync_all()
 }
 
 pub fn encode_status(s: &Status) -> Vec<u8> {
@@ -398,6 +530,329 @@ pub fn decode_status(p: &[u8]) -> Option<Status> {
 mod tests {
     use super::*;
 
+    fn fail_next_directory_sync() {
+        FAIL_DIRECTORY_SYNC.with(|flag| flag.set(true));
+    }
+
+    fn test_journal(path: PathBuf) -> Arc<Journal> {
+        Arc::new(
+            Journal::open(path, Limits { max_records: 16 })
+                .unwrap()
+        )
+    }
+
+
+    #[test]
+    fn rev003_fault_blocks_all_further_admission() {
+        let d = tempfile::tempdir().unwrap();
+        let j = test_journal(d.path().join("operations"));
+
+        fail_next_directory_sync();
+
+        assert!(matches!(
+            j.accept(b"key", "account", 201, KIND_EXEC, b"cmd"),
+            Err(Refusal::State)
+        ));
+
+        // Even a different operation must not be admitted.
+        assert!(matches!(
+            j.accept(b"key", "account", 202, KIND_EXEC, b"next"),
+            Err(Refusal::State)
+        ));
+
+        // A fault must not expose an unconfirmed result.
+        assert!(j.status(b"key", "account", 201).is_none());
+
+        assert!(!j.acknowledge(b"key", "account", 201));
+    }
+
+    #[test]
+    fn rev003_fault_blocks_existing_guard_dispatch() {
+        let d = tempfile::tempdir().unwrap();
+        let j = test_journal(d.path().join("operations"));
+
+        let g = j.accept(
+            b"key", "account", 203, KIND_EXEC, b"cmd"
+        ).unwrap();
+
+        fail_next_directory_sync();
+
+        assert!(matches!(
+            j.accept(b"key", "account", 204, KIND_EXEC, b"other"),
+            Err(Refusal::State)
+        ));
+
+        assert!(!g.running());
+    }
+
+    #[test]
+    fn rev003_reopen_preserves_replay_protection() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("operations");
+
+        {
+            let j = test_journal(path.clone());
+
+            let g = j.accept(
+                b"key", "account", 205, KIND_EXEC, b"cmd"
+            ).unwrap();
+
+            fail_next_directory_sync();
+
+            assert!(!g.running());
+            drop(g);
+        }
+
+        let reopened = test_journal(path);
+
+        assert_eq!(
+            reopened.status(b"key", "account", 205)
+                .unwrap().state,
+            State::Unknown
+        );
+
+        assert!(matches!(
+            reopened.accept(
+                b"key", "account", 205, KIND_EXEC, b"cmd"
+            ),
+            Err(Refusal::Duplicate(_))
+        ));
+
+        // Successful recovery permits unrelated operations.
+        let g = reopened.accept(
+            b"key", "account", 206, KIND_EXEC, b"new"
+        ).unwrap();
+
+        assert!(g.running());
+        assert!(g.finish(State::Completed, Some(0)));
+    }
+
+
+    #[test]
+    fn rev003_exclusive_journal_ownership() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("operations");
+
+        let j = test_journal(path.clone());
+
+        let g = j.accept(
+            b"key", "account", 301, KIND_EXEC, b"cmd"
+        ).unwrap();
+
+        assert!(g.running());
+
+        assert!(
+            Journal::open(
+                path.clone(),
+                Limits { max_records: 16 },
+            ).is_err(),
+            "second journal owner was admitted"
+        );
+
+        assert!(g.finish(State::Completed, Some(0)));
+
+        drop(j);
+
+        let reopened = test_journal(path);
+
+        assert_eq!(
+            reopened.status(b"key", "account", 301)
+                .unwrap().state,
+            State::Completed
+        );
+
+        assert!(matches!(
+            reopened.accept(
+                b"key", "account", 301, KIND_EXEC, b"cmd"
+            ),
+            Err(Refusal::Duplicate(_))
+        ));
+    }
+
+    #[test]
+    fn rev003_guard_retains_journal_ownership() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("operations");
+
+        let j = test_journal(path.clone());
+
+        let g = j.accept(
+            b"key", "account", 302, KIND_EXEC, b"cmd"
+        ).unwrap();
+
+        drop(j);
+
+        assert!(
+            Journal::open(
+                path.clone(),
+                Limits { max_records: 16 },
+            ).is_err()
+        );
+
+        drop(g);
+
+        let reopened = test_journal(path);
+
+        assert_eq!(
+            reopened.status(b"key", "account", 302)
+                .unwrap().state,
+            State::Unknown
+        );
+    }
+
+    #[test]
+    fn rev003_refuses_symlink_lock() {
+        use std::os::unix::fs::symlink;
+
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("operations");
+        let victim = d.path().join("victim");
+
+        std::fs::write(&victim, b"unchanged").unwrap();
+
+        symlink(
+            &victim,
+            d.path().join("operations.lock"),
+        ).unwrap();
+
+        assert!(
+            Journal::open(
+                path.clone(),
+                Limits { max_records: 16 },
+            ).is_err()
+        );
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"unchanged"
+        );
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rev003_refuses_public_lock() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("operations");
+        let lock = d.path().join("operations.lock");
+
+        std::fs::write(&lock, b"").unwrap();
+
+        std::fs::set_permissions(
+            &lock,
+            std::fs::Permissions::from_mode(0o666),
+        ).unwrap();
+
+        assert!(
+            Journal::open(
+                path.clone(),
+                Limits { max_records: 16 },
+            ).is_err()
+        );
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rev003_failed_rename_removes_temporary_file() {
+        let d = tempfile::tempdir().unwrap();
+
+        let target = d.path().join("operations");
+
+        // A regular temporary file cannot replace a directory.
+        std::fs::create_dir(&target).unwrap();
+
+        let records = HashMap::new();
+
+        assert!(persist(&target, &records).is_err());
+        assert!(target.is_dir());
+
+        let entries: Vec<_> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("operations")],
+            "failed publication leaked a temporary file"
+        );
+    }
+
+    #[test]
+    fn rev003_accept_requires_durable_publication() {
+        let d = tempfile::tempdir().unwrap();
+        let j = test_journal(d.path().join("operations"));
+
+        fail_next_directory_sync();
+
+        assert!(
+            matches!(
+                j.accept(b"key", "account", 101, KIND_EXEC, b"cmd"),
+                Err(Refusal::State)
+            ),
+            "accepted an operation after directory sync failed"
+        );
+    }
+
+    #[test]
+    fn rev003_running_requires_durable_publication() {
+        let d = tempfile::tempdir().unwrap();
+        let j = test_journal(d.path().join("operations"));
+
+        let g = j.accept(
+            b"key", "account", 102, KIND_EXEC, b"cmd"
+        ).unwrap();
+
+        fail_next_directory_sync();
+
+        assert!(
+            !g.running(),
+            "allowed dispatch after directory sync failed"
+        );
+    }
+
+    #[test]
+    fn rev003_completion_requires_durable_publication() {
+        let d = tempfile::tempdir().unwrap();
+        let j = test_journal(d.path().join("operations"));
+
+        let g = j.accept(
+            b"key", "account", 103, KIND_EXEC, b"cmd"
+        ).unwrap();
+
+        assert!(g.running());
+
+        fail_next_directory_sync();
+
+        assert!(
+            !g.finish(State::Completed, Some(0)),
+            "reported completion after directory sync failed"
+        );
+    }
+
+    #[test]
+    fn rev003_ack_requires_durable_publication() {
+        let d = tempfile::tempdir().unwrap();
+        let j = test_journal(d.path().join("operations"));
+
+        let g = j.accept(
+            b"key", "account", 104, KIND_EXEC, b"cmd"
+        ).unwrap();
+
+        assert!(g.running());
+        assert!(g.finish(State::Completed, Some(0)));
+
+        fail_next_directory_sync();
+
+        assert!(
+            !j.acknowledge(b"key", "account", 104),
+            "acknowledged result after directory sync failed"
+        );
+    }
+
     #[test]
     fn accepted_and_running_become_unknown_after_crash_and_never_reexecute() {
         let d = tempfile::tempdir().unwrap();
@@ -407,8 +862,10 @@ mod tests {
             .accept(b"key", "account", 7, KIND_EXEC, b"command")
             .unwrap();
         assert!(g.running());
-        std::mem::forget(g);
-        drop(j); // process death: no RAII transition
+        let mut g = g;
+        g.done = true;
+        drop(g); // simulate death without a guard transition
+        drop(j); // release journal ownership
         let j = Arc::new(Journal::open(path, Limits { max_records: 4 }).unwrap());
         assert_eq!(
             j.status(b"key", "account", 7).unwrap().state,
