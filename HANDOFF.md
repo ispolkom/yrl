@@ -196,3 +196,7 @@ The current persistent data format is 1. Releases targeting another format fail 
 ## How to continue
 
 Continue Stage 8 acceptance sequentially, recording observed results in STAGE8_ACCEPTANCE.md. Keep Stage 7 features default-off. Do not touch YANDI NODE, Private Discovery, multipath or route racing.
+
+## Stage 8-R.3 follow-up
+
+The isolated feature runs now execute with correct Gatekeeper/Executor handshake contexts and real native libraries. All six individual suites and the initial combined suite passed within the exclusions in `STAGE8_ACCEPTANCE.md`. The parallel SPA fixture now sends a new knock on reconnect and passed twelve repetitions. TPM runtime exposed transient handle exhaustion and PCR read failures. The backend now releases handles after each operation and exercises PCR change rejection. The three ignored checks passed locally on swtpm and through `/dev/tpmrm0` on the Debian 12 lab server. Physical FIDO2/TPM, the full post-remediation suite and Stage 8-R.2 hybrid signature wiring remain open.

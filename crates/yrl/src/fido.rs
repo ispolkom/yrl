@@ -763,8 +763,8 @@ mod tests {
     #[test]
     fn assertion_requires_up_uv_rp_signature_and_counter() {
         use p256::ecdsa::signature::Signer as _;
-        let signing = p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-        let point = signing.verifying_key().to_encoded_point(false);
+        let signing = p256::ecdsa::SigningKey::random(&mut rand::rng());
+        let point = signing.verifying_key().to_sec1_point(false);
         let xy: [u8; 64] = point.as_bytes()[1..].try_into().unwrap();
         let policy = Policy {
             rp_id: "yrl.local".into(),

@@ -134,20 +134,24 @@ async fn g3_only_the_address_the_knock_came_from_is_let_in() {
     let sock = tokio::net::TcpSocket::new_v4().unwrap();
     sock.bind("127.0.0.2:0".parse().unwrap()).unwrap();
     let mut s = sock.connect(g.r.addr.parse().unwrap()).await.unwrap();
-    let res = yrl::session::client_handshake(&mut s, &g.r.client, &g.r.server_pub, yrl::session::REKEY_EVERY).await;
+    let res = yrl::session::client_handshake_context(&mut s, &g.r.client, &g.r.server_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await;
     assert!(res.is_err(), "another address on the same machine, with the right key, is still outside: a roaming device must knock again from where it is now");
 }
 
 #[tokio::test]
 async fn g4_a_permission_ends_but_a_session_that_is_running_does_not() {
     let g = gate_with(5, true, |_| {}).await;
-    knock(&g).await;
-    let c = try_connect(&g, &g.r.client).await.unwrap();
+    let c = Client::connect_opts(&g.r.addr, &g.r.client, &g.r.server_pub, ClientOptions {
+        executor_public: Some(g.r.exec_pub.clone()),
+        knock: Some(Knock { udp: g.spa.to_string(), settle: Duration::from_millis(150) }),
+        ..quick()
+    }).await.unwrap();
     c.login("anna", PW, T).await.unwrap();
     g.k.advance(6); // the kernel's timeout
     assert!(!g.k.allows_addr(lo(1)));
     assert!(try_connect(&g, &g.r.client).await.is_err(), "new connections are dropped again");
-    assert_eq!(c.exec(&[b"echo", b"still here"], 5000, W).await.unwrap().stdout, b"still here\n", "the established session lives on (the real ruleset accepts established connections)");
+    let result = c.exec(&[b"echo", b"still here"], 5000, W).await.unwrap_or_else(|e| panic!("established session failed: {e}; diagnostics: {:?}", c.connection_diagnostics()));
+    assert_eq!(result.stdout, b"still here\n", "the established session lives on (the real ruleset accepts established connections)");
 }
 
 #[tokio::test]

@@ -5,7 +5,7 @@ use tokio::net::{TcpListener, TcpStream};
 use yrl::client::Client;
 use yrl::keys;
 use yrl::server::{serve, ServerConfig};
-use yrl::session::{client_handshake, write_msg, REKEY_EVERY};
+use yrl::session::{client_handshake_context, write_msg, REKEY_EVERY};
 mod common;
 use common::*;
 use yrl::wire::{self, ExecReq, Frame};
@@ -46,7 +46,7 @@ async fn t2_unauthorized_client_gets_silence() {
     let r = rig("exec").await;
     let stranger = keys::generate();
     let mut s = TcpStream::connect(&r.addr).await.unwrap();
-    assert!(client_handshake(&mut s, &stranger, &r.server_pub, REKEY_EVERY).await.is_err());
+    assert!(client_handshake_context(&mut s, &stranger, &r.server_pub, REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.is_err());
     assert!(drain(s).await.is_empty(), "no byte may come back for an unknown key");
 }
 

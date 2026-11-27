@@ -34,12 +34,12 @@ async fn n1_outside_a_window_an_unknown_key_still_gets_silence() {
     let r = rig("exec").await;
     let stranger = keys::generate();
     let mut s = tokio::net::TcpStream::connect(&r.addr).await.unwrap();
-    assert!(yrl::session::client_handshake(&mut s, &stranger, &r.server_pub, yrl::session::REKEY_EVERY).await.is_err());
+    assert!(yrl::session::client_handshake_context(&mut s, &stranger, &r.server_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.is_err());
     // a window that ended is the same as none
     open_window(&r.server_dir(), 1, &rights(&["exec"])).unwrap();
     tokio::time::sleep(Duration::from_millis(2200)).await;
     let mut s = tokio::net::TcpStream::connect(&r.addr).await.unwrap();
-    assert!(yrl::session::client_handshake(&mut s, &stranger, &r.server_pub, yrl::session::REKEY_EVERY).await.is_err());
+    assert!(yrl::session::client_handshake_context(&mut s, &stranger, &r.server_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.is_err());
 }
 
 #[tokio::test]
@@ -72,7 +72,7 @@ async fn n3_a_guest_can_do_nothing_but_present_the_code() {
     let valid = encode_request(&code, "sneaky").unwrap();
     for f in [yrl::wire::Frame::new(yrl::wire::PING, 0, valid.clone()), yrl::wire::Frame::new(ENROLL_OK, 0, valid.clone()), yrl::wire::Frame::new(yrl::wire::LOGIN, 0, yrl::wire::encode_login(b"anna", PW).unwrap()), yrl::wire::Frame::new(yrl::wire::PING, 0, vec![]), yrl::wire::Frame::new(yrl::link::RESUME, 0, vec![0; 24]), yrl::wire::Frame::new(ENROLL_OK, 0, vec![]), yrl::wire::Frame::new(ENROLL, 0, vec![1, 2, 3])] {
         let mut s = tokio::net::TcpStream::connect(&r.addr).await.unwrap();
-        let sec = yrl::session::client_handshake(&mut s, &guest, &r.server_pub, yrl::session::REKEY_EVERY).await.expect("during the window the handshake completes");
+        let sec = yrl::session::client_handshake_context(&mut s, &guest, &r.server_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.expect("during the window the handshake completes");
         yrl::session::write_msg(&mut s, &sec.seal(&f).unwrap()).await.unwrap();
         let got = tokio::time::timeout(Duration::from_secs(3), yrl::session::read_msg(&mut s)).await.unwrap();
         assert!(got.is_err(), "kind {}: no answer, the connection is closed", f.kind);
@@ -94,7 +94,7 @@ async fn n4_three_wrong_codes_close_the_window_for_good() {
     // the window is closed now: even the right code on a new connection is turned away - in silence
     let k = keys::generate();
     let mut s = tokio::net::TcpStream::connect(&r.addr).await.unwrap();
-    assert!(yrl::session::client_handshake(&mut s, &k, &r.server_pub, yrl::session::REKEY_EVERY).await.is_err(), "silence again");
+    assert!(yrl::session::client_handshake_context(&mut s, &k, &r.server_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.is_err(), "silence again");
     assert!(read_window(&dir).is_none());
     let _ = code;
     assert_eq!(yrl::keys::read_authorized(&dir.join("authorized_keys")).len(), 1);
@@ -114,7 +114,7 @@ async fn n5_a_right_code_is_not_enough_the_owner_must_agree() {
     // an answer ends the window, yes or no: a second try needs the owner to open a new one
     let k2 = keys::generate();
     let mut sock = tokio::net::TcpStream::connect(&r.addr).await.unwrap();
-    assert!(yrl::session::client_handshake(&mut sock, &k2, &r.server_pub, yrl::session::REKEY_EVERY).await.is_err(), "silence again after the refusal");
+    assert!(yrl::session::client_handshake_context(&mut sock, &k2, &r.server_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.is_err(), "silence again after the refusal");
     let code2 = open_window(&dir, 60, &rights(&["exec"])).unwrap();
     assert_ne!(code, code2, "every window has its own code");
     let o2 = tokio::spawn(owner(dir.clone(), None, true, rights(&["exec"])));

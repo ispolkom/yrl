@@ -108,7 +108,8 @@ pub async fn run(id: u64, rows: u16, cols: u16, term: String, target: Target, mu
     drop(cmd);
     let pid = child.id().unwrap_or(0) as i32;
     let mut group = ProcessGroup::new(child.id());
-    let Ok(fd) = AsyncFd::new(Master(master)) else { return };
+    // SAFETY: Master owns the file descriptor for the entire AsyncFd lifetime.
+    let Ok(fd) = (unsafe { AsyncFd::register(Master(master)) }) else { return };
     let mut buf = vec![0u8; CHUNK];
     let mut exited: Option<std::process::ExitStatus> = None;
     loop {

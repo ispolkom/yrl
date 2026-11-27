@@ -60,7 +60,7 @@ crypto-profiles = []
 pq-hybrid = ["crypto-profiles", "dep:clatter"]
 opaque-rfc9807 = ["dep:opaque-ke", "dep:sha2", "dep:rand"]
 hybrid-signatures = ["dep:ml-dsa"]
-fido2 = ["dep:fido2-rs", "dep:p256", "dep:sha2"]
+fido2 = ["dep:fido2-rs", "dep:p256", "dep:sha2", "dep:rand"]
 tpm2 = ["dep:tss-esapi", "dep:chacha20poly1305", "dep:p256"]
 
 [dev-dependencies]

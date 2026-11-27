@@ -40,7 +40,8 @@ use tss_esapi::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-const MAGIC: &[u8] = b"YRL-TPM2-SEALED-1\0";
+const MAGIC_V1: &[u8] = b"YRL-TPM2-SEALED-1\0";
+const MAGIC: &[u8] = b"YRL-TPM2-SEALED-2\0";
 const MAX_BLOB: usize = 16 * 1024 * 1024;
 const MAX_SECRET: usize = 8 * 1024 * 1024;
 
@@ -116,6 +117,7 @@ struct Blob {
     purpose: String,
     generation: u64,
     pcrs: Vec<u8>,
+    pcr_digest: Option<[u8; 32]>,
     public: Vec<u8>,
     private: Vec<u8>,
     nonce: [u8; 24],
@@ -197,43 +199,46 @@ impl Backend {
         } else if self.policy.requirement == Requirement::Required {
             bail!("required TPM policy has no NV rollback counter")
         }
-        let parent = self.create_parent()?;
-        let auth_policy = self.policy_digest()?;
-        let sealed_public = sealed_public(auth_policy, !self.policy.pcrs.is_empty())?;
-        let mut wrapping_key = Zeroizing::new([0u8; 32]);
-        OsRng.fill_bytes(&mut *wrapping_key);
-        let result = self.context.create(
-            parent,
-            sealed_public,
-            None,
-            Some(SensitiveData::try_from(wrapping_key.to_vec())?),
-            None,
-            None,
-        )?;
-        let public = result.out_public.marshall()?;
-        let private = result.out_private.value().to_vec();
-        let mut nonce = [0u8; 24];
-        OsRng.fill_bytes(&mut nonce);
-        let aad = aad(purpose, generation, &self.policy.pcrs, &public, &private);
-        let ciphertext = XChaCha20Poly1305::new((&*wrapping_key).into())
-            .encrypt(
-                XNonce::from_slice(&nonce),
-                Payload {
-                    msg: secret,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| anyhow::anyhow!("TPM envelope encryption failed"))?;
-        Blob {
-            purpose: purpose.into(),
-            generation,
-            pcrs: self.policy.pcrs.clone(),
-            public,
-            private,
-            nonce,
-            ciphertext,
-        }
-        .encode()
+        self.with_parent(|this, parent| {
+            let pcr_digest = this.expected_pcr_digest()?;
+            let auth_policy = this.policy_digest()?;
+            let sealed_public = sealed_public(auth_policy, !this.policy.pcrs.is_empty())?;
+            let mut wrapping_key = Zeroizing::new([0u8; 32]);
+            OsRng.fill_bytes(&mut *wrapping_key);
+            let result = this.context.create(
+                parent,
+                sealed_public,
+                None,
+                Some(SensitiveData::try_from(wrapping_key.to_vec())?),
+                None,
+                None,
+            )?;
+            let public = result.out_public.marshall()?;
+            let private = result.out_private.value().to_vec();
+            let mut nonce = [0u8; 24];
+            OsRng.fill_bytes(&mut nonce);
+            let aad = aad(purpose, generation, &this.policy.pcrs, pcr_digest.as_ref(), &public, &private);
+            let ciphertext = XChaCha20Poly1305::new((&*wrapping_key).into())
+                .encrypt(
+                    XNonce::from_slice(&nonce),
+                    Payload {
+                        msg: secret,
+                        aad: &aad,
+                    },
+                )
+                .map_err(|_| anyhow::anyhow!("TPM envelope encryption failed"))?;
+            Blob {
+                purpose: purpose.into(),
+                generation,
+                pcrs: this.policy.pcrs.clone(),
+                pcr_digest,
+                public,
+                private,
+                nonce,
+                ciphertext,
+            }
+            .encode()
+        })
     }
 
     pub fn unseal(&mut self, expected_purpose: &str, encoded: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
@@ -242,6 +247,9 @@ impl Backend {
         if blob.purpose != expected_purpose || blob.pcrs != self.policy.pcrs {
             bail!("TPM blob purpose or PCR policy mismatch")
         }
+        if !blob.pcrs.is_empty() && blob.pcr_digest != self.expected_pcr_digest()? {
+            bail!("TPM PCR values changed since sealing")
+        }
         if let Some(_) = self.policy.nv_index {
             if blob.generation != self.current_generation()? {
                 bail!("TPM blob rollback or incomplete rotation detected")
@@ -249,37 +257,46 @@ impl Backend {
         } else if self.policy.requirement == Requirement::Required {
             bail!("required TPM policy has no NV rollback counter")
         }
-        let parent = self.create_parent()?;
-        let private = Private::try_from(blob.private.clone())?;
-        let public = Public::unmarshall(&blob.public)?;
-        let loaded = self.context.load(parent, private, public)?;
-        if !blob.pcrs.is_empty() {
-            self.install_pcr_policy_session()?;
-        }
-        let mut wrapping = Zeroizing::new(self.context.unseal(loaded.into())?.value().to_vec());
-        if wrapping.len() != 32 {
-            bail!("invalid TPM wrapping key")
-        }
-        let aad = aad(
-            &blob.purpose,
-            blob.generation,
-            &blob.pcrs,
-            &blob.public,
-            &blob.private,
-        );
-        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping)
-            .map_err(|_| anyhow::anyhow!("invalid TPM wrapping key"))?;
-        let plaintext = cipher
-            .decrypt(
-                XNonce::from_slice(&blob.nonce),
-                Payload {
-                    msg: &blob.ciphertext,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| anyhow::anyhow!("TPM envelope authentication failed"))?;
-        wrapping.zeroize();
-        Ok(Zeroizing::new(plaintext))
+        self.with_parent(|this, parent| {
+            let private = Private::try_from(blob.private.clone())?;
+            let public = Public::unmarshall(&blob.public)?;
+            let loaded = this.context.load(parent, private, public)?;
+            let result = (|| {
+                let unsealed = if blob.pcrs.is_empty() {
+                    this.context.unseal(loaded.into())?
+                } else {
+                    this.with_pcr_policy_session(blob.pcr_digest.context("PCR-bound blob lacks expected digest")?, |context| Ok(context.unseal(loaded.into())?))?
+                };
+                let mut wrapping = Zeroizing::new(unsealed.value().to_vec());
+                if wrapping.len() != 32 {
+                    bail!("invalid TPM wrapping key")
+                }
+                let aad = aad(
+                    &blob.purpose,
+                    blob.generation,
+                    &blob.pcrs,
+                    blob.pcr_digest.as_ref(),
+                    &blob.public,
+                    &blob.private,
+                );
+                let cipher = XChaCha20Poly1305::new_from_slice(&wrapping)
+                    .map_err(|_| anyhow::anyhow!("invalid TPM wrapping key"))?;
+                let plaintext = cipher
+                    .decrypt(
+                        XNonce::from_slice(&blob.nonce),
+                        Payload {
+                            msg: &blob.ciphertext,
+                            aad: &aad,
+                        },
+                    )
+                    .map_err(|_| anyhow::anyhow!("TPM envelope authentication failed"))?;
+                wrapping.zeroize();
+                Ok(Zeroizing::new(plaintext))
+            })();
+            let cleanup = this.context.flush_context(loaded.into());
+            cleanup?;
+            result
+        })
     }
 
     /// Generates a TPM-native, non-exportable NIST P-256 ECDSA key. Current
@@ -290,18 +307,22 @@ impl Backend {
         if self.policy.nv_index.is_some() && generation != self.current_generation()? {
             bail!("TPM generation does not match NV counter")
         }
-        let parent = self.create_parent()?;
-        let public = native_signing_public(self.policy_digest()?, !self.policy.pcrs.is_empty())?;
-        let result = self
-            .context
-            .create(parent, public, None, None, None, None)?;
-        NativeKey {
-            purpose: purpose.into(),
-            generation,
-            public: result.out_public.marshall()?,
-            private: result.out_private.value().to_vec(),
-        }
-        .encode()
+        self.with_parent(|this, parent| {
+            let pcr_digest = this.expected_pcr_digest()?;
+            let public =
+                native_signing_public(this.policy_digest()?, !this.policy.pcrs.is_empty())?;
+            let result = this
+                .context
+                .create(parent, public, None, None, None, None)?;
+            NativeKey {
+                purpose: purpose.into(),
+                generation,
+                pcr_digest,
+                public: result.out_public.marshall()?,
+                private: result.out_private.value().to_vec(),
+            }
+            .encode()
+        })
     }
 
     /// Signs one bounded message with a previously generated TPM-native key.
@@ -322,31 +343,40 @@ impl Backend {
         if self.policy.nv_index.is_some() && key.generation != self.current_generation()? {
             bail!("TPM native-key rollback detected")
         }
-        let parent = self.create_parent()?;
-        let loaded = self.context.load(
-            parent,
-            Private::try_from(key.private)?,
-            Public::unmarshall(&key.public)?,
-        )?;
-        let (digest, ticket) = self.context.hash(
-            MaxBuffer::try_from(message.to_vec())?,
-            HashingAlgorithm::Sha256,
-            Hierarchy::Owner,
-        )?;
-        if !self.policy.pcrs.is_empty() {
-            self.install_pcr_policy_session()?;
+        if self.policy.pcrs.is_empty() != key.pcr_digest.is_none() {
+            bail!("TPM native-key PCR policy mismatch")
         }
-        Ok(self
-            .context
-            .sign(
-                loaded,
-                digest,
-                SignatureScheme::EcDsa {
+        if key.pcr_digest.is_some() && key.pcr_digest != self.expected_pcr_digest()? {
+            bail!("TPM PCR values changed since native-key creation")
+        }
+        self.with_parent(|this, parent| {
+            let loaded = this.context.load(
+                parent,
+                Private::try_from(key.private)?,
+                Public::unmarshall(&key.public)?,
+            )?;
+            let result = (|| {
+                let (digest, ticket) = this.context.hash(
+                    MaxBuffer::try_from(message.to_vec())?,
+                    HashingAlgorithm::Sha256,
+                    Hierarchy::Owner,
+                )?;
+                let scheme = SignatureScheme::EcDsa {
                     hash_scheme: HashScheme::new(HashingAlgorithm::Sha256),
-                },
-                ticket,
-            )?
-            .marshall()?)
+                };
+                let signature = if this.policy.pcrs.is_empty() {
+                    this.context.sign(loaded, digest, scheme, ticket)?
+                } else {
+                    this.with_pcr_policy_session(key.pcr_digest.context("PCR-bound native key lacks expected digest")?, |context| {
+                        Ok(context.sign(loaded, digest, scheme, ticket)?)
+                    })?
+                };
+                Ok(signature.marshall()?)
+            })();
+            let cleanup = this.context.flush_context(loaded.into());
+            cleanup?;
+            result
+        })
     }
 
     pub fn native_p256_public_sec1(encoded: &[u8], expected_purpose: &str) -> Result<[u8; 65]> {
@@ -379,6 +409,16 @@ impl Backend {
             .context
             .create_primary(Hierarchy::Owner, public, None, None, None, None)?
             .key_handle)
+    }
+    fn with_parent<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self, tss_esapi::handles::KeyHandle) -> Result<T>,
+    ) -> Result<T> {
+        let parent = self.create_parent()?;
+        let result = f(self, parent);
+        let cleanup = self.context.flush_context(parent.into());
+        cleanup?;
+        result
     }
     fn nv_tpm_handle(&self) -> Result<NvIndexTpmHandle> {
         NvIndexTpmHandle::new(
@@ -414,11 +454,30 @@ impl Backend {
             )?
             .context("TPM did not create trial policy session")?;
         let policy = PolicySession::try_from(session)?;
-        self.context.policy_pcr(policy, digest, selection)?;
-        Ok(self.context.policy_get_digest(policy)?)
+        let result = (|| {
+            self.context.policy_pcr(policy, digest, selection)?;
+            Ok(self.context.policy_get_digest(policy)?)
+        })();
+        let cleanup = self
+            .context
+            .flush_context(tss_esapi::handles::SessionHandle::from(session).into());
+        cleanup?;
+        result
     }
-    fn install_pcr_policy_session(&mut self) -> Result<()> {
-        let (selection, digest) = current_pcr_digest(&mut self.context, &self.policy.pcrs)?;
+    fn expected_pcr_digest(&mut self) -> Result<Option<[u8; 32]>> {
+        if self.policy.pcrs.is_empty() { return Ok(None) }
+        let (_, digest) = current_pcr_digest(&mut self.context, &self.policy.pcrs)?;
+        Ok(Some(digest.value().try_into().map_err(|_| anyhow::anyhow!("invalid PCR digest length"))?))
+    }
+    fn with_pcr_policy_session<T>(
+        &mut self,
+        expected: [u8; 32],
+        f: impl FnOnce(&mut Context) -> Result<T>,
+    ) -> Result<T> {
+        let selection = PcrSelectionListBuilder::new()
+            .with_selection(HashingAlgorithm::Sha256, &slots(&self.policy.pcrs)?)
+            .build()?;
+        let digest = Digest::try_from(expected.to_vec())?;
         let session = self
             .context
             .start_auth_session(
@@ -430,10 +489,16 @@ impl Backend {
                 HashingAlgorithm::Sha256,
             )?
             .context("TPM did not create policy session")?;
-        self.context
-            .policy_pcr(PolicySession::try_from(session)?, digest, selection)?;
-        self.context.set_sessions((Some(session), None, None));
-        Ok(())
+        let result = (|| {
+            self.context
+                .policy_pcr(PolicySession::try_from(session)?, digest, selection)?;
+            self.context.execute_with_session(Some(session), f)
+        })();
+        let cleanup = self
+            .context
+            .flush_context(tss_esapi::handles::SessionHandle::from(session).into());
+        cleanup?;
+        result
     }
 }
 
@@ -441,15 +506,18 @@ impl Backend {
 struct NativeKey {
     purpose: String,
     generation: u64,
+    pcr_digest: Option<[u8; 32]>,
     public: Vec<u8>,
     private: Vec<u8>,
 }
 impl NativeKey {
     fn encode(&self) -> Result<Vec<u8>> {
-        let mut out = b"YRL-TPM2-NATIVE-P256-1\0".to_vec();
+        let mut out = b"YRL-TPM2-NATIVE-P256-2\0".to_vec();
         out.push(self.purpose.len() as u8);
         out.extend_from_slice(self.purpose.as_bytes());
         out.extend_from_slice(&self.generation.to_be_bytes());
+        out.push(u8::from(self.pcr_digest.is_some()));
+        if let Some(digest) = self.pcr_digest { out.extend_from_slice(&digest); }
         for v in [&self.public, &self.private] {
             if v.len() > 8192 {
                 bail!("oversized TPM native key")
@@ -460,11 +528,12 @@ impl NativeKey {
         Ok(out)
     }
     fn decode(input: &[u8]) -> Result<Self> {
-        let magic = b"YRL-TPM2-NATIVE-P256-1\0";
-        if !input.starts_with(magic) || input.len() > 16384 {
+        let v1 = input.starts_with(b"YRL-TPM2-NATIVE-P256-1\0");
+        let v2 = input.starts_with(b"YRL-TPM2-NATIVE-P256-2\0");
+        if !(v1 || v2) || input.len() > 16384 {
             bail!("invalid TPM native key")
         }
-        let mut at = magic.len();
+        let mut at = b"YRL-TPM2-NATIVE-P256-2\0".len();
         let n = *input.get(at).context("short TPM native key")? as usize;
         at += 1;
         if n == 0 || n > 64 || input.len() < at + n + 8 {
@@ -475,6 +544,19 @@ impl NativeKey {
         at += n;
         let generation = u64::from_be_bytes(input[at..at + 8].try_into()?);
         at += 8;
+        let pcr_digest = if v2 {
+            let flag = *input.get(at).context("short TPM native PCR binding")?;
+            at += 1;
+            match flag {
+                0 => None,
+                1 => {
+                    let digest = input.get(at..at+32).context("short TPM native PCR digest")?.try_into()?;
+                    at += 32;
+                    Some(digest)
+                }
+                _ => bail!("invalid TPM native PCR binding"),
+            }
+        } else { None };
         let mut fields = Vec::new();
         for _ in 0..2 {
             if input.len() < at + 2 {
@@ -494,6 +576,7 @@ impl NativeKey {
         Ok(Self {
             purpose,
             generation,
+            pcr_digest,
             public: fields.remove(0),
             private: fields.remove(0),
         })
@@ -612,7 +695,7 @@ fn current_pcr_digest(context: &mut Context, pcrs: &[u8]) -> Result<(PcrSelectio
     let selection = PcrSelectionListBuilder::new()
         .with_selection(HashingAlgorithm::Sha256, &slots(pcrs)?)
         .build()?;
-    let (_, selected, values) = context.pcr_read(selection.clone())?;
+    let (_, selected, values) = context.execute_without_session(|ctx| ctx.pcr_read(selection.clone()))?;
     if selected != selection || values.len() != pcrs.len() {
         bail!("TPM returned an incomplete PCR selection")
     }
@@ -621,21 +704,20 @@ fn current_pcr_digest(context: &mut Context, pcrs: &[u8]) -> Result<(PcrSelectio
         .iter()
         .flat_map(|d| d.value().iter().copied())
         .collect();
-    let (digest, _) = context.hash(
-        MaxBuffer::try_from(joined)?,
-        HashingAlgorithm::Sha256,
-        Hierarchy::Owner,
-    )?;
+    let (digest, _) = context.execute_without_session(|ctx| ctx.hash(
+        MaxBuffer::try_from(joined)?, HashingAlgorithm::Sha256, Hierarchy::Owner,
+    ))?;
     Ok((selection, digest))
 }
 
-fn aad(purpose: &str, generation: u64, pcrs: &[u8], public: &[u8], private: &[u8]) -> Vec<u8> {
+fn aad(purpose: &str, generation: u64, pcrs: &[u8], pcr_digest: Option<&[u8; 32]>, public: &[u8], private: &[u8]) -> Vec<u8> {
     let mut out = b"YRL TPM2 envelope AAD v1\0".to_vec();
     out.push(purpose.len() as u8);
     out.extend_from_slice(purpose.as_bytes());
     out.extend_from_slice(&generation.to_be_bytes());
     out.push(pcrs.len() as u8);
     out.extend_from_slice(pcrs);
+    if let Some(digest) = pcr_digest { out.extend_from_slice(digest); }
     out.extend_from_slice(blake3::hash(public).as_bytes());
     out.extend_from_slice(blake3::hash(private).as_bytes());
     out
@@ -660,6 +742,8 @@ impl Blob {
         out.extend_from_slice(&self.generation.to_be_bytes());
         out.push(self.pcrs.len() as u8);
         out.extend_from_slice(&self.pcrs);
+        out.push(u8::from(self.pcr_digest.is_some()));
+        if let Some(digest) = self.pcr_digest { out.extend_from_slice(&digest); }
         for value in [&self.public, &self.private, &self.ciphertext] {
             if value.len() > MAX_BLOB {
                 bail!("oversized TPM blob field")
@@ -674,7 +758,9 @@ impl Blob {
         Ok(out)
     }
     fn decode(input: &[u8]) -> Result<Self> {
-        if input.len() > MAX_BLOB || !input.starts_with(MAGIC) {
+        let v1 = input.starts_with(MAGIC_V1);
+        let v2 = input.starts_with(MAGIC);
+        if input.len() > MAX_BLOB || !(v1 || v2) {
             bail!("invalid TPM blob")
         }
         let mut at = MAGIC.len();
@@ -695,6 +781,22 @@ impl Blob {
         }
         let pcrs = input[at..at + n].to_vec();
         at += n;
+        let pcr_digest = if v2 {
+            let flag = *input.get(at).context("short TPM PCR binding")?;
+            at += 1;
+            match flag {
+                0 => None,
+                1 => {
+                    let digest = input.get(at..at+32).context("short TPM PCR digest")?.try_into()?;
+                    at += 32;
+                    Some(digest)
+                }
+                _ => bail!("invalid TPM PCR binding"),
+            }
+        } else { None };
+        if pcrs.is_empty() != pcr_digest.is_none() {
+            bail!("legacy or invalid PCR-bound TPM blob requires explicit recovery and resealing")
+        }
         let mut fields = Vec::new();
         for _ in 0..3 {
             if input.len() < at + 4 {
@@ -716,6 +818,7 @@ impl Blob {
             purpose,
             generation,
             pcrs,
+            pcr_digest,
             public: fields.remove(0),
             private: fields.remove(0),
             ciphertext: fields.remove(0),
@@ -942,7 +1045,8 @@ mod tests {
         let b = Blob {
             purpose: "noise:executor".into(),
             generation: 7,
-            pcrs: vec![7],
+            pcrs: vec![16],
+            pcr_digest: Some([7; 32]),
             public: vec![1, 2],
             private: vec![3, 4],
             nonce: [5; 24],
@@ -960,6 +1064,7 @@ mod tests {
         let key = NativeKey {
             purpose: "release:p256".into(),
             generation: 2,
+            pcr_digest: None,
             public: vec![1; 64],
             private: vec![2; 64],
         }
@@ -1000,6 +1105,22 @@ mod tests {
             .sign_native_p256(&key, "test:sign", b"message")
             .unwrap()
             .is_empty());
+        // The same live TPM context must release transient parents and loaded
+        // objects after every operation, including a rejected unseal above.
+        for generation in 2..10 {
+            let blob = backend.seal("test:secret", generation, b"secret").unwrap();
+            assert_eq!(
+                backend.unseal("test:secret", &blob).unwrap().as_slice(),
+                b"secret"
+            );
+            let key = backend
+                .generate_native_p256("test:sign", generation)
+                .unwrap();
+            assert!(!backend
+                .sign_native_p256(&key, "test:sign", b"message")
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[test]
@@ -1018,5 +1139,51 @@ mod tests {
         let old = backend.seal("test:rollback", 1, b"secret").unwrap();
         assert_eq!(backend.advance_generation().unwrap(), 2);
         assert!(backend.unseal("test:rollback", &old).is_err());
+    }
+
+    #[test]
+    #[ignore]
+    fn swtpm_pcr_bound_objects_release_policy_sessions() {
+        let tcti = std::env::var("TEST_TCTI").expect("isolated swtpm TCTI");
+        let mut backend = Backend::connect(Policy {
+            requirement: Requirement::Optional,
+            tcti,
+            pcrs: vec![16],
+            nv_index: None,
+            owner_auth_file: None,
+        })
+        .unwrap();
+        for generation in 1..8 {
+            let blob = backend.seal("test:pcr", generation, b"bound").unwrap();
+            assert_eq!(
+                backend.unseal("test:pcr", &blob).unwrap().as_slice(),
+                b"bound"
+            );
+            let key = backend
+                .generate_native_p256("test:pcr-sign", generation)
+                .unwrap();
+            assert!(!backend
+                .sign_native_p256(&key, "test:pcr-sign", b"message")
+                .unwrap()
+                .is_empty());
+        }
+        let old = backend.seal("test:pcr", 8, b"bound").unwrap();
+        let old_key = backend.generate_native_p256("test:pcr-sign", 8).unwrap();
+        let (_, before) = current_pcr_digest(&mut backend.context, &[16]).unwrap();
+        let mut digests = tss_esapi::structures::DigestValues::new();
+        digests.set(HashingAlgorithm::Sha256, Digest::try_from(vec![1u8; 32]).unwrap());
+        backend.context.execute_with_session(Some(tss_esapi::interface_types::session_handles::AuthSession::Password), |ctx| {
+            ctx.pcr_extend(tss_esapi::handles::PcrHandle::Pcr16, digests)
+        }).unwrap();
+        let (_, after) = current_pcr_digest(&mut backend.context, &[16]).unwrap();
+        assert_ne!(before, after, "swtpm must actually extend PCR 16 before the policy check");
+        let encoded_digest = Blob::decode(&old).unwrap().pcr_digest.unwrap();
+        assert_eq!(encoded_digest.as_slice(), before.value(), "blob must retain sealing PCR digest");
+        assert_ne!(encoded_digest.as_slice(), after.value(), "blob digest must differ after PCR extension");
+        assert!(backend.unseal("test:pcr", &old).is_err(), "changed PCR must invalidate the old sealed key");
+        assert!(backend.sign_native_p256(&old_key, "test:pcr-sign", b"message").is_err(), "changed PCR must invalidate the old native key");
+        let mut forged_key = NativeKey::decode(&old_key).unwrap();
+        forged_key.pcr_digest = Some(after.value().try_into().unwrap());
+        assert!(backend.sign_native_p256(&forged_key.encode().unwrap(), "test:pcr-sign", b"message").is_err(), "changing metadata cannot bypass the native TPM policy");
     }
 }

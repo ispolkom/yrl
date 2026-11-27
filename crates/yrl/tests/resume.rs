@@ -195,12 +195,12 @@ async fn r7_a_session_is_ended_when_nobody_comes_back_and_the_client_learns_it()
 /// a hand-driven login that also returns the session id
 async fn raw_for(r: &Rig, key: &yrl::keys::KeyPair) -> Option<(tokio::io::DuplexStream, yrl::session::Secure)> {
     let mut outer = tokio::net::TcpStream::connect(&r.addr).await.ok()?;
-    let gate = std::sync::Arc::new(yrl::session::client_handshake(&mut outer, key, &r.server_pub, yrl::session::REKEY_EVERY).await.ok()?);
+    let gate = std::sync::Arc::new(yrl::session::client_handshake_context(&mut outer, key, &r.server_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.ok()?);
     let (mut rd, mut wr) = tokio::io::split(outer);
     yrl::session::write_msg(&mut wr, &gate.seal(&Frame::new(yrl::ipc::IPC_TUNNEL, 0, vec![])).ok()?).await.ok()?;
     if gate.open(&yrl::session::read_msg(&mut rd).await.ok()?).ok()?.kind != yrl::ipc::IPC_TUNNEL_OK { return None }
     let mut s = yrl::ipc::secure_tunnel(rd, wr, gate);
-    let sec = yrl::session::client_handshake(&mut s, key, &r.exec_pub, yrl::session::REKEY_EVERY).await.ok()?;
+    let sec = yrl::session::client_handshake_context(&mut s, key, &r.exec_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Executor, yrl::crypto_profile::Policy::default()).await.ok()?;
     Some((s, sec))
 }
 

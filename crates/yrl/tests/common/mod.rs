@@ -8,7 +8,7 @@ use yrl::client::Client;
 use yrl::keys::{self, KeyPair};
 use yrl::server::{serve, ServerConfig};
 use yrl::link;
-use yrl::session::{client_handshake, read_msg, write_msg, Secure, REKEY_EVERY};
+use yrl::session::{client_handshake_context, read_msg, write_msg, Secure, REKEY_EVERY};
 use yrl::users;
 use yrl::wire::{self, Frame};
 
@@ -58,7 +58,7 @@ pub async fn rig_with(key_rights: &str, tweak: impl FnOnce(ServerConfig) -> Serv
     cfg.handshake_timeout = Duration::from_millis(400);
     cfg.log_sink = Some(log.clone());
     cfg.session_grace = Duration::from_millis(400); // abandoned hand-driven sessions disappear quickly in tests
-    cfg.helper = std::path::PathBuf::from(env!("CARGO_BIN_EXE_yrld"));
+    cfg.helper = std::env::var_os("YRL_TEST_HELPER_BINARY").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_BIN_EXE_yrld")));
     let mut cfg = tweak(cfg);
     yrl::server::ensure_executor(&mut cfg).await; // the executor and the broker exist now, and the rig can talk to their doors
     let sessions = cfg.sessions.clone();
@@ -80,13 +80,13 @@ pub async fn open(r: &Rig) -> Client {
 /// a raw, handshaken, NOT logged in connection
 pub async fn raw(r: &Rig) -> (tokio::io::DuplexStream, Secure) {
     let mut outer = TcpStream::connect(&r.addr).await.unwrap();
-    let gate = Arc::new(client_handshake(&mut outer, &r.client, &r.server_pub, REKEY_EVERY).await.unwrap());
+    let gate = Arc::new(client_handshake_context(&mut outer, &r.client, &r.server_pub, REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.unwrap());
     let (mut rd, mut wr) = tokio::io::split(outer);
     write_msg(&mut wr, &gate.seal(&Frame::new(yrl::ipc::IPC_TUNNEL, 0, vec![])).unwrap()).await.unwrap();
     let reply = gate.open(&read_msg(&mut rd).await.unwrap()).unwrap();
     assert_eq!(reply.kind, yrl::ipc::IPC_TUNNEL_OK);
     let mut s = yrl::ipc::secure_tunnel(rd, wr, gate);
-    let sec = client_handshake(&mut s, &r.client, &r.exec_pub, REKEY_EVERY).await.unwrap();
+    let sec = client_handshake_context(&mut s, &r.client, &r.exec_pub, REKEY_EVERY, yrl::crypto_profile::Context::Executor, yrl::crypto_profile::Policy::default()).await.unwrap();
     (s, sec)
 }
 

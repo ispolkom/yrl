@@ -109,7 +109,7 @@ async fn l7_unknown_and_known_logins_cost_the_same_time() {
             let mut v = vec![];
             for _ in 0..9 {
                 let mut s = TcpStream::connect(&addr).await.unwrap();
-                let sec = yrl::session::client_handshake(&mut s, &client, &sp, yrl::session::REKEY_EVERY).await.unwrap();
+                let sec = yrl::session::client_handshake_context(&mut s, &client, &sp, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.unwrap();
                 let t = Instant::now();
                 raw_login(&mut s, &sec, login, b"wrong password").await;
                 v.push(t.elapsed());
@@ -288,7 +288,7 @@ async fn l17_the_wrong_key_with_the_right_password_gets_silence() {
     let r = rig("exec").await;
     let stranger = yrl::keys::generate();
     let mut s = TcpStream::connect(&r.addr).await.unwrap();
-    assert!(yrl::session::client_handshake(&mut s, &stranger, &r.server_pub, yrl::session::REKEY_EVERY).await.is_err(), "the password is worthless without the key");
+    assert!(yrl::session::client_handshake_context(&mut s, &stranger, &r.server_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.is_err(), "the password is worthless without the key");
 }
 
 #[tokio::test]
@@ -351,12 +351,12 @@ async fn raw_from(r: &Rig, key: &yrl::keys::KeyPair, source: &str) -> (tokio::io
     let sock = tokio::net::TcpSocket::new_v4().unwrap();
     sock.bind(format!("{source}:0").parse().unwrap()).unwrap();
     let mut outer = sock.connect(r.addr.parse().unwrap()).await.unwrap();
-    let gate = std::sync::Arc::new(yrl::session::client_handshake(&mut outer, key, &r.server_pub, yrl::session::REKEY_EVERY).await.unwrap());
+    let gate = std::sync::Arc::new(yrl::session::client_handshake_context(&mut outer, key, &r.server_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Gatekeeper, yrl::crypto_profile::Policy::default()).await.unwrap());
     let (mut rd, mut wr) = tokio::io::split(outer);
     yrl::session::write_msg(&mut wr, &gate.seal(&Frame::new(yrl::ipc::IPC_TUNNEL, 0, vec![])).unwrap()).await.unwrap();
     assert_eq!(gate.open(&yrl::session::read_msg(&mut rd).await.unwrap()).unwrap().kind, yrl::ipc::IPC_TUNNEL_OK);
     let mut s = yrl::ipc::secure_tunnel(rd, wr, gate);
-    let sec = yrl::session::client_handshake(&mut s, key, &r.exec_pub, yrl::session::REKEY_EVERY).await.unwrap();
+    let sec = yrl::session::client_handshake_context(&mut s, key, &r.exec_pub, yrl::session::REKEY_EVERY, yrl::crypto_profile::Context::Executor, yrl::crypto_profile::Policy::default()).await.unwrap();
     (s, sec)
 }
 
