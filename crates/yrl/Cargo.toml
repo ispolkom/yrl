@@ -2,6 +2,7 @@
 name = "yrl"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
 description = "YRL v0.1: direct connection, Noise IK, authorized keys, structured exec"
 
 [lib]

@@ -2,6 +2,7 @@
 name = "yrl_link"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
 description = "YRL: the minimum copied from the YANDI node to establish a link (identity, session encryption, WS/TLS transport, pairing)"
 
 [dependencies]

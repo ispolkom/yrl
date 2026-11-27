@@ -5,6 +5,7 @@ members = ["crates/yrl_link", "crates/key_root", "crates/yrl"]
 [workspace.package]
 edition = "2021"
 version = "0.0.1"
+license = "MIT"
 
 # password hashing is deliberately heavy; unoptimised it takes seconds and makes the tests crawl
 [profile.dev.package.argon2]

@@ -1,6 +1,7 @@
 [package]
 name = "key_root"
 version = "0.1.0"
+license.workspace = true
 edition = "2021"
 description = "COPY of the YANDI key root (library only: root key, device/recovery wrappers, identity formats, load policy)"
 
