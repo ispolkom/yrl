@@ -121,7 +121,11 @@ pub async fn put(req: PutReq, target: Target, helper: std::path::PathBuf, max_si
                 }
                 break;
             }
-            Some(FileIn::Abort) | None => return,
+            Some(FileIn::Abort) => return,
+            None => {
+                reservation.preserve();
+                return;
+            }
         }
     }
     drop(stdin);

@@ -2,13 +2,19 @@
 
 ## Snapshot
 
+- Stage 8 acceptance is in progress. The initial full test attempt failed before tests ran because the filesystem filled during linking; generated `target/` files were cleaned and a bounded-parallelism rerun was started. `cargo audit` could not refresh its advisory database. `cargo deny` reported multiple dependency advisories and license-policy failures; see `STAGE8_ACCEPTANCE.md`. No Stage 8 PASS claim follows from compilation alone.
+
 - Project: **YRL — YANDI Remote Link**, a Linux-first Rust remote-access prototype.
 - Repository: `https://github.com/ispolkom/yrl`, branch `main`.
 - Implementation baseline: Stage 4 was published in **`f69e4b7`** (`Harden secret handling and add offline key recovery lifecycle`). Stage 5 — failure and overload resilience — is in progress: the throughput/liveness correction and substages 5.1–5.6 are implemented. Formal end-to-end deployment acceptance has not been recorded.
 - Scope boundary: this repository is YRL. Do not modify the separate YANDI NODE source tree. Do not interpret the future desktop or other-OS design documents as implemented features.
 - Stage 6 substages 6.1–6.6 are implemented: trusted segmented Audit, key lifecycle/export, offline-rooted releases and manual downgrade-safe transactional activation. Comprehensive and installed-host acceptance is intentionally deferred to Stage 8.
-- Stage 7.1–7.5 are implemented behind default-off features. No Stage 7 profile is enabled in an installed production service before Stage 8 acceptance.
+- Stage 7.1–7.6 are implemented behind default-off features. No Stage 7 profile is enabled in an installed production service before Stage 8 acceptance.
 - This handoff records outcomes and verification at the baseline, not a development diary.
+
+## Stage 8 progress (2026-11-27)
+
+The current worktree contains Stage 8 regression fixes and `STAGE8_ACCEPTANCE.md`; no Stage 8 substage has been accepted yet. Default workspace testing found invalid test fixtures and stale protocol expectations, plus production defects in Audit repeat reporting, file completion ordering, interrupted-upload retention and file error classification. Focused tests for each fix pass; the serial default workspace suite passed 412 tests with one explicit cgroup test skip and two ignored tests; the cgroup runtime test is blocked by host `memory.max` permission. The default release build passed in 2m 38s. Fresh `cargo audit` could not fetch; cached audit and `cargo deny` report actionable dependency advisories. Hybrid-signature helpers have no callers in the claimed handshake/Audit/update paths; 7.4 integration is a recorded FAIL. Continue with feature-suite compatibility fixes and dependency triage, then isolated runtime, install and performance checks. Keep all Stage 7 features default-off.
 
 ## Architecture at the baseline
 
@@ -168,9 +174,9 @@ The current persistent data format is 1. Releases targeting another format fail 
 1. Run the complete workspace suite and the cross-stage route/revocation scenarios at a final integration gate. Test the installed units with real Linux service users, seccomp/capability and mount inspection, delegated cgroup v2 controllers, per-session OOM/pids exhaustion, systemd service budgets/restart storms and nftables. This development environment did not establish those deployment-wide properties.
 2. Test offline recovery on a separate host: GnuPG key availability, trusted origin and public fingerprints, ownership remapping, large journals, interrupted rotation, and service restart. Backup encryption does not supply sender authentication. Audit journal-signing-key rollover and a signed chain between journal eras remain open.
 3. Host-root operations deliberately retain broad host authority and can escape delegated cgroup containment. A compromised Gatekeeper or relay can deny service and expose metadata. The seccomp policy is a denylist. Gatekeeper restart preserves an Executor session only within its existing RESUME window; Executor restart always means `SESSION_LOST`. Incomplete accepted operations become `UNKNOWN`, never automatic retries. Managed partial reservations survive and can be resumed only by a new authorized session with the same key/account/path/size.
-4. OS-level disk encryption or a hardware-backed key store is needed to resist physical disk theft while keeping unattended service startup. The current code does not provide TPM-backed live key storage or a second-device approval flow.
+4. OS-level disk encryption or a hardware-backed key store is needed to resist physical disk theft while keeping unattended service startup. The default-off TPM2 backend provides sealed software-key storage and native P-256 signing, but not TPM-native X25519, Ed25519 or PQ execution. Physical-device acceptance and second-device approval remain open.
 5. UDP still has no path-MTU discovery; NAT hole punching, UDP relay, multipath, route racing and adaptive route scoring are absent. Broker operations are deliberately limited to typed primitives. Desktop and additional-OS support remain unimplemented. Product proposals in `docs/DESIGN.md` and `docs/DESKTOP.md` must not be treated as delivered features or started as incidental work.
 
 ## How to continue
 
-Continue Stage 7 sequentially from the latest published substage. Keep every new profile default-off until Stage 8, do not replace a missing standardized construction or reviewed library with project-specific cryptography, and record an exact blocker where the requested guarantee cannot safely be delivered. Do not touch YANDI NODE, Private Discovery, multipath, route racing or Stage 8 acceptance work.
+Continue Stage 8 acceptance sequentially, recording observed results in STAGE8_ACCEPTANCE.md. Keep Stage 7 features default-off. Do not touch YANDI NODE, Private Discovery, multipath or route racing.

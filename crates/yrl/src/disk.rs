@@ -278,6 +278,12 @@ impl DiskManager {
 }
 
 impl Reservation {
+    /// Keep a tagged partial and its ledger charge after an unplanned disconnect.
+    pub fn preserve(mut self) {
+        self.manager.state.lock().unwrap().active.remove(&self.token);
+        self.finished = true;
+    }
+
     pub fn token_hex(&self) -> String {
         hex::encode(self.token)
     }
@@ -588,6 +594,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut l = limits();
         l.bytes_total = 70;
+        l.bytes_per_account = 70;
         let m = Arc::new(DiskManager::open(d.path().join("ledger"), l).unwrap());
         let t = target(d.path());
         let start = Arc::new(std::sync::Barrier::new(3));

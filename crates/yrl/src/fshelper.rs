@@ -127,7 +127,11 @@ fn put(f: &[&str], input: &mut impl Read, out: &mut impl Write) -> Result<(), u1
 const TAG: &[u8] = b"user.yrl.partial\0";
 
 fn io_code(e: &std::io::Error) -> u16 {
-    if e.raw_os_error() == Some(libc::ENOSPC) || e.raw_os_error() == Some(libc::EDQUOT) { E_NO_SPACE } else { E_IO }
+    match e.raw_os_error() {
+        Some(libc::ENOSPC | libc::EDQUOT) => E_NO_SPACE,
+        Some(libc::ENOENT | libc::ENOTDIR | libc::EACCES | libc::EPERM) => E_OPEN,
+        _ => E_IO,
+    }
 }
 
 fn set_tag(file: &File, token: &[u8; 16]) -> std::io::Result<()> {

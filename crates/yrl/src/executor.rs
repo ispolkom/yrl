@@ -162,6 +162,7 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                 let guard = match journal.accept(&who.public, &account, id, crate::opjournal::KIND_EXEC, &frame.payload) {
                     Ok(guard) => guard,
                     Err(crate::opjournal::Refusal::Duplicate(status)) => {
+                        cfg.rec(1, ev("exec", RESULT_OK).target("repeated request").request(id));
                         let text = format!("operation already recorded as {:?}", status.state);
                         let _ = tx.send(denied(wire::E_OPERATION_RECORDED, text.as_bytes(), id)).await;
                         continue;

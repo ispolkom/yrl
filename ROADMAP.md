@@ -15,7 +15,11 @@ This file distinguishes the **accepted implementation-stage sequence** from the 
 | **6. Trusted audit and software delivery** | Rotated and independently verifiable Audit history, signing-key lifecycle, signed releases and downgrade-safe updates. | Implemented through substages 6.1–6.6. Focused tests are prepared and compilation/unit policy verification pass; comprehensive and installed-host acceptance remain Stage 8. |
 | **7. Extended cryptographic protection** | Versioned profiles, hybrid post-quantum transport/signatures, OPAQUE, FIDO2 and optional TPM-backed key handling. | Implemented through 7.1–7.6 behind default-off feature gates. Production activation, vectors, hardware and interoperability acceptance remain Stage 8. |
 
-## Current Stage 7: extended cryptographic protection
+## Stage 8 acceptance in progress
+
+Acceptance evidence and blockers are tracked in `STAGE8_ACCEPTANCE.md`. Stage 7 features remain default-off.
+
+## Stage 7: extended cryptographic protection
 
 ### Substage 7.1: authenticated cryptographic profiles
 

@@ -591,7 +591,13 @@ fn audit_verify(dir: &str, anchor_path: Option<&String>) -> anyhow::Result<()> {
         )?),
         None => None,
     };
-    let chain = yrl::auditsegments::verify_chain(&dir, trusted.as_ref())?;
+    let chain = match yrl::auditsegments::verify_chain(&dir, trusted.as_ref()) {
+        Ok(chain) => chain,
+        Err(error) => {
+            println!("PROBLEM: {error}");
+            return Err(error);
+        }
+    };
     let mut bad = false;
     for j in [Journal::Ordinary, Journal::Security] {
         let r = verify_dir(&dir, j)?;

@@ -42,6 +42,8 @@ async fn b2_the_executor_cannot_read_what_it_carries() {
     let begin = Frame::new(STEPUP_BEGIN, 0, encode_begin(7, Level::Root, &op, &msg1));
     seen.extend(&begin.payload);
     send(&mut s, &sec, begin).await;
+    let accepted = recv(&mut s, &sec).await.unwrap();
+    assert_eq!(accepted.kind, yrl::wire::OP_ACCEPTED);
     let ch = recv(&mut s, &sec).await.unwrap();
     assert_eq!(ch.kind, STEPUP_CHALLENGE);
     seen.extend(&ch.payload);

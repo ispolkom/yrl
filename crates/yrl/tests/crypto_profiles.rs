@@ -88,29 +88,26 @@ fn pq_profile_availability_matches_the_build() {
 }
 
 #[test]
-fn unavailable_opaque_backend_fails_closed_even_when_compiled() {
-    assert!(yrl::crypto_support::require(
-        yrl::crypto_support::Mechanism::OpaqueRfc9807
-    )
-    .is_err());
+fn opaque_backend_availability_matches_feature() {
+    assert_eq!(
+        yrl::crypto_support::require(yrl::crypto_support::Mechanism::OpaqueRfc9807).is_ok(),
+        cfg!(feature = "opaque-rfc9807")
+    );
 }
 
 #[test]
-fn unavailable_hybrid_signature_backend_fails_closed() {
-    assert!(yrl::crypto_support::require(
-        yrl::crypto_support::Mechanism::HybridEd25519MlDsa65
-    )
-    .is_err());
+fn hybrid_signature_backend_availability_matches_feature() {
+    assert_eq!(yrl::crypto_support::require(yrl::crypto_support::Mechanism::HybridEd25519MlDsa65).is_ok(), cfg!(feature = "hybrid-signatures"));
 }
 
 #[test]
-fn unavailable_fido2_backend_never_falls_back() {
-    assert!(yrl::crypto_support::require(yrl::crypto_support::Mechanism::Fido2).is_err());
+fn fido2_backend_availability_matches_feature() {
+    assert_eq!(yrl::crypto_support::require(yrl::crypto_support::Mechanism::Fido2).is_ok(), cfg!(feature = "fido2"));
 }
 
 #[test]
-fn unavailable_tpm_backend_never_uses_software_fallback() {
-    assert!(yrl::crypto_support::require(yrl::crypto_support::Mechanism::Tpm2).is_err());
+fn tpm_backend_availability_matches_feature() {
+    assert_eq!(yrl::crypto_support::require(yrl::crypto_support::Mechanism::Tpm2).is_ok(), cfg!(feature = "tpm2"));
 }
 
 #[test]

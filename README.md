@@ -147,6 +147,8 @@ Security rules are also checked with targeted source mutants listed under `tools
 
 ## Honest status
 
+Stage 8 acceptance is in progress; see `STAGE8_ACCEPTANCE.md` for measured results and blockers.
+
 **Working prototype, not a finished product.** The core Linux scenarios are implemented and heavily tested, but the project has not had an independent security audit.
 
 - Real privileged broker operations are deliberately incomplete; current operations are typed test/restart primitives, not a general root shell.

@@ -181,7 +181,7 @@ async fn r7_a_session_is_ended_when_nobody_comes_back_and_the_client_learns_it()
     let mut ended = false;
     for _ in 0..20 {
         match tokio::time::timeout(Duration::from_secs(5), p.next()).await {
-            Ok(PtyEvent::Closed) => {
+            Ok(PtyEvent::SessionLost) => {
                 ended = true;
                 break;
             }

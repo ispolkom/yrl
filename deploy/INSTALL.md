@@ -38,4 +38,4 @@ Unsigned `install.sh update` replacement is disabled. After bootstrap, install `
 
 - Real-machine SUDO and ROOT step-up (phrases and broker). The broker currently supports only test operations; real privileged operations require separate design and implementation.
 - A second clean installation from scratch; the script has been exercised once.
-- TCP only: the UDP transport has not been implemented yet (see THREATS and the project memory).
+- UDP, TCP and Relay are implemented, but their current installed-host Stage 8 acceptance is pending (`STAGE8_ACCEPTANCE.md`).

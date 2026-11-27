@@ -217,6 +217,7 @@ async fn u9_a_recorded_answer_is_useless() {
     let n = hs.write_message(&[], &mut buf).unwrap();
     let msg1 = buf[..n].to_vec();
     send(&mut s, &sec, Frame::new(STEPUP_BEGIN, 0, encode_begin(1, Level::Root, &op, &msg1))).await;
+    assert_eq!(recv(&mut s, &sec).await.unwrap().kind, wire::OP_ACCEPTED);
     let ch = recv(&mut s, &sec).await.unwrap();
     let mut scratch = vec![0u8; 512];
     hs.read_message(decode_msg(&ch.payload).unwrap().1, &mut scratch).unwrap();
@@ -230,17 +231,18 @@ async fn u9_a_recorded_answer_is_useless() {
     assert_eq!(decode_result(&recv(&mut s, &sec).await.unwrap().payload).unwrap().1, R_EXPIRED);
     // 2. the same BEGIN and the same recorded PROOF again: the executor's fresh key makes the old answer not decrypt
     send(&mut s, &sec, Frame::new(STEPUP_BEGIN, 0, encode_begin(1, Level::Root, &op, &msg1))).await;
-    let ch2 = recv(&mut s, &sec).await.unwrap();
-    assert_eq!(ch2.kind, STEPUP_CHALLENGE);
-    assert_ne!(ch2.payload, ch.payload, "a new challenge every time");
+    let duplicate = recv(&mut s, &sec).await.unwrap();
+    assert_eq!(duplicate.kind, STEPUP_RESULT);
+    assert_eq!(decode_result(&duplicate.payload).unwrap().1, R_UNKNOWN);
     send(&mut s, &sec, Frame::new(STEPUP_PROOF, 0, proof)).await;
-    assert_eq!(decode_result(&recv(&mut s, &sec).await.unwrap().payload).unwrap().1, R_DENIED);
+    assert_eq!(decode_result(&recv(&mut s, &sec).await.unwrap().payload).unwrap().1, R_EXPIRED);
     assert_eq!(std::fs::read_to_string(r.server_dir().join("broker.log")).unwrap(), log_after_first, "nothing was done a second time");
     // 3. an answer made for another operation cannot be used for this one (the operation is part of what both sides agreed at the start)
     let other = Op::RestartService("something-else".into());
     let mut hs2 = snow::Builder::new(NOISE_XK.parse().unwrap()).local_private_key(&r.client.private).remote_public_key(&r.broker_pub).prologue(&prologue(2, Level::Root, &op, &r.broker_pub)).build_initiator().unwrap();
     let n = hs2.write_message(&[], &mut buf).unwrap();
     send(&mut s, &sec, Frame::new(STEPUP_BEGIN, 0, encode_begin(2, Level::Root, &other, &buf[..n]))).await; // announces another operation than the handshake was made for
+    assert_eq!(recv(&mut s, &sec).await.unwrap().kind, wire::OP_ACCEPTED);
     let ch3 = recv(&mut s, &sec).await.unwrap();
     assert_eq!(decode_result(&ch3.payload).unwrap().1, R_DENIED, "the handshake does not fit what is being announced");
 }
@@ -395,7 +397,11 @@ async fn u16_a_request_whose_level_does_not_fit_its_operation_is_turned_away_bef
         let mut buf = vec![0u8; 512];
         let n = hs.write_message(&[], &mut buf).unwrap();
         send(&mut s, &sec, Frame::new(STEPUP_BEGIN, 0, encode_begin(id, level, &op, &buf[..n]))).await;
-        let f = recv(&mut s, &sec).await.unwrap();
+        let mut f = recv(&mut s, &sec).await.unwrap();
+        if level == Level::Root {
+            assert_eq!(f.kind, wire::OP_ACCEPTED);
+            f = recv(&mut s, &sec).await.unwrap();
+        }
         assert_eq!(f.kind, STEPUP_RESULT, "no challenge is given for a request that cannot be right");
         assert_eq!(decode_result(&f.payload).unwrap().1, R_DENIED);
     }

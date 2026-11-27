@@ -76,9 +76,8 @@ fn priority(f: &Frame) -> Priority {
 }
 
 fn priority_kind(kind: u8) -> Priority {
-    // Only payload is bulk. Transfer setup, completion and abort are control traffic and must pass
-    // a saturated file queue so delivery confirmation and cancellation remain prompt.
-    if kind == crate::filewire::FILE_DATA {
+    // Completion must stay behind its payload in the same ordered queue.
+    if kind == crate::filewire::FILE_DATA || kind == crate::filewire::FILE_END {
         Priority::Bulk
     } else if matches!(
         kind,
@@ -112,7 +111,6 @@ fn priority_kind(kind: u8) -> Priority {
             | crate::filewire::FILE_PUT
             | crate::filewire::FILE_GET
             | crate::filewire::FILE_READY
-            | crate::filewire::FILE_END
             | crate::filewire::FILE_ABORT
     ) {
         Priority::Interactive
@@ -498,12 +496,14 @@ mod resource_tests {
     }
 
     #[tokio::test]
-    async fn file_completion_control_passes_unsent_bulk_payload() {
+    async fn file_completion_follows_unsent_bulk_payload() {
         let link = Link::new(DEFAULT_WINDOW);
         link.push(&Frame::new(crate::filewire::FILE_DATA, 0, vec![7; 4096])).await.unwrap();
         link.push(&Frame::new(crate::filewire::FILE_END, 0, vec![0; 8])).await.unwrap();
         let mut cursor = 0;
-        let Action::Send(0, first, Priority::Interactive) = link.next_action(&mut cursor, false) else { panic!("file completion must use the protected control lane") };
-        assert_eq!(Frame::decode(&first).unwrap().kind, crate::filewire::FILE_END);
+        let Action::Send(0, first, Priority::Bulk) = link.next_action(&mut cursor, false) else { panic!("file data must precede completion") };
+        assert_eq!(Frame::decode(&first).unwrap().kind, crate::filewire::FILE_DATA);
+        let Action::Send(1, second, Priority::Bulk) = link.next_action(&mut cursor, false) else { panic!("completion must follow the payload") };
+        assert_eq!(Frame::decode(&second).unwrap().kind, crate::filewire::FILE_END);
     }
 }

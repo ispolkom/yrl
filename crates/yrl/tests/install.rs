@@ -252,7 +252,7 @@ fn i6_update_service_is_manual_offline_and_narrowly_writable() {
     assert!(val(&t, "CapabilityBoundingSet").iter().all(|v| v.is_empty()));
     let rw = words(val(&t, "ReadWritePaths"));
     assert_eq!(rw, ["/opt/yrl".to_string(), "/var/lib/yrl-update".to_string()].into());
-    assert!(!t.contains("[Install]"), "the updater must not be enabled automatically");
+    assert!(!t.lines().any(|line| line.trim() == "[Install]"), "the updater must not be enabled automatically");
 }
 
 #[test]
