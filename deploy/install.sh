@@ -77,8 +77,7 @@ status)
 start)
   "$BIN" install check "$STATE" "$RUN" || { echo "Repair the layout first: sudo $0 fix"; exit 1; }
   systemctl start yrl.target
-  sleep 2
-  systemctl --no-pager --lines=0 status yrl-audit yrl-broker yrl-executor yrl-firewall yrl-gatekeeper || true
+  systemctl --no-pager --lines=0 status yrl-audit yrl-broker yrl-executor yrl-firewall yrl-gatekeeper
   ;;
 update)
   echo "Unsigned in-place updates are disabled. Verify a complete signed bundle and use yrl-update as documented in docs/UPDATES.md." >&2

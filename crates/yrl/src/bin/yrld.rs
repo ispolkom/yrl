@@ -296,7 +296,7 @@ async fn executor(dir: &str, a: &[String]) -> anyhow::Result<()> {
     cfg.broker = yrl::ipc::load_executor_to_broker(&dir).ok(); // without a broker every ROOT step-up is refused
     cfg.audit.exec = yrl::ipc::audit_client(&dir, "executor"); // reports to the audit process, if one has been set up
     if std::env::var_os("YRL_SESSION_CGROUPS").is_some() {
-        yrl::cgroup::verify_delegation_with(&cfg.session_cgroup_limits)?;
+        yrl::cgroup::prepare_delegation(&cfg.session_cgroup_limits)?;
     }
     if std::env::var_os("YRL_NO_SANDBOX").is_none() {
         yrl::sandbox::apply_executor()?;

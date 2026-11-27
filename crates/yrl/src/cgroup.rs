@@ -250,7 +250,12 @@ pub struct SessionCgroup {
     finished: bool,
 }
 
+static DELEGATED_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn root() -> Result<PathBuf> {
+    if let Some(path) = DELEGATED_ROOT.get() {
+        return Ok(path.clone());
+    }
     let text = fs::read_to_string("/proc/self/cgroup")?;
     let relative = text
         .lines()
@@ -378,6 +383,29 @@ pub fn verify_delegation_with(limits: &SessionLimits) -> Result<()> {
     let result = apply_limits(&path, limits);
     let _ = fs::remove_dir(&path);
     result
+}
+
+/// systemd delegates the unit cgroup but starts Executor directly in it.
+/// Domain controllers can only be enabled after the unit has no direct tasks.
+pub fn prepare_delegation(limits: &SessionLimits) -> Result<()> {
+    let unit = root()?;
+    let controllers = fs::read_to_string(unit.join("cgroup.controllers"))?;
+    let available: Vec<_> = controllers.split_whitespace().collect();
+    let mut enable = vec!["+cpu", "+memory", "+pids"];
+    for required in ["cpu", "memory", "pids"] {
+        if !available.contains(&required) {
+            bail!("Executor cgroup controller {required} is not delegated");
+        }
+    }
+    if available.contains(&"io") {
+        enable.push("+io");
+    }
+    let executor = unit.join("yrl-executor-main");
+    fs::create_dir_all(&executor)?;
+    write_control(&executor, "cgroup.procs", &std::process::id().to_string())?;
+    write_control(&unit, "cgroup.subtree_control", &enable.join(" "))?;
+    DELEGATED_ROOT.set(unit).map_err(|_| anyhow!("Executor cgroup was already prepared"))?;
+    verify_delegation_with(limits)
 }
 
 impl SessionCgroup {
