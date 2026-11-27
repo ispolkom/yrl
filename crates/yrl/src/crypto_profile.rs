@@ -3,6 +3,7 @@ use anyhow::{bail, Context as _, Result};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -254,7 +255,9 @@ impl ProfileStore {
     pub fn open(path: &Path) -> Result<Self> {
         let entries = match OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(
+                libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
+            )
             .open(path)
         {
             Ok(mut f) => {
@@ -300,21 +303,64 @@ impl ProfileStore {
         if suite(selected).is_none() {
             bail!("unknown profile")
         };
-        let k = Self::peer(context, key);
-        let old = *self.entries.get(&k).unwrap_or(&0);
-        if selected < old {
-            bail!("cryptographic profile rollback")
-        };
-        if selected == old {
-            return Ok(());
-        }
-        self.entries.insert(k, selected);
-        let parent = self.path.parent().context("profile store needs parent")?;
+        let parent = self.path.parent()
+            .context("profile store needs parent")?;
         fs::create_dir_all(parent)?;
+
         let mut perms = fs::metadata(parent)?.permissions();
         use std::os::unix::fs::PermissionsExt;
         perms.set_mode(0o700);
         fs::set_permissions(parent, perms)?;
+
+        // Lock a stable inode, not the store replaced by rename.
+        // Never remove this lock file during normal operation.
+        let mut lock_name = self.path.as_os_str().to_os_string();
+        lock_name.push(".lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(
+                libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
+            )
+            .open(PathBuf::from(lock_name))?;
+
+        let meta = lock.metadata()?;
+        if !meta.is_file()
+            || meta.nlink() != 1
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o077 != 0
+        {
+            bail!("unsafe crypto profile lock");
+        }
+
+        loop {
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error.into());
+            }
+        }
+
+        // Reload under the lock. Our pre-handshake snapshot may be stale.
+        self.entries = Self::open(&self.path)?.entries;
+
+        let k = Self::peer(context, key);
+        let old = *self.entries.get(&k).unwrap_or(&0);
+        if selected < old {
+            bail!("cryptographic profile rollback");
+        }
+        if selected == old {
+            // Also retry directory durability if an earlier publication
+            // succeeded but its directory sync failed.
+            File::open(parent)?.sync_all()?;
+            return Ok(());
+        }
+
+        self.entries.insert(k, selected);
         let mut text = String::new();
         for (k, v) in &self.entries {
             text.push_str(&format!("{k} {v:#010x}\n"))

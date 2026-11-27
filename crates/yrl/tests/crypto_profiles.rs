@@ -175,3 +175,208 @@ async fn hybrid_profile_completes_bound_mlkem768_upgrade() {
     assert_eq!(client_result.unwrap().profile(), HYBRID_X25519_MLKEM768);
     assert_eq!(server_result.unwrap().0.profile(), HYBRID_X25519_MLKEM768);
 }
+
+// REV-001: independently opened stores must not lose each other's entries.
+#[test]
+fn independent_profile_writers_preserve_all_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state").join("profiles");
+
+    let peer_a = [11u8; 32];
+    let peer_b = [22u8; 32];
+
+    let mut a = ProfileStore::open(&path).unwrap();
+    let mut b = ProfileStore::open(&path).unwrap();
+
+    a.remember(Context::Executor, &peer_a, CLASSICAL_V1)
+        .unwrap();
+
+    b.remember(Context::Executor, &peer_b, CLASSICAL_V1)
+        .unwrap();
+
+    let saved = ProfileStore::open(&path).unwrap();
+
+    assert_eq!(
+        saved.minimum(Context::Executor, &peer_a, 0),
+        CLASSICAL_V1,
+        "writer B erased writer A's profile"
+    );
+
+    assert_eq!(
+        saved.minimum(Context::Executor, &peer_b, 0),
+        CLASSICAL_V1
+    );
+}
+
+// REV-001: a stale writer must never overwrite a stronger profile.
+#[cfg(feature = "pq-hybrid")]
+#[test]
+fn stale_profile_writer_cannot_downgrade_peer() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state").join("profiles");
+    let peer = [33u8; 32];
+
+    let mut strong = ProfileStore::open(&path).unwrap();
+    let mut stale = ProfileStore::open(&path).unwrap();
+
+    strong
+        .remember(Context::Executor, &peer, HYBRID_X25519_MLKEM768)
+        .unwrap();
+
+    assert!(
+        stale.remember(Context::Executor, &peer, CLASSICAL_V1)
+            .is_err(),
+        "stale writer accepted a cryptographic downgrade"
+    );
+
+    let saved = ProfileStore::open(&path).unwrap();
+
+    assert_eq!(
+        saved.minimum(Context::Executor, &peer, 0),
+        HYBRID_X25519_MLKEM768
+    );
+}
+
+// REV-001: concurrent writers must preserve every peer's policy.
+#[test]
+fn parallel_profile_writers_preserve_every_peer() {
+    use std::sync::{Arc, Barrier};
+
+    const N: usize = 32;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state").join("profiles");
+    let barrier = Arc::new(Barrier::new(N));
+    let mut workers = Vec::new();
+
+    for i in 0..N {
+        let path = path.clone();
+        let barrier = Arc::clone(&barrier);
+
+        workers.push(std::thread::spawn(move || {
+            let mut store = ProfileStore::open(&path).unwrap();
+            let peer = [i as u8; 32];
+
+            barrier.wait();
+
+            store.remember(
+                Context::Executor,
+                &peer,
+                CLASSICAL_V1,
+            ).unwrap();
+        }));
+    }
+
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let saved = ProfileStore::open(&path).unwrap();
+
+    for i in 0..N {
+        assert_eq!(
+            saved.minimum(
+                Context::Executor,
+                &[i as u8; 32],
+                0,
+            ),
+            CLASSICAL_V1,
+            "missing profile for peer {i}"
+        );
+    }
+}
+
+// REV-001: the lock must never follow a symbolic link.
+#[test]
+fn profile_store_refuses_symlink_lock() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("state");
+    std::fs::create_dir(&dir).unwrap();
+
+    let path = dir.join("profiles");
+    let victim = temp.path().join("victim");
+
+    std::fs::write(&victim, b"unchanged").unwrap();
+    symlink(&victim, dir.join("profiles.lock")).unwrap();
+
+    let mut store = ProfileStore::open(&path).unwrap();
+
+    assert!(
+        store.remember(
+            Context::Executor,
+            &[44u8; 32],
+            CLASSICAL_V1,
+        ).is_err()
+    );
+
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        b"unchanged"
+    );
+
+    assert!(!path.exists());
+}
+
+// REV-001: an insecure lock file must be refused.
+#[test]
+fn profile_store_refuses_public_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("state");
+    std::fs::create_dir(&dir).unwrap();
+
+    let path = dir.join("profiles");
+    let lock = dir.join("profiles.lock");
+
+    std::fs::write(&lock, b"").unwrap();
+    std::fs::set_permissions(
+        &lock,
+        std::fs::Permissions::from_mode(0o666),
+    ).unwrap();
+
+    let mut store = ProfileStore::open(&path).unwrap();
+
+    assert!(
+        store.remember(
+            Context::Executor,
+            &[55u8; 32],
+            CLASSICAL_V1,
+        ).is_err()
+    );
+
+    assert!(!path.exists());
+}
+
+// REV-001: all publications must use the same lock inode.
+#[test]
+fn profile_store_preserves_lock_inode() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("state");
+    let path = dir.join("profiles");
+    let lock = dir.join("profiles.lock");
+
+    let mut store = ProfileStore::open(&path).unwrap();
+
+    store.remember(
+        Context::Executor,
+        &[66u8; 32],
+        CLASSICAL_V1,
+    ).unwrap();
+
+    let before = std::fs::metadata(&lock).unwrap();
+
+    store.remember(
+        Context::Executor,
+        &[77u8; 32],
+        CLASSICAL_V1,
+    ).unwrap();
+
+    let after = std::fs::metadata(&lock).unwrap();
+
+    assert_eq!(before.ino(), after.ino());
+    assert_eq!(before.dev(), after.dev());
+    assert_eq!(after.permissions().mode() & 0o777, 0o600);
+}
