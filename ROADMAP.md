@@ -15,7 +15,7 @@ This file distinguishes the **accepted implementation-stage sequence** from the 
 | **6. Trusted audit and software delivery** | Rotated and independently verifiable Audit history, signing-key lifecycle, signed releases and downgrade-safe updates. | Implemented through substages 6.1–6.6. Focused tests are prepared and compilation/unit policy verification pass; comprehensive and installed-host acceptance remain Stage 8. |
 | **7. Extended cryptographic protection** | Versioned profiles, hybrid post-quantum transport/signatures, OPAQUE, FIDO2 and optional TPM-backed key handling. | Implemented through 7.1–7.6 behind default-off feature gates. Production activation, vectors, hardware and interoperability acceptance remain Stage 8. |
 
-| **8. Final acceptance** | Regression, installed-runtime security, fault injection, crypto, performance and final report. | Conditional acceptance. The Debian lab covered installed operation, signed updates, hybrid proof paths and resource limits. Physical hardware, long-duration workloads and residual fault cases remain open. See `STAGE8_ACCEPTANCE.md`. |
+| **8. Final acceptance** | Regression, installed-runtime security, fault injection, crypto, performance and final report. | Conditional acceptance. Debian lab checks now cover installed operation, signed updates, hybrid proof paths, resource limits, a ten-minute impaired three-route workload, guest power cuts and externally anchored recovery. Rolling mixed-version protocol migration is a confirmed FAIL; physical hardware remains BLOCKED. See `STAGE8_ACCEPTANCE.md`. |
 
 ## Stage 8 acceptance in progress
 
