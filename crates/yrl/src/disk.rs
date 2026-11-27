@@ -90,12 +90,15 @@ struct Record {
 struct State {
     records: HashMap<[u8; 16], Record>,
     active: HashSet<[u8; 16]>,
+    faulted: bool,
 }
 
 pub struct DiskManager {
     ledger: PathBuf,
     limits: DiskLimits,
     state: Mutex<State>,
+    // Exclusive ownership survives while reservations exist.
+    _ownership: std::fs::File,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -115,14 +118,20 @@ pub struct Reservation {
 impl DiskManager {
     pub fn open(ledger: PathBuf, limits: DiskLimits) -> anyhow::Result<Self> {
         limits.validate()?;
+        let ownership = acquire_ownership(&ledger)?;
         let records = read_ledger(&ledger)?;
+
+        // Establish a durable baseline before allowing admission.
+        persist(&ledger, &records)?;
         let manager = DiskManager {
             ledger,
             limits,
             state: Mutex::new(State {
                 records,
                 active: HashSet::new(),
+                faulted: false,
             }),
+            _ownership: ownership,
         };
         manager.expire()?;
         Ok(manager)
@@ -145,6 +154,11 @@ impl DiskManager {
         let path_bytes = path.as_os_str().as_bytes().to_vec();
         let now = now();
         let mut s = self.state.lock().unwrap();
+
+        if s.faulted {
+            return Err(Refusal::State);
+        }
+
         // The same authenticated principal may resume the exact reservation without being charged
         // twice. No other upload may concurrently claim the pathname.
         if let Some(token) = s
@@ -163,12 +177,11 @@ impl DiskManager {
             if record.key != key || record.account != account || record.size != size {
                 return Err(Refusal::Busy);
             }
-            let old_touched = record.touched;
             record.touched = now;
             s.active.insert(token);
             if persist(&self.ledger, &s.records).is_err() {
                 s.active.remove(&token);
-                s.records.get_mut(&token).unwrap().touched = old_touched;
+                mark_faulted(&mut s);
                 return Err(Refusal::State);
             }
             return Ok(Reservation {
@@ -225,7 +238,11 @@ impl DiskManager {
         s.active.insert(token);
         if persist(&self.ledger, &s.records).is_err() {
             s.active.remove(&token);
-            s.records.remove(&token);
+
+            // Publication may have happened. Retain the charge
+            // and refuse further admission until recovery.
+            mark_faulted(&mut s);
+
             return Err(Refusal::State);
         }
         Ok(Reservation {
@@ -238,6 +255,11 @@ impl DiskManager {
     fn expire(&self) -> anyhow::Result<()> {
         let cutoff = now().saturating_sub(self.limits.partial_ttl.as_secs());
         let mut s = self.state.lock().unwrap();
+
+        if s.faulted {
+            anyhow::bail!("disk reservation ledger is faulted");
+        }
+
         let expired: Vec<_> = s
             .records
             .iter()
@@ -256,6 +278,7 @@ impl DiskManager {
         }
         if let Err(e) = persist(&self.ledger, &s.records) {
             s.records.extend(removed);
+            mark_faulted(&mut s);
             return Err(e);
         }
         Ok(())
@@ -264,6 +287,13 @@ impl DiskManager {
     fn release(&self, token: [u8; 16], completed: bool) {
         let mut s = self.state.lock().unwrap();
         s.active.remove(&token);
+
+        // Once persistence is uncertain, do not perform more
+        // destructive cleanup or release persistent charges.
+        if s.faulted {
+            return;
+        }
+
         if let Some(r) = s.records.remove(&token) {
             if !completed {
                 remove_tagged_partial(&r);
@@ -272,6 +302,7 @@ impl DiskManager {
             // fail-closed: storage trouble cannot turn cancellation into a quota bypass.
             if persist(&self.ledger, &s.records).is_err() {
                 s.records.insert(token, r);
+                mark_faulted(&mut s);
             }
         }
     }
@@ -292,18 +323,20 @@ impl Reservation {
     pub fn touch(&self) {
         let now = now();
         let mut s = self.manager.state.lock().unwrap();
+
+        if s.faulted {
+            return;
+        }
+
         let Some(r) = s.records.get_mut(&self.token) else {
             return;
         };
         if now.saturating_sub(r.touched) < 60 {
             return;
         }
-        let old = r.touched;
         r.touched = now;
         if persist(&self.manager.ledger, &s.records).is_err() {
-            if let Some(r) = s.records.get_mut(&self.token) {
-                r.touched = old;
-            }
+            mark_faulted(&mut s);
         }
     }
     pub fn complete(mut self) {
@@ -450,10 +483,79 @@ fn now() -> u64 {
         .as_secs()
 }
 
+fn mark_faulted(state: &mut State) {
+    state.faulted = true;
+    eprintln!(
+        "[yrld] disk reservation ledger faulted: admission disabled until recovery"
+    );
+}
+
+fn ledger_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn acquire_ownership(path: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+
+    std::fs::create_dir_all(ledger_parent(path))?;
+
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(
+            libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
+        )
+        .open(PathBuf::from(name))?;
+
+    let meta = lock.metadata()?;
+
+    if !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.mode() & 0o077 != 0
+    {
+        anyhow::bail!("unsafe disk reservation ledger lock");
+    }
+
+    loop {
+        let rc = unsafe {
+            libc::flock(
+                lock.as_raw_fd(),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        };
+
+        if rc == 0 {
+            return Ok(lock);
+        }
+
+        let error = std::io::Error::last_os_error();
+
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            anyhow::bail!("disk reservation ledger already owned");
+        }
+
+        return Err(error.into());
+    }
+}
+
 fn read_ledger(path: &Path) -> anyhow::Result<HashMap<[u8; 16], Record>> {
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(
+            libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
+        )
         .open(path)
     {
         Ok(f) => f,
@@ -496,44 +598,76 @@ fn read_ledger(path: &Path) -> anyhow::Result<HashMap<[u8; 16], Record>> {
     Ok(out)
 }
 
-fn persist(path: &Path, records: &HashMap<[u8; 16], Record>) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+fn persist(
+    path: &Path,
+    records: &HashMap<[u8; 16], Record>,
+) -> anyhow::Result<()> {
+    let parent = ledger_parent(path);
+    std::fs::create_dir_all(parent)?;
+
     let tmp = path.with_extension(format!(
         "tmp-{}-{}",
         std::process::id(),
         hex::encode(random_token()?)
     ));
+
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&tmp)?;
-    let mut rows: Vec<_> = records.values().collect();
-    rows.sort_by_key(|r| r.token);
-    for r in rows {
-        writeln!(
-            f,
-            "{} {} {} {} {} {} {}",
-            hex::encode(r.token),
-            hex::encode(&r.key),
-            hex::encode(r.account.as_bytes()),
-            r.uid,
-            r.size,
-            r.touched,
-            hex::encode(&r.path)
-        )?;
+
+    let result = (|| -> anyhow::Result<()> {
+        let mut rows: Vec<_> = records.values().collect();
+        rows.sort_by_key(|r| r.token);
+
+        for r in rows {
+            writeln!(
+                f,
+                "{} {} {} {} {} {} {}",
+                hex::encode(r.token),
+                hex::encode(&r.key),
+                hex::encode(r.account.as_bytes()),
+                r.uid,
+                r.size,
+                r.touched,
+                hex::encode(&r.path)
+            )?;
+        }
+
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+
+        // Atomic publication is not durable publication.
+        sync_directory(parent)?;
+
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)?;
-    if let Some(parent) = path.parent() {
-        // The atomic publication above is the commit point. Directory fsync improves crash
-        // durability, but an exotic filesystem refusing it must not make callers roll back an
-        // already-published ledger in memory and thereby create double accounting.
-        let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
+
+    result
+}
+
+// REV-004: fault injection is available only in unit tests.
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_DIRECTORY_SYNC.with(|flag| flag.replace(false)) {
+        return Err(
+            std::io::Error::from_raw_os_error(libc::EIO)
+        );
     }
-    Ok(())
+
+    std::fs::File::open(path)?.sync_all()
 }
 
 use std::os::unix::fs::OpenOptionsExt;
@@ -542,6 +676,127 @@ use std::os::unix::fs::OpenOptionsExt;
 mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
+
+    fn fail_next_directory_sync() {
+        FAIL_DIRECTORY_SYNC.with(|flag| flag.set(true));
+    }
+
+    #[test]
+    fn rev004_new_reservation_requires_durable_ledger() {
+        let d = tempfile::tempdir().unwrap();
+
+        let m = Arc::new(
+            DiskManager::open(
+                d.path().join("ledger"),
+                limits(),
+            ).unwrap()
+        );
+
+        let t = target(d.path());
+
+        fail_next_directory_sync();
+
+        assert!(
+            matches!(
+                m.reserve(
+                    b"key", "alice", &t, b"one", 60
+                ),
+                Err(Refusal::State)
+            ),
+            "reservation granted despite directory sync failure"
+        );
+    }
+
+    #[test]
+    fn rev004_failed_release_cannot_enable_new_admission() {
+        let d = tempfile::tempdir().unwrap();
+
+        let m = Arc::new(
+            DiskManager::open(
+                d.path().join("ledger"),
+                limits(),
+            ).unwrap()
+        );
+
+        let t = target(d.path());
+
+        let reservation = m.reserve(
+            b"key-a", "alice", &t, b"one", 60
+        ).unwrap();
+
+        fail_next_directory_sync();
+
+        reservation.complete();
+
+        assert!(
+            matches!(
+                m.reserve(
+                    b"key-b", "bob", &t, b"two", 70
+                ),
+                Err(Refusal::State)
+            ),
+            "new upload admitted after uncertain ledger release"
+        );
+    }
+
+    #[test]
+    fn rev004_resume_requires_durable_ledger() {
+        let d = tempfile::tempdir().unwrap();
+
+        let m = Arc::new(
+            DiskManager::open(
+                d.path().join("ledger"),
+                limits(),
+            ).unwrap()
+        );
+
+        let t = target(d.path());
+
+        let reservation = m.reserve(
+            b"key", "alice", &t, b"one", 60
+        ).unwrap();
+
+        reservation.preserve();
+
+        fail_next_directory_sync();
+
+        assert!(
+            matches!(
+                m.reserve(
+                    b"key", "alice", &t, b"one", 60
+                ),
+                Err(Refusal::State)
+            ),
+            "resume granted despite directory sync failure"
+        );
+    }
+
+    #[test]
+    fn rev004_rejects_second_ledger_owner() {
+        let d = tempfile::tempdir().unwrap();
+        let ledger = d.path().join("ledger");
+
+        let m = Arc::new(
+            DiskManager::open(
+                ledger.clone(), limits()
+            ).unwrap()
+        );
+
+        let t = target(d.path());
+
+        let reservation = m.reserve(
+            b"key-a", "alice", &t, b"one", 60
+        ).unwrap();
+
+        assert!(
+            DiskManager::open(
+                ledger, limits()
+            ).is_err(),
+            "second independent ledger owner was admitted"
+        );
+
+        drop(reservation);
+    }
 
     fn target(home: &Path) -> Target {
         Target {
@@ -643,7 +898,9 @@ mod tests {
         let t = target(d.path());
         let m = Arc::new(DiskManager::open(ledger.clone(), limits()).unwrap());
         let a = m.reserve(b"key-a", "alice", &t, b"one", 60).unwrap();
-        std::mem::forget(a); // model a process crash: Drop did not run
+        let mut a = a;
+        a.finished = true;
+        drop(a); // suppress reservation cleanup
         drop(m);
         let m = Arc::new(DiskManager::open(ledger, limits()).unwrap());
         assert!(matches!(
@@ -751,12 +1008,286 @@ mod tests {
             s.records.get_mut(&r.token).unwrap().touched = 0;
             persist(&ledger, &s.records).unwrap();
         }
-        std::mem::forget(r);
+        let mut r = r;
+        r.finished = true;
+        drop(r); // suppress reservation cleanup
         drop(m); // restart loses only the active marker
         let m = Arc::new(DiskManager::open(ledger, l).unwrap());
         assert!(!p.exists());
         assert!(m
             .reserve(b"key", "alice", &target(d.path()), b"next", 70)
             .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod rev004_extended_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    fn limits() -> DiskLimits {
+        DiskLimits {
+            bytes_total: 100,
+            bytes_per_key: 100,
+            bytes_per_account: 100,
+            free_space_reserve: 0,
+            partial_ttl: Duration::from_secs(3600),
+        }
+    }
+
+    fn target(home: &Path) -> Target {
+        Target {
+            pw: crate::identity::Pw {
+                name: "test".into(),
+                uid: unsafe { libc::geteuid() },
+                gid: unsafe { libc::getegid() },
+                home: home.display().to_string(),
+                shell: String::new(),
+            },
+            switch: false,
+        }
+    }
+
+    fn fail_sync() {
+        FAIL_DIRECTORY_SYNC.with(|flag| flag.set(true));
+    }
+
+    fn charge(m: &DiskManager) -> u64 {
+        m.state.lock().unwrap().records.values()
+            .map(|record| record.size)
+            .sum()
+    }
+
+    #[test]
+    fn failed_admission_retains_conservative_charge() {
+        let d = tempfile::tempdir().unwrap();
+
+        let m = Arc::new(
+            DiskManager::open(
+                d.path().join("ledger"), limits()
+            ).unwrap()
+        );
+
+        fail_sync();
+
+        assert!(matches!(
+            m.reserve(
+                b"key", "alice", &target(d.path()), b"one", 60
+            ),
+            Err(Refusal::State)
+        ));
+
+        assert_eq!(charge(&m), 60);
+
+        let state = m.state.lock().unwrap();
+        assert!(state.faulted);
+        assert!(state.active.is_empty());
+    }
+
+    #[test]
+    fn failed_completion_retains_conservative_charge() {
+        let d = tempfile::tempdir().unwrap();
+
+        let m = Arc::new(
+            DiskManager::open(
+                d.path().join("ledger"), limits()
+            ).unwrap()
+        );
+
+        let r = m.reserve(
+            b"key", "alice", &target(d.path()), b"one", 60
+        ).unwrap();
+
+        fail_sync();
+        r.complete();
+
+        assert_eq!(charge(&m), 60);
+        assert!(m.state.lock().unwrap().faulted);
+    }
+
+    #[test]
+    fn failed_touch_faults_manager_and_preserves_partial() {
+        let d = tempfile::tempdir().unwrap();
+        let ledger = d.path().join("ledger");
+        let partial = d.path().join("one.yrl-part");
+
+        let m = Arc::new(
+            DiskManager::open(ledger.clone(), limits()).unwrap()
+        );
+
+        let t = target(d.path());
+
+        let r = m.reserve(
+            b"key", "alice", &t, b"one", 60
+        ).unwrap();
+
+        let original_token = r.token_hex();
+
+        std::fs::write(&partial, b"persistent partial")
+            .unwrap();
+
+        let file = std::fs::File::open(&partial).unwrap();
+        let token = hex::decode(&original_token).unwrap();
+
+        assert_eq!(
+            unsafe {
+                libc::fsetxattr(
+                    file.as_raw_fd(),
+                    TAG.as_ptr().cast(),
+                    token.as_ptr().cast(),
+                    token.len(),
+                    0,
+                )
+            },
+            0
+        );
+
+        drop(file);
+
+        // Force a persistent activity update without waiting.
+        {
+            let mut state = m.state.lock().unwrap();
+            state.records.get_mut(&r.token)
+                .unwrap().touched = 0;
+        }
+
+        fail_sync();
+        r.touch();
+
+        assert!(m.state.lock().unwrap().faulted);
+
+        assert!(matches!(
+            m.reserve(b"other", "bob", &t, b"two", 1),
+            Err(Refusal::State)
+        ));
+
+        assert!(m.expire().is_err());
+
+        // Drop must not delete the partial while faulted.
+        drop(r);
+
+        assert_eq!(
+            std::fs::read(&partial).unwrap(),
+            b"persistent partial"
+        );
+
+        assert_eq!(charge(&m), 60);
+        drop(m);
+
+        // Recovery must preserve the original reservation.
+        let recovered = Arc::new(
+            DiskManager::open(ledger, limits()).unwrap()
+        );
+
+        assert_eq!(charge(&recovered), 60);
+
+        assert!(matches!(
+            recovered.reserve(
+                b"other", "bob", &t, b"two", 41
+            ),
+            Err(Refusal::Quota)
+        ));
+
+        let resumed = recovered.reserve(
+            b"key", "alice", &t, b"one", 60
+        ).unwrap();
+
+        assert_eq!(resumed.token_hex(), original_token);
+        assert_eq!(charge(&recovered), 60);
+
+        resumed.preserve();
+    }
+
+    #[test]
+    fn reservation_retains_exclusive_ownership() {
+        let d = tempfile::tempdir().unwrap();
+        let ledger = d.path().join("ledger");
+
+        let m = Arc::new(
+            DiskManager::open(ledger.clone(), limits()).unwrap()
+        );
+
+        let r = m.reserve(
+            b"key", "alice", &target(d.path()), b"one", 60
+        ).unwrap();
+
+        drop(m);
+
+        assert!(
+            DiskManager::open(
+                ledger.clone(), limits()
+            ).is_err()
+        );
+
+        r.preserve();
+
+        let reopened = DiskManager::open(
+            ledger, limits()
+        ).unwrap();
+
+        assert_eq!(charge(&reopened), 60);
+    }
+
+    #[test]
+    fn refuses_symlink_ledger_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim");
+        let ledger = d.path().join("ledger");
+
+        std::fs::write(&victim, b"unchanged").unwrap();
+
+        symlink(
+            &victim,
+            d.path().join("ledger.lock")
+        ).unwrap();
+
+        assert!(
+            DiskManager::open(ledger.clone(), limits())
+                .is_err()
+        );
+
+        assert_eq!(
+            std::fs::read(victim).unwrap(),
+            b"unchanged"
+        );
+
+        assert!(!ledger.exists());
+    }
+
+    #[test]
+    fn refuses_public_ledger_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let lock = d.path().join("ledger.lock");
+
+        std::fs::write(&lock, b"").unwrap();
+
+        std::fs::set_permissions(
+            &lock,
+            std::fs::Permissions::from_mode(0o666)
+        ).unwrap();
+
+        assert!(
+            DiskManager::open(
+                d.path().join("ledger"), limits()
+            ).is_err()
+        );
+    }
+
+    #[test]
+    fn failed_publication_removes_temporary_file() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("ledger");
+
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(persist(&path, &HashMap::new()).is_err());
+
+        assert_eq!(
+            std::fs::read_dir(d.path()).unwrap().count(),
+            1
+        );
+
+        assert!(path.is_dir());
     }
 }

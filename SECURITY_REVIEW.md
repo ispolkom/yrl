@@ -175,3 +175,90 @@ Limits:
   terminated when the journal becomes faulted.
 - Exclusive ownership assumes a trusted state directory.
 - Full workspace and installed-system regression pending.
+
+## REV-004: Durable disk reservations and exclusive ledger ownership
+
+Priority: HIGH.
+
+### Defects
+
+Directory synchronization failures were ignored after
+atomic ledger publication.
+
+New reservations and resumed uploads could be admitted
+without confirmed durable persistence.
+
+Uncertain reservation release could enable further admission.
+
+Independent DiskManager instances could overwrite each
+other's persistent reservation records.
+
+### Remediation
+
+- Require successful directory synchronization.
+- Establish a durable ledger baseline during startup.
+- Hold exclusive flock for the DiskManager lifetime.
+- Retain ownership while outstanding reservations exist.
+- Enter fail-closed state after persistence failure.
+- Refuse new reservations and resume while faulted.
+- Conservatively retain uncertain reservation charges.
+- Disable further destructive cleanup while faulted.
+- Reject symbolic links and insecure lock files.
+- Remove temporary files after failed publication.
+- Preserve existing ledger format and reservation tokens.
+
+### Verification
+
+Before remediation:
+- 7 PASS, 4 FAIL.
+- All four targeted defects reproduced.
+
+Initial remediation:
+- Default disk tests: 11/11 PASS.
+- Hybrid disk tests: 11/11 PASS.
+- File transfers: 15/15 PASS.
+- Filesystem operations: 10/10 PASS.
+- Resource limits: 5/5 PASS.
+- RESUME: 19/19 PASS.
+- Total: 71 PASS, 0 FAIL.
+
+Extended regression:
+- Default disk tests: 18/18 PASS.
+- Hybrid disk tests: 18/18 PASS.
+- Conservative accounting after failed admission: PASS.
+- Conservative accounting after failed release: PASS.
+- Activity update failure: PASS.
+- Partial preservation while faulted: PASS.
+- Original reservation token after recovery: PASS.
+- Exclusive ownership through reservation lifetime: PASS.
+- Unsafe lock rejection: PASS.
+- Temporary file cleanup: PASS.
+
+Real separate-process crash regression:
+- Default configuration: PASS.
+- Hybrid configuration: PASS.
+- Repeated SIGKILL recovery: 20/20 PASS.
+- Concurrent ledger ownership refused.
+- Partial contents and reservation xattr preserved.
+- Original token preserved.
+- Global quota enforced after recovery.
+- Different principal refused access to reservation.
+- Resume without double charging: PASS.
+- Cancellation releases reservation and tagged partial.
+- Full quota available after completed cleanup.
+
+The ignored child test is a subprocess entry point
+explicitly invoked by the parent crash test.
+
+Status: FIXED within the verified regression scope.
+
+Limits:
+- Physical power-loss durability remains untested.
+- Crash tests exercise DiskManager directly.
+- Installed Executor fault recovery remains unverified.
+- Existing transfers are not automatically terminated
+  when the ledger becomes faulted.
+- Cleanup performed before a persistence failure cannot
+  be rolled back.
+- Exclusive ownership assumes a trusted state directory.
+- Full workspace and installed-system regression pending.
