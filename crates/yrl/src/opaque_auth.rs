@@ -66,7 +66,7 @@ pub struct ServerLoginState {
 
 pub fn registration_start(password: &[u8]) -> Result<(ClientRegistrationState, Vec<u8>)> {
     if password.len() < 8 || password.len() > crate::wire::MAX_PASSWORD { bail!("password outside configured bounds") }
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let r = ClientRegistration::<YrlSuite>::start(&mut rng, password).map_err(|e| anyhow::anyhow!("OPAQUE registration start: {e}"))?;
     Ok((ClientRegistrationState { inner: r.state }, r.message.serialize().to_vec()))
 }
@@ -81,7 +81,7 @@ pub fn registration_response(setup: &Setup, account: &[u8], request: &[u8]) -> R
 pub fn registration_finish(state: ClientRegistrationState, password: &[u8], account: &[u8], role: &[u8], response: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
     bounded(response)?;
     let response = RegistrationResponse::deserialize(response).map_err(|e| anyhow::anyhow!("bad OPAQUE registration response: {e}"))?;
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let argon = Argon2::default();
     let r = state.inner.finish(&mut rng, password, response, ClientRegistrationFinishParameters::new(ids(account, role), Some(&argon))).map_err(|e| anyhow::anyhow!("OPAQUE registration finish: {e}"))?;
     Ok((r.message.serialize().to_vec(), Zeroizing::new(r.export_key.to_vec())))
@@ -95,7 +95,7 @@ pub fn registration_store(upload: &[u8]) -> Result<Record> {
 
 pub fn login_start(password: &[u8]) -> Result<(ClientLoginState, Vec<u8>)> {
     if password.len() > crate::wire::MAX_PASSWORD { bail!("password outside configured bounds") }
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let r = ClientLogin::<YrlSuite>::start(&mut rng, password).map_err(|e| anyhow::anyhow!("OPAQUE login start: {e}"))?;
     Ok((ClientLoginState { inner: r.state }, r.message.serialize().to_vec()))
 }
@@ -104,7 +104,7 @@ pub fn login_start(password: &[u8]) -> Result<(ClientLoginState, Vec<u8>)> {
 pub fn login_response(setup: &Setup, record: Option<Record>, account: &[u8], role: &[u8], binding: &[u8], request: &[u8]) -> Result<(ServerLoginState, Vec<u8>)> {
     bounded(request)?;
     let request = CredentialRequest::deserialize(request).map_err(|e| anyhow::anyhow!("bad OPAQUE credential request: {e}"))?;
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let params = ServerLoginParameters { context: Some(binding), identifiers: ids(account, role) };
     let r = ServerLogin::start(&mut rng, setup, record, request, account, params).map_err(|e| anyhow::anyhow!("OPAQUE login response: {e}"))?;
     Ok((ServerLoginState { inner: r.state }, r.message.serialize().to_vec()))
@@ -113,7 +113,7 @@ pub fn login_response(setup: &Setup, record: Option<Record>, account: &[u8], rol
 pub fn login_client_finish(state: ClientLoginState, password: &[u8], account: &[u8], role: &[u8], binding: &[u8], response: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
     bounded(response)?;
     let response = CredentialResponse::deserialize(response).map_err(|e| anyhow::anyhow!("bad OPAQUE credential response: {e}"))?;
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let argon = Argon2::default();
     let params = ClientLoginFinishParameters::new(Some(binding), ids(account, role), Some(&argon));
     let r = state.inner.finish(&mut rng, password, response, params).map_err(|e| anyhow::anyhow!("OPAQUE authentication failed: {e}"))?;
@@ -140,7 +140,7 @@ impl Store {
         fs::create_dir_all(root)?;
         fs::set_permissions(root, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
         if fs::symlink_metadata(root.join("setup")).is_ok() { bail!("OPAQUE server state already exists") }
-        let mut rng = OsRng;
+        let mut rng = rand::rng();
         let setup = Setup::new(&mut rng);
         atomic_private(&root.join("setup"), &setup.serialize())
     }
@@ -195,7 +195,7 @@ mod tests {
     use super::*;
     #[test]
     fn rfc9807_flow_and_context_mismatch() {
-        let mut rng = OsRng;
+        let mut rng = rand::rng();
         let setup = Setup::new(&mut rng);
         let (cr, request) = registration_start(b"correct horse battery staple").unwrap();
         let response = registration_response(&setup, b"alice", &request).unwrap();

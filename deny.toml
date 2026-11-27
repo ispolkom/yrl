@@ -1,0 +1,23 @@
+# SPDX choices are restricted to licenses actually present in Cargo.lock.
+# MPL-2.0 is allowed for the option-ext dependency with its file-level notice
+# obligations; CDLA-Permissive-2.0 covers public certificate data.
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "MIT-0",
+  "BSD-1-Clause",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "Unlicense",
+  "CDLA-Permissive-2.0",
+  "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[advisories]
+# Do not ignore vulnerabilities, unsoundness or unmaintained crates.
+ignore = []

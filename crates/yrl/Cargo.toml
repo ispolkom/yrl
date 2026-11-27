@@ -45,11 +45,12 @@ x25519-dalek = { version = "2.0", features = ["static_secrets", "zeroize"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core", "zeroize"] }
 zeroize = "1"
 clatter = { version = "2.3.0", default-features = false, features = ["std", "getrandom", "use-chacha20poly1305", "use-blake2", "use-rust-crypto-ml-kem"], optional = true }
-opaque-ke = { version = "4.0.1", default-features = false, features = ["std", "ristretto255", "argon2"], optional = true }
-sha2 = { version = "0.10", optional = true }
+opaque-ke = { version = "=5.0.0-pre.0", default-features = false, features = ["std", "ristretto255", "argon2"], optional = true }
+sha2 = { version = "0.11", optional = true }
+rand = { version = "0.10", features = ["thread_rng"], optional = true }
 ml-dsa = { version = "0.1.2", default-features = false, features = ["alloc", "getrandom", "zeroize"], optional = true }
 fido2-rs = { version = "0.6.0", optional = true }
-p256 = { version = "0.13", features = ["ecdsa"], optional = true }
+p256 = { version = "0.14", features = ["ecdsa"], optional = true }
 tss-esapi = { version = "=7.7.0", optional = true }
 chacha20poly1305 = { version = "0.10", features = ["std"], optional = true }
 
@@ -57,7 +58,7 @@ chacha20poly1305 = { version = "0.10", features = ["std"], optional = true }
 default = []
 crypto-profiles = []
 pq-hybrid = ["crypto-profiles", "dep:clatter"]
-opaque-rfc9807 = ["dep:opaque-ke", "dep:sha2"]
+opaque-rfc9807 = ["dep:opaque-ke", "dep:sha2", "dep:rand"]
 hybrid-signatures = ["dep:ml-dsa"]
 fido2 = ["dep:fido2-rs", "dep:p256", "dep:sha2"]
 tpm2 = ["dep:tss-esapi", "dep:chacha20poly1305", "dep:p256"]

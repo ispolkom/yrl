@@ -46,3 +46,22 @@ Status meanings: PASS = the property was exercised and met; FAIL = a check found
 **Incomplete / not production-ready.** The available regression tests and default release build pass within their stated scope. Dependency advisories, absent hybrid-signature application in claimed circuits, incomplete feature suites, and unavailable installed-runtime/hardware/fault-injection evidence prevent full acceptance. Extended crypto remains default-off. No production root or release was created.
 
 The mandatory runtime, hardware and update checks above remain open. Stage 8.1 is assessed but not accepted: advisories and feature-suite failures remain. Local anti-rollback state cannot resist a privileged host owner rolling back all local state without an independently retained trust anchor.
+
+## Stage 8-R.1 dependency remediation (2026-11-27)
+
+Advisory DB `RustSec/advisory-db` commit `c9f6c91a` (2026-11-26), fetched from `origin/main`. `cargo audit --no-fetch --json` reported the following on baseline `ee52ebd`; all were removed from the resolved lockfile without ignore entries.
+
+| Advisory | Affected baseline package | YRL path and applicability | Resolved package |
+|---|---|---|---|
+| RUSTSEC-2026-0387 | `crypto-bigint 0.5.5` | `elliptic-curve 0.13` via optional OPAQUE/P-256; secret arithmetic may be relevant when enabled | `crypto-bigint 0.7.11` via `opaque-ke 5.0.0-pre.0` and `p256 0.14.0` |
+| RUSTSEC-2026-0348, -0346, -0285, -0349 | `rustls 0.23.40` | `yrl_link` WebSocket/TLS path, including handshake and secret handling | `rustls 0.23.46` |
+| RUSTSEC-2026-0382 | `rustls-webpki 0.103.13` | Transitive `rustls` certificate validation; YRL also pins peers but the dependency is present | `rustls-webpki 0.103.17` |
+| RUSTSEC-2026-0592 | `url 2.5.8` | `yrl_link` parses URLs; no direct `Url::origin` call found, but transitive reachability cannot be assumed absent | `url 2.5.9` |
+| RUSTSEC-2026-0381 | `webpki-roots 1.0.7` | Transitive `tokio-tungstenite` trust data; pinning limits current exposure | `webpki-roots 1.0.10` |
+
+`cargo deny` additionally identified RUSTSEC-2026-0190 (`anyhow 1.0.102`) and RUSTSEC-2026-0386 (`tokio 1.52.3`); the lockfile now has `anyhow 1.0.105` and `tokio 1.54.1`. Unmaintained `chrono` and `rustls-pemfile` were removed from `yrl_link`; RFC 3339 serialization uses `time` and PEM parsing uses `rustls-pki-types`. The MIT workspace metadata and `LICENSE` are in `a7b9679`. `deny.toml` allows only reviewed licenses present in the graph, with no advisory ignores.
+
+| ID | Property | Command | Expected | Actual | Status | Limit |
+|---|---|---|---|---|---|---|
+| 8-R.1-01 | Current advisory DB and resolved dependency graph | `git -C ~/.cargo/advisory-db log -1`; `cargo audit --no-fetch --json`; `cargo deny check licenses advisories` | Fresh DB, no vulnerability, unsound or unmaintained findings | DB `c9f6c91a`; audit 0 vulnerabilities; deny advisories and licenses pass | PASS | `opaque-ke 5.0.0-pre.0` is a pre-release and remains default-off pending full profile acceptance. |
+| 8-R.1-02 | TLS/PEM and copied identity regression | `cargo test -p yrl_link` | Existing behavior retained | 37 unit and 4 loopback integration tests passed | PASS | No installed service or historical OPAQUE record migration tested. |

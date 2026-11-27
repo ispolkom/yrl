@@ -30,6 +30,8 @@ Stage 8.7 single debug-test-profile TCP loopback measurement: 64 MiB upload 67 M
 
 Stage 8.8: default release artifacts build; host `systemd-analyze verify` cannot resolve the absent `/opt/yrl/current`, and a minimal temporary root lacks `sysinit.target`. No clean systemd installation was run. README, ROADMAP, HANDOFF and `STAGE8_ACCEPTANCE.md` carry the conditional verdict. Stage 8.7 was published as `6094bc7`. The next work point is to remediate dependency advisories and the Stage 7.4 hybrid-signature integration gap, then rerun feature suites and perform isolated installed-host, hardware and fault-injection acceptance. Do not enable new crypto defaults or create production release keys on the basis of this partial evidence.
 
+Stage 8-R.1 remediation: advisory DB `c9f6c91a` fetched; lockfile audit now reports zero vulnerabilities, and `cargo deny check licenses advisories` passes with `deny.toml`. `rustls`, `rustls-webpki`, `url`, `webpki-roots`, `anyhow`, `tokio`, OPAQUE and P-256 were updated. `chrono`/`rustls-pemfile` were removed from copied `yrl_link`, whose 41 tests passed. `opaque-ke 5.0.0-pre.0` is pre-release, default-off, and historical record migration is not yet verified. The MIT license was published as `a7b9679`. Continue with 8-R.3 full feature suites and 8-R.2 hybrid integration.
+
 ## Architecture at the baseline
 
 ```text

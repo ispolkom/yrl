@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 
 /// Однократная инициализация process-wide CryptoProvider для rustls (ring).
 /// Безопасно вызывается из любого места — повторные вызовы no-op.
@@ -102,18 +102,15 @@ fn load_pems(cert_path: &Path, key_path: &Path) -> Result<TlsIdentity> {
     let key_data = fs::read(key_path)
         .with_context(|| format!("read {:?}", key_path))?;
 
-    let mut cert_reader = std::io::Cursor::new(&cert_data);
-    let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<std::io::Result<Vec<_>>>()
+    let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_data)
+        .collect::<Result<Vec<_>, _>>()
         .context("parse cert.pem")?;
     if cert_chain.is_empty() {
         anyhow::bail!("no certificates in {:?}", cert_path);
     }
 
-    let mut key_reader = std::io::Cursor::new(&key_data);
-    let private_key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)
-        .context("parse key.pem")?
-        .ok_or_else(|| anyhow::anyhow!("no private key in {:?}", key_path))?;
+    let private_key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(&key_data)
+        .context("parse key.pem")?;
 
     // SHA-256 fingerprint первого сертификата.
     use sha2::{Digest, Sha256};

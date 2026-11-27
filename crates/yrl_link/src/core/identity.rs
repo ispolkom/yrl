@@ -51,7 +51,8 @@ struct StoredIdentityV2 {
     pub public_key: [u8; 32],
     pub signing_public_key: [u8; 32],
     #[serde(default = "default_created_at")]
-    created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: time::OffsetDateTime,
     encrypted_private_keys: EncryptedPrivateKeys,
 }
 
@@ -66,14 +67,15 @@ struct StoredIdentityV1 {
     pub signing_public_key: [u8; 32],
     pub signing_private_key: [u8; 32],
     #[serde(default = "default_created_at")]
-    created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: time::OffsetDateTime,
 }
 
 // Keep the old name available so call sites that reference `StoredIdentity` still compile.
 pub type StoredIdentity = StoredIdentityV1;
 
-fn default_created_at() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
+fn default_created_at() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc()
 }
 
 // ── Key derivation helpers ─────────────────────────────────────────────────
@@ -288,7 +290,7 @@ impl NodeIdentity {
             address: self.address.0,
             public_key: self.public_key,
             signing_public_key: self.signing_public_key,
-            created_at: chrono::Utc::now(),
+            created_at: time::OffsetDateTime::now_utc(),
             encrypted_private_keys: EncryptedPrivateKeys {
                 salt: hex::encode(&salt),
                 nonce: hex::encode(&nonce_bytes),
@@ -462,7 +464,7 @@ impl NodeIdentity {
             address: self.address.0,
             public_key: self.public_key,
             signing_public_key: self.signing_public_key,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("current UTC time is representable as RFC 3339"),
             private_key: Zeroizing::new(self.private_key),
             signing_private_key: Zeroizing::new(self.signing_private_key),
         }
