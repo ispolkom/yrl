@@ -136,6 +136,12 @@ pub async fn put(req: PutReq, target: Target, helper: std::path::PathBuf, max_si
         }
         Some(l) => {
             let c = helper_error(l);
+            if c == E_NO_SPACE {
+                // The helper already opened the tagged partial. Keep its
+                // charge and token so the same owner can retry after freeing
+                // space or increasing the filesystem quota.
+                reservation.preserve();
+            }
             let _ = tx.send(err(id, c, code_text(c))).await;
         }
         None => {
