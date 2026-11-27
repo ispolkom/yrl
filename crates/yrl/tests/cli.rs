@@ -20,3 +20,45 @@ fn c1_a_command_that_logs_in_but_has_no_login_explains_instead_of_panicking() {
     let (ok, text) = run(&["no-such-command"]);
     assert!(!ok && text.contains("usage: yrl keygen") && text.contains("ping <dir> <host:port> <server-public-hex> <login>"), "{text}");
 }
+
+mod common;
+
+#[tokio::test]
+async fn finishing_exec_releases_session_before_the_reconnect_grace() {
+    use std::{process::Stdio, time::Duration};
+    use tokio::io::AsyncWriteExt;
+    let rig = common::rig_with("exec", |mut cfg| {
+        cfg.session_grace = Duration::from_secs(60);
+        cfg
+    }).await;
+    let dir = rig.dir.path().join("cli");
+    let key = yrl::keys::init(&dir).unwrap();
+    yrl::keys::authorize(
+        &rig.server_dir().join("authorized_keys"),
+        &hex::encode(&key.public),
+        "cli",
+        "exec",
+    ).unwrap();
+
+    let mut client = tokio::process::Command::new(YRL)
+        .arg("exec").arg(dir)
+        .args([&rig.addr, &hex::encode(&rig.server_pub), "anna", "--executor", &hex::encode(&rig.exec_pub)])
+        .args(["--", "/bin/echo", "executed"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn().unwrap();
+    let mut stdin = client.stdin.take().unwrap();
+    stdin.write_all(common::PW).await.unwrap();
+    stdin.write_all(b"\n").await.unwrap();
+    drop(stdin);
+    let out = client.wait_with_output().await.unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.stdout, b"executed\n");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while rig.sessions.len() != 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("CLI must close the session without waiting for RESUME grace");
+}

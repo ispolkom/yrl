@@ -60,8 +60,11 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
         Some("ping") => {
             let c = connect(a).await?;
             let t = std::time::Instant::now();
-            c.ping(b"yrl", Duration::from_secs(5)).await?;
-            println!("pong in {:?}", t.elapsed());
+            let result = c.ping(b"yrl", Duration::from_secs(5)).await;
+            let elapsed = t.elapsed();
+            c.close().await;
+            result?;
+            println!("pong in {elapsed:?}");
         }
         #[cfg(feature = "opaque-rfc9807")]
         Some("opaque-register") => {
@@ -75,15 +78,21 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
         Some("put") | Some("get") => {
             let up = a[1] == "put";
             let (from, to) = (a.get(6).ok_or_else(|| anyhow::anyhow!("need two paths"))?, a.get(7).ok_or_else(|| anyhow::anyhow!("need two paths"))?);
+            let mode = if up {
+                std::fs::metadata(from).map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) as u16 & 0o777)?
+            } else {
+                0
+            };
             let c = connect(a).await?;
             let t = std::time::Instant::now();
-            let r = if up {
-                let mode = std::fs::metadata(from).map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) as u16 & 0o777)?;
-                c.put_file(std::path::Path::new(from), to.as_bytes(), mode, Duration::from_secs(3600)).await?
+            let result = if up {
+                c.put_file(std::path::Path::new(from), to.as_bytes(), mode, Duration::from_secs(3600)).await
             } else {
-                c.get_file(from.as_bytes(), std::path::Path::new(to), Duration::from_secs(3600)).await?
+                c.get_file(from.as_bytes(), std::path::Path::new(to), Duration::from_secs(3600)).await
             };
             let secs = t.elapsed().as_secs_f64().max(0.001);
+            c.close().await;
+            let r = result?;
             eprintln!("{} bytes in {secs:.1} s ({:.1} MiB/s){}", r.bytes, r.bytes as f64 / 1048576.0 / secs, if r.resumed_from > 0 { format!(", continued from byte {}", r.resumed_from) } else { String::new() });
         }
         Some("forward") | Some("socks") => {
@@ -144,14 +153,20 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
         }
         Some("shell") => {
             let c = connect(a).await?;
-            let code = shell(&c).await?;
-            std::process::exit(code);
+            let result = shell(&c).await;
+            c.close().await;
+            std::process::exit(result?);
         }
         Some("exec") => {
             let c = connect(a).await?;
-            let sep = a.iter().position(|x| x == "--").ok_or_else(|| anyhow::anyhow!("put -- before the program"))?;
+            let Some(sep) = a.iter().position(|x| x == "--") else {
+                c.close().await;
+                anyhow::bail!("put -- before the program");
+            };
             let argv: Vec<&[u8]> = a[sep + 1..].iter().map(|s| s.as_bytes()).collect();
-            let r = c.exec(&argv, 60_000, Duration::from_secs(70)).await?;
+            let result = c.exec(&argv, 60_000, Duration::from_secs(70)).await;
+            c.close().await;
+            let r = result?;
             use std::io::Write;
             std::io::stdout().write_all(&r.stdout)?;
             std::io::stderr().write_all(&r.stderr)?;

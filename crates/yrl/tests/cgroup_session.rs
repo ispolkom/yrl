@@ -14,7 +14,7 @@ async fn detached_descendant_dies_with_its_session_after_resume_without_touching
         assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         return;
     }
-    yrl::cgroup::verify_delegation().unwrap();
+    yrl::cgroup::prepare_delegation(&yrl::cgroup::SessionLimits::default()).unwrap();
     std::env::set_var("YRL_SESSION_CGROUPS", "required");
     let r = rig_with("exec,shell", |mut c| { c.session_grace = Duration::from_secs(10); c }).await;
     let proxy = Chaos::start(&r.addr).await;
