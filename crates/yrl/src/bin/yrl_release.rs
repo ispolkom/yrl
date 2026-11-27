@@ -39,6 +39,10 @@ fn run(a: &[String]) -> Result<()> {
     Some("keygen") if a.len()==4 => yrl::release::generate_key(&PathBuf::from(&a[2]),&PathBuf::from(&a[3])),
     Some("trust-init") if a.len()==4 => yrl::release::init_trust(&PathBuf::from(&a[2]),&PathBuf::from(&a[3])),
     Some("root-rotate") if a.len()==6 => yrl::release::rotate_root(&PathBuf::from(&a[2]),&PathBuf::from(&a[3]),&PathBuf::from(&a[4]),&PathBuf::from(&a[5])),
+    #[cfg(feature="hybrid-signatures")]
+    Some("root-recovery-init") if a.len()==4 => yrl::release::register_root_recovery(&PathBuf::from(&a[2]),&PathBuf::from(&a[3])),
+    #[cfg(feature="hybrid-signatures")]
+    Some("root-recover") if a.len()==6 => yrl::release::recover_root(&PathBuf::from(&a[2]),&PathBuf::from(&a[3]),&PathBuf::from(&a[4]),&PathBuf::from(&a[5])),
     Some("delegate") if a.len()==11 => yrl::release::delegate(&PathBuf::from(&a[2]),&PathBuf::from(&a[3]),&PathBuf::from(&a[4]),n(&a[5])?,n(&a[6])?,n(&a[7])?,n(&a[8])?,n(&a[9])?,&PathBuf::from(&a[10])),
     Some("revoke") if a.len()==7 => yrl::release::revoke_delegate(&PathBuf::from(&a[2]),&PathBuf::from(&a[3]),n(&a[4])?,&PathBuf::from(&a[5]),n(&a[6])?),
     Some("manifest") if a.len()==14 => yrl::release::create_manifest(&PathBuf::from(&a[2]),n(&a[3])?,&a[4],&a[5],&a[6],n(&a[7])?,n(&a[8])?,n(&a[9])?,n(&a[10])?,n(&a[11])?,n(&a[12])?,&PathBuf::from(&a[13])),

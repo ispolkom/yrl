@@ -4,6 +4,7 @@ pub mod auditlog;
 pub mod auditsegments;
 pub mod auditexport;
 pub mod auditkeys;
+pub mod auditsign;
 pub mod broker;
 pub mod client;
 pub mod client_tun;

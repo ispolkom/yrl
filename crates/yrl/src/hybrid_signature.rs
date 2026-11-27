@@ -174,15 +174,21 @@ impl SigningKey {
     /// generated during service startup.
     pub fn generate_files(private: &Path, public: &Path, purpose: Purpose, generation: u64) -> Result<PublicKey> {
         if private.exists() || public.exists() { bail!("hybrid key path already exists") }
-        let (key, mut seeds) = Self::generate(purpose, generation);
+        let (key, seeds) = Self::generate(purpose, generation);
         let public_key = key.public();
-        let mut secret = zeroize::Zeroizing::new(b"YRL-HYBRID-SECRET-1\0".to_vec());
-        secret.push(purpose as u8); secret.extend_from_slice(&generation.to_be_bytes()); secret.extend_from_slice(&public_key.key_id);
-        secret.extend_from_slice(&seeds.ed25519); secret.extend_from_slice(&seeds.ml_dsa65);
-        write_new(private, &secret, 0o600)?;
-        secret.zeroize(); seeds.zeroize();
+        write_new(private, &key.encode_secret(&seeds), 0o600)?;
         write_new(public, &public_key.encode(), 0o644)?;
         Ok(public_key)
+    }
+
+    pub(crate) fn encode_secret(&self, seeds: &SecretSeeds) -> zeroize::Zeroizing<Vec<u8>> {
+        let mut secret = zeroize::Zeroizing::new(b"YRL-HYBRID-SECRET-1\0".to_vec());
+        secret.push(self.purpose as u8);
+        secret.extend_from_slice(&self.generation.to_be_bytes());
+        secret.extend_from_slice(&self.public().key_id);
+        secret.extend_from_slice(&seeds.ed25519);
+        secret.extend_from_slice(&seeds.ml_dsa65);
+        secret
     }
 
     pub fn load_files(private: &Path, public: &Path, expected: Purpose) -> Result<Self> {
@@ -191,7 +197,12 @@ impl SigningKey {
     }
 
     pub(crate) fn load_pinned(private: &Path, pinned: &PublicKey) -> Result<Self> {
-        let expected = pinned.purpose;
+        let key = Self::load_secret(private, pinned.purpose)?;
+        if key.public().encode() != pinned.encode() { bail!("hybrid public/private key mismatch") }
+        Ok(key)
+    }
+
+    pub(crate) fn load_secret(private: &Path, expected: Purpose) -> Result<Self> {
         let mut bytes = zeroize::Zeroizing::new(read_bounded(private, 256, true)?);
         let prefix = b"YRL-HYBRID-SECRET-1\0";
         if bytes.len() != prefix.len() + 1 + 8 + 32 + 64 || !bytes.starts_with(prefix) { bytes.zeroize(); bail!("invalid hybrid private key") }
@@ -204,7 +215,7 @@ impl SigningKey {
         bytes.zeroize();
         let key = Self::from_seeds(purpose, generation, &seeds);
         let actual = key.public();
-        if actual.key_id != claimed || actual.encode() != pinned.encode() { bail!("hybrid public/private key mismatch") }
+        if actual.key_id != claimed { bail!("hybrid public/private key mismatch") }
         Ok(key)
     }
 }

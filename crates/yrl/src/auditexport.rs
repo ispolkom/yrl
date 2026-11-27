@@ -2,7 +2,7 @@
 use crate::auditlog::{Journal, Record, MAX_RECORD};
 use crate::auditsegments::{self, TrustAnchor};
 use anyhow::{bail, Context, Result};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use crate::auditsign::{Public, Purpose, Verify};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -208,17 +208,17 @@ pub fn verify_export(dir: &Path) -> Result<()> {
         bail!("invalid export authentication");
     }
     let n = u32::from_be_bytes(auth[..4].try_into().unwrap()) as usize;
-    if auth.len() != 4 + n + 64 {
+    if n > auth.len() - 4 - 64 {
         bail!("invalid export authentication length");
     }
     let anchor = TrustAnchor::decode(&auth[4..4 + n], None)?;
-    let key = VerifyingKey::from_bytes(&anchor.key)?;
+    let key = Public::decode(&anchor.key, Purpose::Journal, None)?;
     let mut msg = b"yrl-audit-export-v1".to_vec();
     msg.extend_from_slice(blake3::hash(&manifest).as_bytes());
     msg.extend_from_slice(blake3::hash(&auth[4..4 + n]).as_bytes());
-    key.verify(&msg, &Signature::from_slice(&auth[4 + n..])?)
+    key.verify_bytes(&msg, &auth[4 + n..])
         .context("invalid export manifest signature")?;
-    let (outcome, detail) = verify(dir, None);
+    let (outcome, detail) = verify(dir, Some(&anchor));
     if matches!(outcome, Outcome::Damaged | Outcome::Unverifiable) {
         bail!("exported journal does not verify: {detail}");
     }

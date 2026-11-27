@@ -6,7 +6,8 @@
 //! A small signed `head` file follows the newest checkpoint, to notice a log that was cut short.
 //! Nothing secret is ever put in a record: no passwords, phrases, keys, file contents or output. Sensitive targets are stored as a hash.
 use anyhow::{bail, Context, Result};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use crate::auditsign::{Public, Purpose, Sign, Verify};
+use ed25519_dalek::SigningKey;
 use std::io::Write;
 use std::path::Path;
 
@@ -324,7 +325,7 @@ pub struct Report {
 }
 
 /// reads a whole journal and checks everything: lengths, numbers, the chain, every checkpoint signature, and the signed head (if there is one)
-pub fn verify(bytes: &[u8], journal: Journal, key: &VerifyingKey, head: Option<&[u8]>) -> Report {
+pub fn verify(bytes: &[u8], journal: Journal, key: &impl Verify, head: Option<&[u8]>) -> Report {
     let mut rep = Report { records: 0, checkpoints: 0, sealed: None, unsealed: 0, last: None, fault: None };
     let head_claim = match head {
         None => None,
@@ -365,7 +366,7 @@ pub fn verify(bytes: &[u8], journal: Journal, key: &VerifyingKey, head: Option<&
         }
         if rec.kind == KIND_CHECKPOINT {
             let ok = last_hash_before_cp.is_some_and(|(s, lh)| {
-                Signature::from_slice(&rec.extra).is_ok_and(|sig| key.verify(&checkpoint_message(journal, s, &lh), &sig).is_ok())
+                key.verify_bytes(&checkpoint_message(journal, s, &lh), &rec.extra).is_ok()
             });
             if !ok {
                 rep.fault = Some(Fault::BadSignature(rec.seq));
@@ -400,11 +401,15 @@ pub fn verify(bytes: &[u8], journal: Journal, key: &VerifyingKey, head: Option<&
 
 /// `head` file: `journal seq hash signature`, signed like a checkpoint
 pub fn make_head(journal: Journal, seq: u64, hash: &Hash, key: &SigningKey) -> Vec<u8> {
-    let sig = key.sign(&checkpoint_message(journal, seq, hash));
-    format!("{} {} {} {}\n", journal.file(), seq, hex::encode(hash), hex::encode(sig.to_bytes())).into_bytes()
+    make_signed_head(journal, seq, hash, key).expect("Ed25519 signing is infallible")
 }
 
-pub fn parse_head(b: &[u8], journal: Journal, key: &VerifyingKey) -> Option<(u64, Hash)> {
+pub(crate) fn make_signed_head(journal: Journal, seq: u64, hash: &Hash, key: &impl Sign) -> Result<Vec<u8>> {
+    let sig = key.sign_bytes(&checkpoint_message(journal, seq, hash))?;
+    Ok(format!("{} {} {} {}\n", journal.file(), seq, hex::encode(hash), hex::encode(sig)).into_bytes())
+}
+
+pub fn parse_head(b: &[u8], journal: Journal, key: &impl Verify) -> Option<(u64, Hash)> {
     let t = std::str::from_utf8(b).ok()?;
     let f: Vec<&str> = t.split_whitespace().collect();
     if f.len() != 4 || f[0] != journal.file() {
@@ -412,15 +417,18 @@ pub fn parse_head(b: &[u8], journal: Journal, key: &VerifyingKey) -> Option<(u64
     }
     let seq: u64 = f[1].parse().ok()?;
     let hash: Hash = hex::decode(f[2]).ok()?.try_into().ok()?;
-    let sig = Signature::from_slice(&hex::decode(f[3]).ok()?).ok()?;
-    key.verify(&checkpoint_message(journal, seq, &hash), &sig).ok()?;
+    let sig = hex::decode(f[3]).ok()?;
+    key.verify_bytes(&checkpoint_message(journal, seq, &hash), &sig).ok()?;
     Some((seq, hash))
 }
 
-pub fn load_verifying_key(dir: &Path) -> Result<VerifyingKey> {
-    let t = std::fs::read_to_string(dir.join("audit/sign.pub"))?;
-    let b: [u8; 32] = hex::decode(t.trim())?.try_into().map_err(|_| anyhow::anyhow!("not a public key"))?;
-    Ok(VerifyingKey::from_bytes(&b)?)
+pub fn load_verifying_key(dir: &Path) -> Result<Public> {
+    let bytes = std::fs::read(dir.join("audit/sign.pub"))?;
+    if bytes.starts_with(b"YHP1") {
+        Public::decode(&bytes, Purpose::Journal, None)
+    } else {
+        Public::decode(&hex::decode(std::str::from_utf8(&bytes)?.trim())?, Purpose::Journal, None)
+    }
 }
 
 /// verifies a journal of a directory with the public key written next to it

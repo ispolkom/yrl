@@ -13,6 +13,7 @@ use crate::session::{
 use crate::wire::Frame;
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
+use crate::auditsign::{Public, Purpose, Secret, Sign};
 use std::collections::HashSet;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -47,7 +48,7 @@ struct Inner {
 }
 
 pub struct AuditService {
-    key: SigningKey,
+    key: Secret,
     every: u64,
     base: PathBuf,
     rotation: RotationPolicy,
@@ -99,14 +100,17 @@ impl AuditService {
             bail!("another audit process holds this journal");
         }
         let key_path = base.join("sign.key");
+        let require_hybrid = std::env::var_os("YRL_AUDIT_REQUIRE_HYBRID").is_some();
         let key = if key_path.exists() {
-            let seed = crate::keys::read_secret_hex(&key_path, 32)?;
-            SigningKey::from_bytes(
-                seed.as_slice()
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("damaged signing key"))?,
-            )
+            let public = load_verifying_key(dir)?;
+            if require_hybrid && matches!(public, Public::Classical(_)) {
+                bail!("Audit requires a provisioned hybrid signing key");
+            }
+            Secret::load(&key_path, &public, Purpose::Journal)?
         } else {
+            if require_hybrid || base.join("sign.pub").exists() || base.join("root.pub").exists() {
+                bail!("Audit signing key is missing");
+            }
             let k = SigningKey::generate(&mut argon2::password_hash::rand_core::OsRng);
             let mut f = std::fs::OpenOptions::new()
                 .create_new(true)
@@ -116,15 +120,8 @@ impl AuditService {
                 .open(&key_path)?;
             f.write_all_hex(&k.to_bytes())?;
             f.sync_all()?;
-            std::fs::write(
-                base.join("sign.pub"),
-                hex::encode(k.verifying_key().to_bytes()),
-            )?;
-            std::fs::set_permissions(
-                base.join("sign.pub"),
-                std::fs::Permissions::from_mode(0o644),
-            )?;
-            k
+            auditsegments::atomic_write(&base.join("sign.pub"), hex::encode(k.verifying_key().to_bytes()).as_bytes(), 0o644)?;
+            Secret::Classical(k)
         };
         crate::auditkeys::initialize(&base, &key.verifying_key())?;
         crate::auditkeys::reconcile_private(dir, &key.verifying_key())?;
@@ -133,7 +130,7 @@ impl AuditService {
             bail!("Audit signing key generation is inconsistent");
         }
         let vk = key.verifying_key();
-        recover_rotation(&base, &key)?;
+        recover_rotation(&base, &key, &history)?;
         let mut journals = vec![];
         for j in [Journal::Ordinary, Journal::Security] {
             let path = base.join(format!("{}.log", j.file()));
@@ -176,7 +173,7 @@ impl AuditService {
         Ok(svc)
     }
 
-    pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+    pub fn verifying_key(&self) -> Public {
         self.key.verifying_key()
     }
 
@@ -205,18 +202,17 @@ impl AuditService {
             key: self.key.verifying_key().to_bytes(),
             points: [point(Journal::Ordinary), point(Journal::Security)],
         };
-        Ok(anchor.encode(&self.key))
+        anchor.encode(&self.key)
     }
 
     pub fn sign_export(&self, digest: &[u8; 32]) -> Result<Vec<u8>> {
-        use ed25519_dalek::Signer;
         let anchor = self.trust_anchor()?;
         let mut message = b"yrl-audit-export-v1".to_vec();
         message.extend_from_slice(digest);
         message.extend_from_slice(blake3::hash(&anchor).as_bytes());
         let mut out = (anchor.len() as u32).to_be_bytes().to_vec();
         out.extend_from_slice(&anchor);
-        out.extend_from_slice(&self.key.sign(&message).to_bytes());
+        out.extend_from_slice(&self.key.sign_bytes(&message)?);
         Ok(out)
     }
 
@@ -325,7 +321,8 @@ impl AuditService {
             previous_seal: j.active.previous_seal,
         };
         let pending = auditsegments::archived(&self.base, journal, seal.generation, "seal.pending");
-        auditsegments::atomic_write(&pending, &seal.encode(&self.key), 0o600)?;
+        let encoded = seal.encode_signed(&self.key)?;
+        auditsegments::atomic_write(&pending, &encoded, 0o600)?;
         finish_rotation(&self.base, &self.key, &seal)?;
         let j = &mut g.journals[idx];
         j.prev = [0; 32];
@@ -334,7 +331,7 @@ impl AuditService {
         j.active = Active {
             generation: seal.generation + 1,
             started: now(),
-            previous_seal: seal.digest(&self.key),
+            previous_seal: *blake3::hash(&encoded).as_bytes(),
         };
         self.prune_locked(journal)?;
         Ok(())
@@ -390,7 +387,6 @@ impl AuditService {
     }
 
     fn checkpoint_locked(&self, g: &mut Inner, journal: Journal) -> Result<()> {
-        use ed25519_dalek::Signer;
         let idx = journal as usize;
         let j = &g.journals[idx];
         if j.next == 0 {
@@ -399,7 +395,7 @@ impl AuditService {
         let (last_seq, last_hash) = (j.next - 1, j.prev);
         let sig = self
             .key
-            .sign(&checkpoint_message(journal, last_seq, &last_hash));
+            .sign_bytes(&checkpoint_message(journal, last_seq, &last_hash))?;
         let rec = Record {
             kind: KIND_CHECKPOINT,
             journal,
@@ -408,11 +404,11 @@ impl AuditService {
             time: now(),
             flags: 0,
             ev: Event::new("checkpoint", LEVEL_NONE, RESULT_OK),
-            extra: sig.to_bytes().to_vec(),
+            extra: sig,
         };
         let (bytes, h) = frame(&rec, &j.prev)?;
         append_file(&j.path, &bytes)?;
-        let head = make_head(journal, rec.seq, &h, &self.key);
+        let head = make_signed_head(journal, rec.seq, &h, &self.key)?;
         let tmp = j.head.with_extension("tmp");
         std::fs::write(&tmp, head)?;
         std::fs::rename(&tmp, &j.head)?;
@@ -443,7 +439,7 @@ impl AuditService {
     }
 }
 
-fn finish_rotation(base: &Path, key: &SigningKey, seal: &SegmentSeal) -> Result<()> {
+fn finish_rotation(base: &Path, key: &Secret, seal: &SegmentSeal) -> Result<()> {
     let live_log = base.join(format!("{}.log", seal.journal.file()));
     let live_head = base.join(format!("{}.head", seal.journal.file()));
     let archive_log = auditsegments::archived(base, seal.journal, seal.generation, "log");
@@ -469,14 +465,14 @@ fn finish_rotation(base: &Path, key: &SigningKey, seal: &SegmentSeal) -> Result<
     let active = Active {
         generation: seal.generation + 1,
         started: now(),
-        previous_seal: seal.digest(key),
+        previous_seal: *blake3::hash(&std::fs::read(&final_seal)?).as_bytes(),
     };
     auditsegments::write_active(base, seal.journal, &active, key)?;
     std::fs::File::open(base)?.sync_all()?;
     Ok(())
 }
 
-fn recover_rotation(base: &Path, key: &SigningKey) -> Result<()> {
+fn recover_rotation(base: &Path, key: &Secret, history: &crate::auditkeys::KeyHistory) -> Result<()> {
     let vk = key.verifying_key();
     for journal in [Journal::Ordinary, Journal::Security] {
         let prefix = format!("{}.", journal.file());
@@ -489,7 +485,7 @@ fn recover_rotation(base: &Path, key: &SigningKey) -> Result<()> {
                 pending.push(SegmentSeal::decode(&std::fs::read(entry.path())?, &vk)?);
             } else if name.starts_with(&prefix) && name.ends_with(".seal") {
                 let bytes = std::fs::read(entry.path())?;
-                let seal = SegmentSeal::decode(&bytes, &vk)?;
+                let (seal, _, _) = auditsegments::decode_seal_any(&bytes, history)?;
                 completed.push((seal.generation, *blake3::hash(&bytes).as_bytes(), seal));
             }
         }
@@ -1012,7 +1008,7 @@ pub fn repair(dir: &Path) -> Result<String> {
     Ok(said)
 }
 
-fn good_prefix(bytes: &[u8], j: Journal, vk: &ed25519_dalek::VerifyingKey) -> usize {
+fn good_prefix(bytes: &[u8], j: Journal, vk: &impl crate::auditsign::Verify) -> usize {
     let (mut at, mut last_ok) = (0usize, 0usize);
     while at + 4 <= bytes.len() {
         let n = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;

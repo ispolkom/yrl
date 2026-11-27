@@ -2,7 +2,8 @@
 //! these signed envelopes connect independently verifiable files into one segment chain.
 use crate::auditlog::{Hash, Journal};
 use anyhow::{bail, Context, Result};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use crate::auditsign::{Public, Purpose, Sign, Verify};
+use ed25519_dalek::SigningKey;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -91,12 +92,16 @@ impl SegmentSeal {
     }
 
     pub fn encode(&self, key: &SigningKey) -> Vec<u8> {
-        let body = self.body();
-        let sig = key.sign(body.as_bytes());
-        format!("{body} {}\n", hex::encode(sig.to_bytes())).into_bytes()
+        self.encode_signed(key).expect("Ed25519 signing is infallible")
     }
 
-    pub fn decode(bytes: &[u8], key: &VerifyingKey) -> Result<Self> {
+    pub(crate) fn encode_signed(&self, key: &impl Sign) -> Result<Vec<u8>> {
+        let body = self.body();
+        let sig = key.sign_bytes(body.as_bytes())?;
+        Ok(format!("{body} {}\n", hex::encode(sig)).into_bytes())
+    }
+
+    pub fn decode(bytes: &[u8], key: &impl Verify) -> Result<Self> {
         let text = std::str::from_utf8(bytes)?;
         let f: Vec<_> = text.split_whitespace().collect();
         if f.len() != 11 || f[0] != FORMAT {
@@ -125,8 +130,8 @@ impl SegmentSeal {
                 .map_err(|_| anyhow::anyhow!("invalid previous seal"))?,
         };
         let body = seal.body();
-        let sig = Signature::from_slice(&hex::decode(f[10])?)?;
-        key.verify(body.as_bytes(), &sig)
+        let sig = hex::decode(f[10])?;
+        key.verify_bytes(body.as_bytes(), &sig)
             .context("invalid segment signature")?;
         Ok(seal)
     }
@@ -153,11 +158,11 @@ fn state_message(j: Journal, a: &Active) -> String {
     )
 }
 
-pub fn write_active(base: &Path, j: Journal, a: &Active, key: &SigningKey) -> Result<()> {
+pub fn write_active(base: &Path, j: Journal, a: &Active, key: &impl Sign) -> Result<()> {
     let body = state_message(j, a);
     let text = format!(
         "{body} {}\n",
-        hex::encode(key.sign(body.as_bytes()).to_bytes())
+        hex::encode(key.sign_bytes(body.as_bytes())?)
     );
     atomic_write(
         &base.join(format!("{}.active", j.file())),
@@ -166,7 +171,7 @@ pub fn write_active(base: &Path, j: Journal, a: &Active, key: &SigningKey) -> Re
     )
 }
 
-pub fn read_active(base: &Path, j: Journal, key: &VerifyingKey, now: u64) -> Result<Active> {
+pub fn read_active(base: &Path, j: Journal, key: &impl Verify, now: u64) -> Result<Active> {
     let path = base.join(format!("{}.active", j.file()));
     if !path.exists() {
         return Ok(Active {
@@ -187,8 +192,8 @@ pub fn read_active(base: &Path, j: Journal, key: &VerifyingKey, now: u64) -> Res
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid previous seal"))?,
     };
-    let sig = Signature::from_slice(&hex::decode(f[5])?)?;
-    key.verify(state_message(j, &a).as_bytes(), &sig)
+    let sig = hex::decode(f[5])?;
+    key.verify_bytes(state_message(j, &a).as_bytes(), &sig)
         .context("invalid active segment signature")?;
     Ok(a)
 }
@@ -239,7 +244,7 @@ pub fn append_deletion(
     generation: u64,
     seal_hash: Hash,
     file_hash: Hash,
-    key: &SigningKey,
+    key: &impl Sign,
     at: u64,
 ) -> Result<()> {
     let body = format!(
@@ -252,7 +257,7 @@ pub fn append_deletion(
     );
     let line = format!(
         "{body} {}\n",
-        hex::encode(key.sign(body.as_bytes()).to_bytes())
+        hex::encode(key.sign_bytes(body.as_bytes())?)
     );
     let path = base.join("deletions.log");
     let mut f = OpenOptions::new()
@@ -294,7 +299,7 @@ fn deletion_body(d: &Deletion) -> String {
     )
 }
 
-pub fn read_deletions(base: &Path, keys: &[VerifyingKey]) -> Result<BTreeMap<(u8, u64), Deletion>> {
+pub fn read_deletions(base: &Path, keys: &[Public]) -> Result<BTreeMap<(u8, u64), Deletion>> {
     let text = match fs::read_to_string(base.join("deletions.log")) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
@@ -321,10 +326,10 @@ pub fn read_deletions(base: &Path, keys: &[VerifyingKey]) -> Result<BTreeMap<(u8
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("invalid file hash"))?,
         };
-        let sig = Signature::from_slice(&hex::decode(f[6])?)?;
+        let sig = hex::decode(f[6])?;
         if !keys
             .iter()
-            .any(|key| key.verify(deletion_body(&d).as_bytes(), &sig).is_ok())
+            .any(|key| key.verify_bytes(deletion_body(&d).as_bytes(), &sig).is_ok())
         {
             bail!("invalid deletion witness signature");
         }
@@ -346,7 +351,7 @@ pub struct AnchorPoint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustAnchor {
     pub created: u64,
-    pub key: [u8; 32],
+    pub key: Vec<u8>,
     pub points: [AnchorPoint; 2],
 }
 
@@ -364,28 +369,22 @@ impl TrustAnchor {
         format!(
             "YRL-AUDIT-ANCHOR-1 {} {} {} {}",
             self.created,
-            hex::encode(self.key),
+            hex::encode(&self.key),
             p(&self.points[0]),
             p(&self.points[1])
         )
     }
-    pub fn encode(&self, key: &SigningKey) -> Vec<u8> {
+    pub(crate) fn encode(&self, key: &impl Sign) -> Result<Vec<u8>> {
         let body = self.body();
-        format!(
-            "{body} {} END\n",
-            hex::encode(key.sign(body.as_bytes()).to_bytes())
-        )
-        .into_bytes()
+        Ok(format!("{body} {} END\n", hex::encode(key.sign_bytes(body.as_bytes())?)).into_bytes())
     }
-    pub fn decode(bytes: &[u8], trusted: Option<&VerifyingKey>) -> Result<Self> {
+    pub fn decode(bytes: &[u8], trusted: Option<&Public>) -> Result<Self> {
         let f: Vec<_> = std::str::from_utf8(bytes)?.split_whitespace().collect();
         if f.len() != 13 || f[0] != "YRL-AUDIT-ANCHOR-1" || f[12] != "END" {
             bail!("invalid Audit trust anchor");
         }
-        let key_bytes: [u8; 32] = hex::decode(f[2])?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid anchor key"))?;
-        let key = VerifyingKey::from_bytes(&key_bytes)?;
+        let key_bytes = hex::decode(f[2])?;
+        let key = Public::decode(&key_bytes, Purpose::Journal, None)?;
         if trusted.is_some_and(|t| t != &key) {
             bail!("anchor is signed by an unexpected key");
         }
@@ -411,9 +410,9 @@ impl TrustAnchor {
             key: key_bytes,
             points: [point(3, Journal::Ordinary)?, point(7, Journal::Security)?],
         };
-        key.verify(
+        key.verify_bytes(
             anchor.body().as_bytes(),
-            &Signature::from_slice(&hex::decode(f[11])?)?,
+            &hex::decode(f[11])?,
         )
         .context("invalid anchor signature")?;
         Ok(anchor)
@@ -431,10 +430,10 @@ pub struct ChainReport {
 pub fn decode_seal_any(
     bytes: &[u8],
     history: &crate::auditkeys::KeyHistory,
-) -> Result<(SegmentSeal, u64, VerifyingKey)> {
+) -> Result<(SegmentSeal, u64, Public)> {
     for (generation, key) in &history.keys {
         if let Ok(seal) = SegmentSeal::decode(bytes, key) {
-            return Ok((seal, *generation, *key));
+            return Ok((seal, *generation, key.clone()));
         }
     }
     bail!("segment seal is not signed by a trusted Audit key generation")
@@ -459,11 +458,11 @@ fn hash_at(bytes: &[u8], seq: u64) -> Option<Hash> {
 pub fn verify_chain(dir: &Path, external: Option<&TrustAnchor>) -> Result<ChainReport> {
     let base = dir.join("audit");
     let history = crate::auditkeys::load(dir)?;
-    let key = history.current;
+    let key = &history.current;
     if external.is_some_and(|a| !history.keys.values().any(|k| k.to_bytes() == a.key)) {
         bail!("trusted anchor key is not in the Audit transition chain");
     }
-    let all_keys: Vec<_> = history.keys.values().copied().collect();
+    let all_keys: Vec<_> = history.keys.values().cloned().collect();
     let deletions = read_deletions(&base, &all_keys)?;
     let mut out = ChainReport {
         archived: 0,
@@ -472,7 +471,7 @@ pub fn verify_chain(dir: &Path, external: Option<&TrustAnchor>) -> Result<ChainR
         revoked_key_segments: 0,
     };
     for journal in [Journal::Ordinary, Journal::Security] {
-        let active = read_active(&base, journal, &key, 0)?;
+        let active = read_active(&base, journal, key, 0)?;
         let mut previous = [0u8; 32];
         for generation in 0..active.generation {
             let seal_path = archived(&base, journal, generation, "seal");
@@ -530,7 +529,7 @@ pub fn verify_chain(dir: &Path, external: Option<&TrustAnchor>) -> Result<ChainR
         }
         let bytes = fs::read(base.join(format!("{}.log", journal.file()))).unwrap_or_default();
         let head = fs::read(base.join(format!("{}.head", journal.file()))).ok();
-        let r = crate::auditlog::verify(&bytes, journal, &key, head.as_deref());
+        let r = crate::auditlog::verify(&bytes, journal, key, head.as_deref());
         if let Some(f) = r.fault {
             bail!("active Audit journal fault: {f:?}");
         }

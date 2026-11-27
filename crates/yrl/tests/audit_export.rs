@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Verifier};
+use yrl::auditsign::Verify;
 use yrl::audit::AuditService;
 use yrl::auditexport::{verify, Outcome};
 use yrl::auditlog::{Event, Source, LEVEL_USER, RESULT_OK};
@@ -30,7 +30,7 @@ fn r63_export_manifest_signature_is_domain_separated_and_bound_to_anchor() {
     message.extend_from_slice(&digest);
     message.extend_from_slice(blake3::hash(&auth[4..4 + n]).as_bytes());
     svc.verifying_key()
-        .verify(&message, &Signature::from_slice(&auth[4 + n..]).unwrap())
+        .verify_bytes(&message, &auth[4 + n..])
         .unwrap();
     assert_eq!(anchor.key, svc.verifying_key().to_bytes());
 }

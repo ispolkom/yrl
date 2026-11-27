@@ -138,7 +138,49 @@ pub struct TrustStore {
     pub generation: u64,
     pub current: ReleasePublic,
     pub roots: BTreeMap<u64, ReleasePublic>,
+    pub minimum_root: u64,
     pub revoked_delegates: BTreeSet<(u64, String)>,
+}
+
+fn optional_log(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(log) => Ok(log),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(feature = "hybrid-signatures")]
+fn release_recovery_key(path: &Path) -> Result<crate::hybrid_signature::PublicKey> {
+    crate::hybrid_signature::PublicKey::load_file(path, crate::hybrid_signature::Purpose::Recovery)
+}
+
+#[cfg(feature = "hybrid-signatures")]
+pub fn register_root_recovery(trust: &Path, public: &Path) -> Result<()> {
+    if !matches!(load_trust(trust)?.current, ReleasePublic::Hybrid(_)) {
+        bail!("recovery requires a hybrid release trust store");
+    }
+    atomic(&trust.join("recovery.pub"), &release_recovery_key(public)?.encode(), 0o644)
+}
+
+#[cfg(feature = "hybrid-signatures")]
+pub fn recover_root(trust: &Path, recovery_private: &Path, new_private: &Path, new_public: &Path) -> Result<()> {
+    use crate::hybrid_signature::{Purpose, SigningKey};
+    let store = load_trust(trust)?;
+    let ReleasePublic::Hybrid(old) = store.current else { bail!("recovery requires hybrid release trust"); };
+    let recovery = release_recovery_key(&trust.join("recovery.pub"))?;
+    let recovery = SigningKey::load_pinned(recovery_private, &recovery)?;
+    let generation = store.generation.checked_add(1).context("release root generation overflow")?;
+    let new = SigningKey::generate_files(new_private, new_public, Purpose::ReleaseRoot, generation)?;
+    let private = SigningKey::load_pinned(new_private, &new)?;
+    let body = format!(
+        "YRL-RELEASE-ROOT-RECOVERY-1 {} {} {generation} {}",
+        store.generation, hex::encode(old.encode()), hex::encode(new.encode())
+    );
+    publish_root(trust, generation, &new.encode(), &format!(
+        "{body} {} {}\n", hex::encode(recovery.sign(body.as_bytes())?.encode()),
+        hex::encode(private.sign(body.as_bytes())?.encode()),
+    ))
 }
 
 pub fn init_trust(root_public: &Path, trust_dir: &Path) -> Result<()> {
@@ -190,6 +232,10 @@ pub fn rotate_root(
         hex::encode(old.sign(body.as_bytes())?),
         hex::encode(new.sign(body.as_bytes())?)
     );
+    publish_root(trust_dir, generation, &public.to_bytes(), &line)
+}
+
+fn publish_root(trust_dir: &Path, generation: u64, public: &[u8], line: &str) -> Result<()> {
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
@@ -203,11 +249,12 @@ pub fn rotate_root(
         &tmp,
         format!(
             "{generation} {}\n",
-            hex::encode(public.to_bytes())
+            hex::encode(public)
         ),
     )?;
     File::open(&tmp)?.sync_all()?;
     fs::rename(tmp, current)?;
+    File::open(trust_dir)?.sync_all()?;
     Ok(())
 }
 
@@ -215,12 +262,10 @@ pub fn load_trust(dir: &Path) -> Result<TrustStore> {
     let root = verifying(&dir.join("root.pub"), true, 0)?;
     let mut roots = BTreeMap::new();
     roots.insert(0, root);
-    for line in fs::read_to_string(dir.join("root-transitions.log"))
-        .unwrap_or_default()
-        .lines()
-    {
+    let mut minimum_root = 0;
+    for line in optional_log(&dir.join("root-transitions.log"))?.lines() {
         let f: Vec<_> = line.split_whitespace().collect();
-        if f.len() != 7 || f[0] != "YRL-RELEASE-ROOT-TRANSITION-1" {
+        if f.len() != 7 || !matches!(f[0], "YRL-RELEASE-ROOT-TRANSITION-1" | "YRL-RELEASE-ROOT-RECOVERY-1") {
             bail!("invalid release root transition");
         }
         let og: u64 = f[1].parse()?;
@@ -233,11 +278,22 @@ pub fn load_trust(dir: &Path) -> Result<TrustStore> {
         if roots.get(&og) != Some(&old) || !old.same_profile(&new) {
             bail!("detached release root transition or profile change");
         }
-        let body = format!("YRL-RELEASE-ROOT-TRANSITION-1 {og} {} {ng} {}", f[2], f[4]);
-        old.verify(
-            body.as_bytes(),
-            &hex::decode(f[5])?,
-        )?;
+        let body = format!("{} {og} {} {ng} {}", f[0], f[2], f[4]);
+        if f[0] == "YRL-RELEASE-ROOT-RECOVERY-1" {
+            #[cfg(feature = "hybrid-signatures")]
+            {
+                if !matches!(old, ReleasePublic::Hybrid(_)) {
+                    bail!("recovery requires hybrid release trust");
+                }
+                let recovery = release_recovery_key(&dir.join("recovery.pub"))?;
+                recovery.verify(body.as_bytes(), &crate::hybrid_signature::SignatureEnvelope::decode(&hex::decode(f[5])?)?)?;
+                minimum_root = ng;
+            }
+            #[cfg(not(feature = "hybrid-signatures"))]
+            bail!("unsupported release root recovery");
+        } else {
+            old.verify(body.as_bytes(), &hex::decode(f[5])?)?;
+        }
         new.verify(
             body.as_bytes(),
             &hex::decode(f[6])?,
@@ -256,11 +312,12 @@ pub fn load_trust(dir: &Path) -> Result<TrustStore> {
     if roots.get(&generation) != Some(&current) {
         bail!("release trust store was rolled back or detached");
     }
+    // The signed history is authoritative if publication was interrupted
+    // after syncing it and before replacing current.pub.
+    let (generation, current) = roots.last_key_value().context("release trust has no root")?;
+    let (generation, current) = (*generation, current.clone());
     let mut revoked_delegates = BTreeSet::new();
-    for line in fs::read_to_string(dir.join("revocations.log"))
-        .unwrap_or_default()
-        .lines()
-    {
+    for line in optional_log(&dir.join("revocations.log"))?.lines() {
         let f: Vec<_> = line.split_whitespace().collect();
         if f.len() != 6 || f[0] != "YRL-RELEASE-REVOKE-1" {
             bail!("invalid release revocation");
@@ -279,6 +336,7 @@ pub fn load_trust(dir: &Path) -> Result<TrustStore> {
         generation,
         current,
         roots,
+        minimum_root,
         revoked_delegates,
     })
 }
@@ -365,6 +423,9 @@ pub fn parse_delegation(path: &Path, store: &TrustStore) -> Result<Delegation> {
         .roots
         .get(&d.root_generation)
         .context("delegation uses unknown root")?;
+    if d.root_generation < store.minimum_root {
+        bail!("delegation uses a root retired by emergency recovery");
+    }
     if !root.same_profile(&d.public) { bail!("release delegation changes signature profile"); }
     root.verify(
         d.body().as_bytes(),

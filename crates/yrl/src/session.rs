@@ -358,3 +358,74 @@ async fn pq_upgrade_server<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, mut out
     write_msg(s, &wrapped[..w]).await.map_err(|_| Silent)?;
     Ok(Secure::new_hybrid(pq.finalize().map_err(|_| Silent)?, rekey_every, binding, profile))
 }
+
+#[cfg(all(test, feature = "hybrid-signatures"))]
+mod hybrid_proof_tests {
+    use super::*;
+    use crate::{crypto_profile::{Context, Policy}, hybrid_signature::{Purpose, SigningKey}};
+
+    #[tokio::test]
+    async fn altered_hybrid_wire_proofs_refuse_both_endpoints() {
+        let context = Context::Executor;
+        let initiator = crate::keys::generate();
+        let responder = crate::keys::generate();
+        let (client_key, _) = SigningKey::generate(Purpose::Handshake, 4);
+        let (server_key, _) = SigningKey::generate(Purpose::Handshake, 5);
+        let authorized = [Authorized { public: initiator.public.clone(), label: "accepted".into(), rights: vec![] }];
+        let client_pin = client_key.public();
+        let server_pin = server_key.public();
+        let i = &initiator.public;
+        let r = &responder.public;
+
+        for fault in [
+            (45, false),   // Ed25519
+            (109, false),  // ML-DSA
+            (45, true),    // missing Ed25519
+            (109, true),   // missing ML-DSA
+            (12, false),   // generation
+            (13, false),   // key binding
+            (0, false),    // different role context
+        ] {
+            for broken_client in [true, false] {
+                let (mut a, mut b) = tokio::io::duplex(16 * 1024);
+                let (client, server) = tokio::join!(
+                    client_handshake_context(&mut a, &initiator, r, REKEY_EVERY, context, Policy::default()),
+                    server_handshake_open_context(&mut b, &responder, &authorized, REKEY_EVERY, false, context, Policy::default())
+                );
+                let client = client.unwrap();
+                let server = server.unwrap().0;
+                let alter = |key: &SigningKey, sec: &Secure, role| {
+                    let proof_context = if fault.0 == 0 { Context::Gatekeeper } else { context };
+                    let body = hybrid_proof_body(proof_context, sec, i, r, role).unwrap();
+                    let mut bytes = key.sign(&body).unwrap().encode();
+                    match fault {
+                        (45, true) => { bytes.drain(45..109); }
+                        (109, true) => bytes.truncate(109),
+                        (offset, false) if offset != 0 => bytes[offset] ^= 1,
+                        _ => {}
+                    }
+                    bytes
+                };
+                if broken_client {
+                    let raw = alter(&client_key, &client, b'I');
+                    let forged = client.seal(&Frame::new(crate::wire::HYBRID_CLIENT_PROOF, 0, raw)).unwrap();
+                    write_msg(&mut a, &forged).await.unwrap();
+                    assert!(hybrid_auth_server(&mut b, &server, context, i, r, &server_key, &client_pin).await.is_err());
+                } else {
+                    let reply = async {
+                        let request = server.open(&read_msg(&mut b).await.unwrap()).unwrap();
+                        assert_eq!(request.kind, crate::wire::HYBRID_CLIENT_PROOF);
+                        let raw = alter(&server_key, &server, b'R');
+                        let forged = server.seal(&Frame::new(crate::wire::HYBRID_SERVER_PROOF, 0, raw)).unwrap();
+                        write_msg(&mut b, &forged).await.unwrap();
+                    };
+                    let (client_result, ()) = tokio::join!(
+                        hybrid_auth_client(&mut a, &client, context, i, r, &client_key, &server_pin),
+                        reply,
+                    );
+                    assert!(client_result.is_err());
+                }
+            }
+        }
+    }
+}

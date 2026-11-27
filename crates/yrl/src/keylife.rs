@@ -352,11 +352,11 @@ pub fn rotate(dir: &Path, side: &str, recovery: &Path, recipient: &str) -> Resul
     Ok(key.public.clone())
 }
 
-fn audit_signing_key(dir: &Path) -> Result<ed25519_dalek::SigningKey> {
-    let seed = crate::keys::read_secret_hex(&dir.join("audit/sign.key"), 32)?;
-    Ok(ed25519_dalek::SigningKey::from_bytes(
-        seed.as_slice().try_into()?,
-    ))
+fn audit_signing_key(dir: &Path) -> Result<crate::auditsign::Secret> {
+    let public = crate::auditlog::load_verifying_key(dir)?;
+    crate::auditsign::Secret::load(
+        &dir.join("audit/sign.key"), &public, crate::auditsign::Purpose::Journal,
+    )
 }
 
 pub fn audit_register_recovery(
@@ -730,8 +730,7 @@ pub fn restore(input: &Path, destination: &Path) -> Result<()> {
         }
         let signing = stage.join("audit/sign.key");
         if signing.exists() {
-            let seed = crate::keys::read_secret_hex(&signing, 32)?;
-            let key = ed25519_dalek::SigningKey::from_bytes(seed.as_slice().try_into()?);
+            let key = audit_signing_key(&stage)?;
             let public = crate::auditlog::load_verifying_key(&stage)?;
             if key.verifying_key() != public {
                 bail!("Audit signing key does not match its public key");

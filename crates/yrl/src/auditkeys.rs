@@ -1,43 +1,47 @@
 //! Audit signing-key generations and cross-signed transitions.
 use anyhow::{bail, Context, Result};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use crate::auditsign::{Public, Purpose, Secret, Sign, Verify};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use zeroize::{Zeroize, Zeroizing};
 
 const TRANSITION: &str = "YRL-AUDIT-KEY-TRANSITION-1";
 const REVOCATION: &str = "YRL-AUDIT-KEY-REVOCATION-1";
 
 #[derive(Clone)]
 pub struct KeyHistory {
-    pub root: VerifyingKey,
+    pub root: Public,
     pub current_generation: u64,
-    pub current: VerifyingKey,
-    pub keys: BTreeMap<u64, VerifyingKey>,
+    pub current: Public,
+    pub keys: BTreeMap<u64, Public>,
     pub revoked: BTreeSet<u64>,
 }
 
 fn pub_at(base: &Path, generation: u64) -> std::path::PathBuf {
     base.join("keys").join(format!("{generation:020}.pub"))
 }
-fn read_pub(path: &Path) -> Result<VerifyingKey> {
-    let b: [u8; 32] = hex::decode(fs::read_to_string(path)?.trim())?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("invalid Audit public key"))?;
-    Ok(VerifyingKey::from_bytes(&b)?)
+fn read_pub(path: &Path, purpose: Purpose, generation: Option<u64>) -> Result<Public> {
+    Public::decode(&hex::decode(fs::read_to_string(path)?.trim())?, purpose, generation)
+}
+
+fn read_optional_log(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(log) => Ok(log),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn transition_body(
     mode: &str,
     old_generation: u64,
-    old: &VerifyingKey,
+    old: &Public,
     new_generation: u64,
-    new: &VerifyingKey,
+    new: &Public,
     at: u64,
-    recovery: Option<&VerifyingKey>,
+    recovery: Option<&Public>,
 ) -> String {
     format!(
         "{TRANSITION} {mode} {old_generation} {} {new_generation} {} {at} {}",
@@ -49,7 +53,7 @@ fn transition_body(
     )
 }
 
-pub fn initialize(base: &Path, current: &VerifyingKey) -> Result<()> {
+pub fn initialize(base: &Path, current: &Public) -> Result<()> {
     fs::create_dir_all(base.join("keys"))?;
     if !base.join("root.pub").exists() {
         crate::auditsegments::atomic_write(
@@ -71,10 +75,10 @@ pub fn initialize(base: &Path, current: &VerifyingKey) -> Result<()> {
 pub fn load(dir: &Path) -> Result<KeyHistory> {
     let base = dir.join("audit");
     let current = crate::auditlog::load_verifying_key(dir)?;
-    let root = read_pub(&base.join("root.pub"))?;
+    let root = read_pub(&base.join("root.pub"), Purpose::Journal, Some(0))?;
     let mut keys = BTreeMap::new();
-    keys.insert(0, root);
-    let transitions = fs::read_to_string(base.join("key-transitions.log")).unwrap_or_default();
+    keys.insert(0, root.clone());
+    let transitions = read_optional_log(&base.join("key-transitions.log"))?;
     for line in transitions.lines() {
         let f: Vec<_> = line.split_whitespace().collect();
         if f.len() != 11 || f[0] != TRANSITION {
@@ -83,30 +87,18 @@ pub fn load(dir: &Path) -> Result<KeyHistory> {
         let mode = f[1];
         let old_gen: u64 = f[2].parse()?;
         let new_gen: u64 = f[4].parse()?;
-        if new_gen != old_gen + 1 {
+        if old_gen.checked_add(1) != Some(new_gen) || keys.contains_key(&new_gen) {
             bail!("non-monotonic Audit key generation");
         }
-        let old = VerifyingKey::from_bytes(
-            &hex::decode(f[3])?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid old key"))?,
-        )?;
-        let new = VerifyingKey::from_bytes(
-            &hex::decode(f[5])?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid new key"))?,
-        )?;
-        if keys.get(&old_gen) != Some(&old) {
-            bail!("Audit key transition is detached");
+        let old = Public::decode(&hex::decode(f[3])?, Purpose::Journal, Some(old_gen))?;
+        let new = Public::decode(&hex::decode(f[5])?, Purpose::Journal, Some(new_gen))?;
+        if keys.get(&old_gen) != Some(&old) || !old.same_profile(&new) {
+            bail!("Audit key transition is detached or changes signature profile");
         }
         let recovery = if f[7] == "-" {
             None
         } else {
-            Some(VerifyingKey::from_bytes(
-                &hex::decode(f[7])?
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("invalid recovery key"))?,
-            )?)
+            Some(Public::decode(&hex::decode(f[7])?, Purpose::Recovery, None)?)
         };
         let body = transition_body(
             mode,
@@ -117,28 +109,28 @@ pub fn load(dir: &Path) -> Result<KeyHistory> {
             f[6].parse()?,
             recovery.as_ref(),
         );
-        new.verify(
+        new.verify_bytes(
             body.as_bytes(),
-            &Signature::from_slice(&hex::decode(f[9])?)?,
+            &hex::decode(f[9])?,
         )
         .context("new Audit key possession proof failed")?;
         match mode {
             "planned" => old
-                .verify(
+                .verify_bytes(
                     body.as_bytes(),
-                    &Signature::from_slice(&hex::decode(f[8])?)?,
+                    &hex::decode(f[8])?,
                 )
                 .context("old Audit key did not authorize transition")?,
             "emergency" => {
-                let configured = read_pub(&base.join("recovery.pub"))
+                let configured = read_pub(&base.join("recovery.pub"), Purpose::Recovery, None)
                     .context("no pretrusted Audit recovery key")?;
-                if recovery.as_ref() != Some(&configured) {
+                if recovery.as_ref() != Some(&configured) || !configured.same_profile(&old) {
                     bail!("wrong Audit recovery key");
                 }
                 configured
-                    .verify(
+                    .verify_bytes(
                         body.as_bytes(),
-                        &Signature::from_slice(&hex::decode(f[10])?)?,
+                        &hex::decode(f[10])?,
                     )
                     .context("emergency transition is not recovery-authorized")?;
             }
@@ -151,10 +143,7 @@ pub fn load(dir: &Path) -> Result<KeyHistory> {
         .find_map(|(g, k)| (k == &current).then_some(*g))
         .context("current Audit key is not in its transition chain")?;
     let mut revoked = BTreeSet::new();
-    for line in fs::read_to_string(base.join("key-revocations.log"))
-        .unwrap_or_default()
-        .lines()
-    {
+    for line in read_optional_log(&base.join("key-revocations.log"))?.lines() {
         let f: Vec<_> = line.split_whitespace().collect();
         if f.len() != 7 || f[0] != REVOCATION {
             bail!("invalid Audit key revocation");
@@ -176,9 +165,9 @@ pub fn load(dir: &Path) -> Result<KeyHistory> {
             f[3], f[4]
         );
         signer
-            .verify(
+            .verify_bytes(
                 body.as_bytes(),
-                &Signature::from_slice(&hex::decode(f[6])?)?,
+                &hex::decode(f[6])?,
             )
             .context("invalid Audit key revocation signature")?;
         revoked.insert(generation);
@@ -192,7 +181,7 @@ pub fn load(dir: &Path) -> Result<KeyHistory> {
     })
 }
 
-pub fn reconcile_private(dir: &Path, private_public: &VerifyingKey) -> Result<()> {
+pub fn reconcile_private(dir: &Path, private_public: &Public) -> Result<()> {
     let published = crate::auditlog::load_verifying_key(dir)?;
     if &published == private_public {
         return Ok(());
@@ -226,10 +215,11 @@ pub fn register_recovery(dir: &Path, public_hex: &str) -> Result<()> {
     if base.join("recovery.pub").exists() {
         bail!("Audit recovery key is already registered");
     }
-    let bytes: [u8; 32] = hex::decode(public_hex)?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("recovery public key must be 32 bytes"))?;
-    VerifyingKey::from_bytes(&bytes)?;
+    let bytes = hex::decode(public_hex)?;
+    let recovery = Public::decode(&bytes, Purpose::Recovery, None)?;
+    if !load(dir)?.current.same_profile(&recovery) {
+        bail!("Audit recovery key uses a different signature profile");
+    }
     crate::auditsegments::atomic_write(
         &base.join("recovery.pub"),
         format!("{}\n", hex::encode(bytes)).as_bytes(),
@@ -237,11 +227,8 @@ pub fn register_recovery(dir: &Path, public_hex: &str) -> Result<()> {
     )
 }
 
-fn replace_current(base: &Path, new: &SigningKey) -> Result<()> {
-    let key_path = base.join("sign.key");
-    let mut secret = Zeroizing::new(format!("{}\n", hex::encode(new.to_bytes())));
-    crate::auditsegments::atomic_write(&key_path, secret.as_bytes(), 0o600)?;
-    secret.zeroize();
+fn replace_current(base: &Path, new: &Secret, bytes: &[u8]) -> Result<()> {
+    crate::auditsegments::atomic_write(&base.join("sign.key"), bytes, 0o600)?;
     crate::auditsegments::atomic_write(
         &base.join("sign.pub"),
         format!("{}\n", hex::encode(new.verifying_key().to_bytes())).as_bytes(),
@@ -249,14 +236,14 @@ fn replace_current(base: &Path, new: &SigningKey) -> Result<()> {
     )
 }
 
-pub fn planned_transition(dir: &Path, old: &SigningKey) -> Result<VerifyingKey> {
+pub fn planned_transition(dir: &Path, old: &impl Sign) -> Result<Public> {
     let base = dir.join("audit");
     let history = load(dir)?;
-    if old.verifying_key() != history.current {
+    if old.public_key() != history.current {
         bail!("Audit private key does not match current history");
     }
-    let new = SigningKey::generate(&mut argon2::password_hash::rand_core::OsRng);
-    let ng = history.current_generation + 1;
+    let ng = history.current_generation.checked_add(1).context("Audit key generation overflow")?;
+    let (new, new_bytes) = Secret::generate(&history.current, ng);
     let at = crate::gatenet::now_secs();
     let body = transition_body(
         "planned",
@@ -269,8 +256,8 @@ pub fn planned_transition(dir: &Path, old: &SigningKey) -> Result<VerifyingKey> 
     );
     let line = format!(
         "{body} {} {} -",
-        hex::encode(old.sign(body.as_bytes()).to_bytes()),
-        hex::encode(new.sign(body.as_bytes()).to_bytes())
+        hex::encode(old.sign_bytes(body.as_bytes())?),
+        hex::encode(new.sign_bytes(body.as_bytes())?)
     );
     crate::auditsegments::atomic_write(
         &pub_at(&base, ng),
@@ -278,20 +265,20 @@ pub fn planned_transition(dir: &Path, old: &SigningKey) -> Result<VerifyingKey> 
         0o644,
     )?;
     append_transition(&base, &line)?;
-    replace_current(&base, &new)?;
+    replace_current(&base, &new, &new_bytes)?;
     Ok(new.verifying_key())
 }
 
-pub fn emergency_transition(dir: &Path, recovery_seed: &Path) -> Result<VerifyingKey> {
+pub fn emergency_transition(dir: &Path, recovery_seed: &Path) -> Result<Public> {
     let base = dir.join("audit");
     let history = load(dir)?;
-    let recovery_bytes = crate::keys::read_secret_hex(recovery_seed, 32)?;
-    let recovery = SigningKey::from_bytes(recovery_bytes.as_slice().try_into()?);
-    if recovery.verifying_key() != read_pub(&base.join("recovery.pub"))? {
-        bail!("recovery private key does not match the pretrusted public key");
+    let pin = read_pub(&base.join("recovery.pub"), Purpose::Recovery, None)?;
+    let recovery = Secret::load(recovery_seed, &pin, Purpose::Recovery)?;
+    if recovery.verifying_key() != pin || !pin.same_profile(&history.current) {
+        bail!("recovery private key does not match the pretrusted public key and profile");
     }
-    let new = SigningKey::generate(&mut argon2::password_hash::rand_core::OsRng);
-    let ng = history.current_generation + 1;
+    let ng = history.current_generation.checked_add(1).context("Audit key generation overflow")?;
+    let (new, new_bytes) = Secret::generate(&history.current, ng);
     let at = crate::gatenet::now_secs();
     let body = transition_body(
         "emergency",
@@ -304,8 +291,8 @@ pub fn emergency_transition(dir: &Path, recovery_seed: &Path) -> Result<Verifyin
     );
     let line = format!(
         "{body} - {} {}",
-        hex::encode(new.sign(body.as_bytes()).to_bytes()),
-        hex::encode(recovery.sign(body.as_bytes()).to_bytes())
+        hex::encode(new.sign_bytes(body.as_bytes())?),
+        hex::encode(recovery.sign_bytes(body.as_bytes())?)
     );
     crate::auditsegments::atomic_write(
         &pub_at(&base, ng),
@@ -313,14 +300,14 @@ pub fn emergency_transition(dir: &Path, recovery_seed: &Path) -> Result<Verifyin
         0o644,
     )?;
     append_transition(&base, &line)?;
-    replace_current(&base, &new)?;
+    replace_current(&base, &new, &new_bytes)?;
     Ok(new.verifying_key())
 }
 
-pub fn revoke(dir: &Path, generation: u64, reason: &str, current: &SigningKey) -> Result<()> {
+pub fn revoke(dir: &Path, generation: u64, reason: &str, current: &impl Sign) -> Result<()> {
     let base = dir.join("audit");
     let h = load(dir)?;
-    if current.verifying_key() != h.current || generation >= h.current_generation {
+    if current.public_key() != h.current || generation >= h.current_generation {
         bail!("only an older Audit generation can be revoked by the current key");
     }
     let key = h
@@ -336,7 +323,7 @@ pub fn revoke(dir: &Path, generation: u64, reason: &str, current: &SigningKey) -
     );
     let line = format!(
         "{body} {}\n",
-        hex::encode(current.sign(body.as_bytes()).to_bytes())
+        hex::encode(current.sign_bytes(body.as_bytes())?)
     );
     let mut f = OpenOptions::new()
         .create(true)

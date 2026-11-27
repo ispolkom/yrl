@@ -137,4 +137,18 @@ fn hybrid_release_requires_both_signatures_at_every_trust_boundary() {
     assert!(verify(&sig, &cert).is_ok());
     revoke_delegate(&trust, &new_root, 7, &delegate_pub, 520).unwrap();
     assert!(verify(&sig, &cert).is_err());
+
+    let (recovery, recovery_pub) = (dir.join("recover.key"), dir.join("recover.pub"));
+    SigningKey::generate_files(&recovery, &recovery_pub, Purpose::Recovery, 0).unwrap();
+    register_root_recovery(&trust, &recovery_pub).unwrap();
+    let historical = dir.join("historical-cert");
+    let other_pub = dir.join("other.pub");
+    SigningKey::generate_files(&dir.join("other.key"), &other_pub, Purpose::ReleaseDelegated, 8).unwrap();
+    delegate(&trust, &new_root, &other_pub, 8, 100, 900, 40, 50, &historical).unwrap();
+    assert!(parse_delegation(&historical, &load_trust(&trust).unwrap()).is_ok());
+    std::fs::remove_file(&new_root).unwrap();
+    recover_root(&trust, &recovery, &dir.join("new2.key"), &dir.join("new2.pub")).unwrap();
+    let store = load_trust(&trust).unwrap();
+    assert_eq!(store.minimum_root, 2);
+    assert!(parse_delegation(&historical, &store).is_err());
 }
