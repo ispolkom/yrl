@@ -18,6 +18,8 @@ The current worktree contains Stage 8 regression fixes and `STAGE8_ACCEPTANCE.md
 
 Stage 8.2 focused transport suite: 91 tests passed across `routes`, `relay`, `resume`, `udp_session`, `link`, `files`, `terminal` and `tunnels` with serial test execution. Long-duration parallel unstable-network and installed-host scenarios remain NOT RUN; details in `STAGE8_ACCEPTANCE.md`. 8.1 findings were published as `e401e08`. Continue with 8.3 runtime isolation and remaining 8.2 duration/chaos checks when isolation is available.
 
+Stage 8.3 focused authority suite: 88 tests passed across IPC, revocation, Broker, step-up, SPA, threats and unit-policy tests. Real nft outer tests skipped their kernel checks because `nft` is absent; installed units are disabled and no YRL service processes were available for `/proc` inspection. Runtime isolation remains BLOCKED. 8.2 was published as `f530686`. Continue with 8.4 overload/crash checks and isolated runtime checks when prerequisites are available.
+
 ## Architecture at the baseline
 
 ```text
