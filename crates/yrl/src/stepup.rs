@@ -333,7 +333,143 @@ struct Store {
 
 const MAX_STORE: u64 = 1 << 20;
 
+#[cfg(test)]
+std::thread_local! {
+    static REV005_FAIL_SYNC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+
+    static REV005_FAIL_SYNC_AT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn lockout_sync_parent(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if REV005_FAIL_SYNC.with(|flag| flag.replace(false)) {
+        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+    }
+
+    #[cfg(test)]
+    if REV005_FAIL_SYNC_AT.with(|counter| {
+        let n = counter.get();
+        if n == 0 {
+            false
+        } else {
+            counter.set(n - 1);
+            n == 1
+        }
+    }) {
+        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+    }
+
+    let parent = path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    std::fs::File::open(parent)?.sync_all()
+}
+
+
 impl Store {
+    fn dirty_path(&self) -> std::path::PathBuf {
+        let mut name = self.path.as_os_str().to_os_string();
+        name.push(".dirty");
+        std::path::PathBuf::from(name)
+    }
+
+    fn is_dirty(&self) -> bool {
+        match std::fs::symlink_metadata(self.dirty_path()) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            _ => true,
+        }
+    }
+
+    // Called only under the exclusive transaction lock.
+    fn begin_transaction(&self) -> std::io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::io::Write;
+
+        let path = self.dirty_path();
+
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)?;
+
+        f.write_all(b"YRLLOCK DIRTY 1\n")?;
+        f.sync_all()?;
+
+        // Deliberately retain the marker on every error.
+        lockout_sync_parent(&path)?;
+
+        Ok(())
+    }
+
+    fn finish_transaction(&self) -> std::io::Result<()> {
+        let path = self.dirty_path();
+
+        std::fs::remove_file(&path)?;
+
+        if let Err(e) = lockout_sync_parent(&path) {
+            // Best effort to restore the refusal marker.
+            let _ = self.begin_transaction();
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    fn transaction_lock(&self) -> std::io::Result<std::fs::File> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{OpenOptionsExt, MetadataExt};
+
+        let mut name = self.path.as_os_str().to_os_string();
+        name.push(".lock");
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(
+                libc::O_NOFOLLOW |
+                libc::O_CLOEXEC |
+                libc::O_NONBLOCK
+            )
+            .open(std::path::PathBuf::from(name))?;
+
+        let meta = file.metadata()?;
+
+        if !meta.is_file()
+            || meta.nlink() != 1
+            || meta.mode() & 0o077 != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "unsafe lockout transaction lock"
+            ));
+        }
+
+        loop {
+            let rc = unsafe {
+                libc::flock(file.as_raw_fd(), libc::LOCK_EX)
+            };
+
+            if rc == 0 {
+                break;
+            }
+
+            let err = std::io::Error::last_os_error();
+
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        }
+
+        Ok(file)
+    }
+
     fn mac(key: &[u8; 32], body: &str) -> String {
         hex::encode(blake3::keyed_hash(key, body.as_bytes()).as_bytes())
     }
@@ -353,10 +489,15 @@ impl Store {
         let text = zeroize::Zeroizing::new(hex::encode(&*key));
         std::io::Write::write_all(&mut f, text.as_bytes()).ok()?;
         f.sync_all().ok()?;
+        lockout_sync_parent(&self.key_path).ok()?;
         Some(key)
     }
     /// the stored state, or None if it cannot be trusted
     fn load(&self) -> Option<State> {
+        if self.is_dirty() {
+            return None;
+        }
+
         use std::os::unix::fs::MetadataExt;
         let key = self.read_key()?;
         let m = std::fs::metadata(&self.path).ok()?;
@@ -407,12 +548,39 @@ impl Store {
             body.push_str(&format!("REC {} {} {} {} {}\n", hex::encode(k), lv.right(), r.fails, r.locked as u8, r.until));
         }
         let text = format!("{body}MAC {}\n", Self::mac(&key, &body));
-        let tmp = self.path.with_extension("tmp");
+        let mut name = self.path.as_os_str().to_os_string();
+        name.push(".tmp");
+
+        let tmp = std::path::PathBuf::from(name);
+
         let _ = std::fs::remove_file(&tmp);
-        let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp).ok()?;
-        std::io::Write::write_all(&mut f, text.as_bytes()).ok()?;
-        f.sync_all().ok()?;
-        std::fs::rename(&tmp, &self.path).ok()
+
+        let result = (|| -> Option<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&tmp).ok()?;
+
+            std::io::Write::write_all(
+                &mut f, text.as_bytes()
+            ).ok()?;
+
+            f.sync_all().ok()?;
+
+            std::fs::rename(&tmp, &self.path).ok()?;
+
+            lockout_sync_parent(&self.path).ok()?;
+
+            Some(())
+        })();
+
+        if result.is_none() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+
+        result
     }
 }
 
@@ -444,10 +612,31 @@ impl Lockouts {
     pub fn persistent(dir: &Path, name: &str) -> Lockouts {
         let store = Store { path: dir.join(format!("lockouts.{name}")), key_path: dir.join(format!("lockouts.{name}.key")) };
         // first run: both files are made; a key without its file (or the reverse) is not a first run
-        if !store.path.exists() && !store.key_path.exists() {
-            let _ = store.save(&State::default());
+        let initialization_failed = match store.transaction_lock() {
+            Ok(_guard) => {
+                if store.is_dirty() {
+                    true
+                } else if !store.path.exists()
+                    && !store.key_path.exists()
+                {
+                    store.begin_transaction().is_err()
+                        || store.save(&State::default()).is_none()
+                        || store.finish_transaction().is_err()
+                } else {
+                    false
+                }
+            }
+            Err(_) => true,
+        };
+
+        Lockouts {
+            mem: Mutex::new(State {
+                tampered: initialization_failed,
+                ..State::default()
+            }),
+            store: Some(store),
+            ..Lockouts::default()
         }
-        Lockouts { store: Some(store), ..Lockouts::default() }
     }
 
     /// the owner, on the machine: forget everything and start clean (also repairs a damaged store)
@@ -455,9 +644,41 @@ impl Lockouts {
         use std::os::unix::fs::MetadataExt;
         let store = Store { path: dir.join(format!("lockouts.{name}")), key_path: dir.join(format!("lockouts.{name}.key")) };
         // the owner runs this as another user (root) than the part that uses the store: the new files must stay the old files' user's, or that part could not read them again
-        let owner = std::fs::metadata(&store.path).or_else(|_| std::fs::metadata(&store.key_path)).ok().map(|m| (m.uid(), m.gid()));
-        let _ = std::fs::remove_file(&store.path);
-        let _ = std::fs::remove_file(&store.key_path);
+        let transaction = store.transaction_lock()?;
+
+        let owner = std::fs::metadata(&store.path)
+            .or_else(|_| std::fs::metadata(&store.key_path))
+            .ok()
+            .map(|m| (m.uid(), m.gid()));
+
+        // Preserve service ownership when reset is run by root.
+        if let Some((uid, gid)) = owner {
+            use std::os::fd::AsRawFd;
+
+            if unsafe { libc::geteuid() } == 0 {
+                if unsafe {
+                    libc::fchown(transaction.as_raw_fd(), uid, gid)
+                } != 0 {
+                    bail!("cannot preserve lockout lock ownership");
+                }
+
+                transaction.sync_all()?;
+            }
+        }
+        if !store.is_dirty() {
+            store.begin_transaction()?;
+        } else {
+            lockout_sync_parent(&store.dirty_path())?;
+        }
+
+        for path in [&store.path, &store.key_path] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
         match store.save(&State::default()) {
             Some(()) => {
                 if let Some((u, g)) = owner {
@@ -469,26 +690,74 @@ impl Lockouts {
                         }
                     }
                 }
+                std::fs::File::open(&store.path)?.sync_all()?;
+                std::fs::File::open(&store.key_path)?.sync_all()?;
+
+                lockout_sync_parent(&store.path)?;
+
+                store.finish_transaction()?;
+
                 Ok(())
             }
             None => bail!("cannot write the lockout store"),
         }
     }
 
-    fn with<R>(&self, f: impl FnOnce(&mut State) -> R, write: bool) -> R {
+    fn with<R>(&self, f: impl FnOnce(&mut State) -> R, write: bool) -> (R, bool) {
         let mut g = self.mem.lock().unwrap();
-        let Some(store) = &self.store else { return f(&mut g) };
-        let mut st = store.load().unwrap_or(State { tampered: true, ..State::default() });
-        st.tampered |= g.tampered; // once the store could not be written it stays refused until the process is restarted by the owner
+
+        let Some(store) = &self.store else {
+            return (f(&mut g), true);
+        };
+
+        let _transaction = match store.transaction_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                *g = State {
+                    tampered: true,
+                    ..State::default()
+                };
+                return (f(&mut *g), false);
+            }
+        };
+
+        let mut st = store.load().unwrap_or(State {
+            tampered: true,
+            ..State::default()
+        });
+
+        st.tampered |= g.tampered;
+
         if st.tampered {
-            return f(&mut st); // nothing is saved over a damaged store: only the owner repairs it
+            *g = State {
+                tampered: true,
+                ..State::default()
+            };
+            return (f(&mut *g), false);
         }
-        let r = f(&mut st);
-        if write && store.save(&st).is_none() {
-            // not being able to remember is not "all is well" either
-            *g = State { tampered: true, ..State::default() };
+
+        if write && store.begin_transaction().is_err() {
+            *g = State {
+                tampered: true,
+                ..State::default()
+            };
+            return (f(&mut *g), false);
         }
-        r
+
+        let result = f(&mut st);
+
+        if write && (
+            store.save(&st).is_none()
+                || store.finish_transaction().is_err()
+        ) {
+            *g = State {
+                tampered: true,
+                ..State::default()
+            };
+            return (result, false);
+        }
+
+        (result, true)
     }
 
     pub fn standing(&self, key: &[u8], level: Level) -> Standing {
@@ -503,7 +772,7 @@ impl Lockouts {
                 }
             },
             false,
-        )
+        ).0
     }
     pub fn fail(&self, key: &[u8], level: Level) {
         let (max, sudo_lock, kill) = (self.max_fails, self.sudo_lock, self.kill_switch_after);
@@ -528,15 +797,29 @@ impl Lockouts {
             true,
         );
     }
-    pub fn ok(&self, key: &[u8], level: Level) {
-        self.with(
+    #[must_use]
+    pub fn ok(&self, key: &[u8], level: Level) -> bool {
+        let (allowed, durable) = self.with(
             |st| {
+                // A challenge issued earlier does not override
+                // a lockout established before proof completion.
+                if st.tampered || (level == Level::Root && st.global) {
+                    return false;
+                }
+
                 if let Some(r) = st.recs.get_mut(&(key.to_vec(), level)) {
+                    if r.locked || now_secs() < r.until {
+                        return false;
+                    }
                     r.fails = 0;
                 }
+
+                true
             },
             true,
         );
+
+        allowed && durable
     }
     /// in-memory sets only (a persistent one is lifted with `reset_files`, by the owner, on the machine)
     pub fn lift_all(&self) {
@@ -547,18 +830,18 @@ impl Lockouts {
     }
     /// true ONCE when the stored state was found damaged (so that it is written to the security journal once, not at every request)
     pub fn take_tamper_news(&self) -> bool {
-        let t = self.with(|st| st.tampered, false);
+        let t = self.with(|st| st.tampered, false).0;
         let was = self.tamper_reported.swap(t, std::sync::atomic::Ordering::SeqCst);
         t && !was
     }
     /// true ONCE when remote ROOT has been switched off for everybody
     pub fn take_global_news(&self) -> bool {
-        let g = self.with(|st| st.global, false);
+        let g = self.with(|st| st.global, false).0;
         let was = self.global_reported.swap(g, std::sync::atomic::Ordering::SeqCst);
         g && !was
     }
     pub fn remote_root_off(&self) -> bool {
-        self.with(|st| st.global || st.tampered, false)
+        self.with(|st| st.global || st.tampered, false).0
     }
 }
 
@@ -847,7 +1130,14 @@ impl StepServer {
             );
             return Ok(reply(if locked { R_LOCKED } else { R_DENIED }, ""));
         }
-        ctx.lockouts.ok(ctx.device_key, level);
+        if !ctx.lockouts.ok(ctx.device_key, level) {
+            ctx.report(
+                ctx.event(level, crate::auditlog::RESULT_DENIED, rid)
+                    .target("lockout state persistence failed"),
+            );
+            return Ok(reply(R_DENIED, ""));
+        }
+
         let mut cap = Cap::issue(level, &op, ctx.session_no, CAP_LIFE);
         if let Some(a) = ctx.audit {
             let desc = match &op {
@@ -1028,7 +1318,14 @@ impl StepServer {
             }
             return Ok(reply(if locked { R_LOCKED } else { R_DENIED }, ""));
         }
-        ctx.lockouts.ok(ctx.device_key, p.level);
+        if !ctx.lockouts.ok(ctx.device_key, p.level) {
+            ctx.report(
+                ctx.event(p.level, crate::auditlog::RESULT_DENIED, rid)
+                    .target("lockout state persistence failed"),
+            );
+            return Ok(reply(R_DENIED, ""));
+        }
+
         let mut cap = Cap::issue(p.level, &p.op, ctx.session_no, CAP_LIFE);
         // an approval nobody can account for is not given: if it cannot be written down, it does not happen
         if let Some(a) = ctx.audit {
@@ -1052,5 +1349,990 @@ impl StepServer {
             }
             Err(_) => reply(R_DENIED, ""),
         })
+    }
+}
+
+#[cfg(test)]
+mod rev005_tests {
+    use super::*;
+
+    fn store(dir: &Path) -> Store {
+        Store {
+            path: dir.join("lockouts.root"),
+            key_path: dir.join("lockouts.root.key"),
+        }
+    }
+
+    fn fail_sync() {
+        REV005_FAIL_SYNC.with(|flag| flag.set(true));
+    }
+
+    #[test]
+    fn key_creation_requires_directory_sync() {
+        let d = tempfile::tempdir().unwrap();
+        let store = store(d.path());
+
+        fail_sync();
+
+        assert!(
+            store.make_key().is_none(),
+            "key creation succeeded without durable publication"
+        );
+    }
+
+    #[test]
+    fn lockout_save_requires_directory_sync() {
+        let d = tempfile::tempdir().unwrap();
+        let store = store(d.path());
+
+        assert!(store.save(&State::default()).is_some());
+
+        fail_sync();
+
+        assert!(
+            store.save(&State::default()).is_none(),
+            "lockout publication succeeded despite sync failure"
+        );
+    }
+
+    #[test]
+    fn failed_counter_persistence_locks_all_privileged_attempts() {
+        let d = tempfile::tempdir().unwrap();
+
+        let lockouts = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        let key = [1u8; 32];
+        let other = [2u8; 32];
+
+        assert_eq!(
+            lockouts.standing(&key, Level::Root),
+            Standing::Open
+        );
+
+        fail_sync();
+        lockouts.fail(&key, Level::Root);
+
+        assert_eq!(
+            lockouts.standing(&key, Level::Root),
+            Standing::Locked
+        );
+
+        assert_eq!(
+            lockouts.standing(&other, Level::Root),
+            Standing::Locked
+        );
+    }
+
+    #[test]
+    fn failed_success_persistence_locks_privileged_attempts() {
+        let d = tempfile::tempdir().unwrap();
+
+        let lockouts = Lockouts::persistent(
+            d.path(), "sudo"
+        );
+
+        let key = [3u8; 32];
+
+        lockouts.fail(&key, Level::Sudo);
+
+        assert_eq!(
+            lockouts.standing(&key, Level::Sudo),
+            Standing::Open
+        );
+
+        fail_sync();
+        assert!(!lockouts.ok(&key, Level::Sudo));
+
+        assert_eq!(
+            lockouts.standing(&key, Level::Sudo),
+            Standing::Locked
+        );
+    }
+}
+
+#[cfg(test)]
+mod rev005_approval_tests {
+    use super::*;
+
+    #[test]
+    fn locked_root_cannot_receive_approval() {
+        let lockouts = Lockouts::default();
+        let key = [11u8; 32];
+
+        assert!(lockouts.ok(&key, Level::Root));
+
+        for _ in 0..3 {
+            lockouts.fail(&key, Level::Root);
+        }
+
+        assert_eq!(
+            lockouts.standing(&key, Level::Root),
+            Standing::Locked
+        );
+
+        assert!(!lockouts.ok(&key, Level::Root));
+    }
+
+    #[test]
+    fn locked_sudo_cannot_receive_approval() {
+        let lockouts = Lockouts::default();
+        let key = [12u8; 32];
+
+        for _ in 0..3 {
+            lockouts.fail(&key, Level::Sudo);
+        }
+
+        assert!(!lockouts.ok(&key, Level::Sudo));
+    }
+
+    #[test]
+    fn global_root_lock_blocks_late_approval() {
+        let lockouts = Lockouts::default();
+
+        for i in 1..=3u8 {
+            for _ in 0..3 {
+                lockouts.fail(&[i; 32], Level::Root);
+            }
+        }
+
+        let clean = [99u8; 32];
+
+        assert!(lockouts.remote_root_off());
+        assert!(!lockouts.ok(&clean, Level::Root));
+        assert!(lockouts.ok(&clean, Level::Sudo));
+    }
+
+    #[test]
+    fn failed_initialization_refuses_approval() {
+        let d = tempfile::tempdir().unwrap();
+
+        REV005_FAIL_SYNC.with(|flag| flag.set(true));
+
+        let lockouts = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        let key = [13u8; 32];
+
+        assert!(!lockouts.ok(&key, Level::Root));
+
+        assert_eq!(
+            lockouts.standing(&key, Level::Root),
+            Standing::Locked
+        );
+    }
+
+    #[test]
+    fn persistent_root_lock_survives_reopen() {
+        let d = tempfile::tempdir().unwrap();
+        let key = [14u8; 32];
+
+        {
+            let lockouts = Lockouts::persistent(
+                d.path(), "root"
+            );
+
+            for _ in 0..3 {
+                lockouts.fail(&key, Level::Root);
+            }
+
+            assert!(!lockouts.ok(&key, Level::Root));
+        }
+
+        let reopened = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        assert_eq!(
+            reopened.standing(&key, Level::Root),
+            Standing::Locked
+        );
+
+        assert!(!reopened.ok(&key, Level::Root));
+    }
+
+    #[test]
+    fn persistence_failure_refuses_current_approval() {
+        let d = tempfile::tempdir().unwrap();
+
+        let lockouts = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        let key = [15u8; 32];
+
+        assert!(lockouts.ok(&key, Level::Root));
+
+        REV005_FAIL_SYNC.with(|flag| flag.set(true));
+
+        assert!(!lockouts.ok(&key, Level::Root));
+        assert!(!lockouts.ok(&key, Level::Root));
+        assert!(!lockouts.ok(&[16u8; 32], Level::Root));
+    }
+}
+
+#[cfg(test)]
+mod rev005_concurrency_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn independent_instances_preserve_all_failures() {
+        let d = tempfile::tempdir().unwrap();
+        let initial = Lockouts::persistent(d.path(), "root");
+        let key = [21u8; 32];
+
+        assert_eq!(
+            initial.standing(&key, Level::Root),
+            Standing::Open
+        );
+
+        let barrier = Arc::new(Barrier::new(3));
+
+        std::thread::scope(|scope| {
+            for _ in 0..3 {
+                let barrier = barrier.clone();
+                let dir = d.path();
+
+                scope.spawn(move || {
+                    let lockouts =
+                        Lockouts::persistent(dir, "root");
+
+                    barrier.wait();
+
+                    lockouts.fail(&key, Level::Root);
+                });
+            }
+        });
+
+        assert_eq!(
+            initial.standing(&key, Level::Root),
+            Standing::Locked,
+            "concurrent updates lost failure counters"
+        );
+    }
+
+    #[test]
+    fn root_and_sudo_stores_are_independent() {
+        let d = tempfile::tempdir().unwrap();
+
+        let root = Lockouts::persistent(d.path(), "root");
+        let sudo = Lockouts::persistent(d.path(), "sudo");
+
+        let key = [22u8; 32];
+        let barrier = Barrier::new(2);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+
+                for _ in 0..3 {
+                    root.fail(&key, Level::Root);
+                }
+            });
+
+            scope.spawn(|| {
+                barrier.wait();
+
+                for _ in 0..3 {
+                    sudo.fail(&key, Level::Sudo);
+                }
+            });
+        });
+
+        let root = Lockouts::persistent(d.path(), "root");
+        let sudo = Lockouts::persistent(d.path(), "sudo");
+
+        assert_eq!(
+            root.standing(&key, Level::Root),
+            Standing::Locked
+        );
+
+        assert_eq!(
+            sudo.standing(&key, Level::Sudo),
+            Standing::Locked
+        );
+    }
+}
+
+#[cfg(test)]
+mod rev005_process_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    const WORKER: &str =
+        "stepup::rev005_process_tests::process_worker";
+
+    fn spawn_worker(
+        dir: &Path,
+        mode: &str,
+    ) -> std::process::Child {
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(WORKER)
+            .arg("--ignored")
+            .arg("--test-threads=1")
+            .env("YRL_REV005_TEST_DIR", dir)
+            .env("YRL_REV005_TEST_MODE", mode)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore]
+    fn process_worker() {
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("YRL_REV005_TEST_DIR")
+                .expect("missing test directory")
+        );
+
+        let mode = std::env::var(
+            "YRL_REV005_TEST_MODE"
+        ).unwrap();
+
+        match mode.as_str() {
+            "fail" => {
+                let lockouts =
+                    Lockouts::persistent(&dir, "root");
+
+                lockouts.fail(&[31u8; 32], Level::Root);
+            }
+
+            "hold" => {
+                let store = Store {
+                    path: dir.join("lockouts.root"),
+                    key_path: dir.join("lockouts.root.key"),
+                };
+
+                let _guard =
+                    store.transaction_lock().unwrap();
+
+                std::fs::write(
+                    dir.join("worker.ready"), b"ready"
+                ).unwrap();
+
+                loop {
+                    std::thread::sleep(
+                        Duration::from_millis(100)
+                    );
+                }
+            }
+
+            _ => panic!("unknown worker mode"),
+        }
+    }
+
+    #[test]
+    fn independent_processes_preserve_failure_counters() {
+        let d = tempfile::tempdir().unwrap();
+
+        let initial = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        let key = [31u8; 32];
+
+        assert_eq!(
+            initial.standing(&key, Level::Root),
+            Standing::Open
+        );
+
+        let mut children: Vec<_> = (0..3)
+            .map(|_| spawn_worker(d.path(), "fail"))
+            .collect();
+
+        for child in &mut children {
+            assert!(child.wait().unwrap().success());
+        }
+
+        let reopened = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        assert_eq!(
+            reopened.standing(&key, Level::Root),
+            Standing::Locked,
+            "cross-process failure counters were lost"
+        );
+
+        assert!(!reopened.ok(&key, Level::Root));
+    }
+
+    #[test]
+    fn sigkill_releases_transaction_lock() {
+        let d = tempfile::tempdir().unwrap();
+
+        let initial = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        let key = [31u8; 32];
+
+        initial.fail(&key, Level::Root);
+        initial.fail(&key, Level::Root);
+
+        let mut holder = spawn_worker(
+            d.path(), "hold"
+        );
+
+        let deadline =
+            Instant::now() + Duration::from_secs(5);
+
+        while !d.path().join("worker.ready").exists() {
+            if Instant::now() >= deadline {
+                let _ = holder.kill();
+                let _ = holder.wait();
+                panic!("worker did not acquire lock");
+            }
+
+            std::thread::sleep(
+                Duration::from_millis(10)
+            );
+        }
+
+        let mut waiter = spawn_worker(
+            d.path(), "fail"
+        );
+
+        std::thread::sleep(
+            Duration::from_millis(100)
+        );
+
+        let blocked =
+            waiter.try_wait().unwrap().is_none();
+
+        // On Unix Child::kill sends SIGKILL.
+        holder.kill().unwrap();
+
+        assert!(!holder.wait().unwrap().success());
+
+        let deadline =
+            Instant::now() + Duration::from_secs(5);
+
+        loop {
+            if let Some(status) =
+                waiter.try_wait().unwrap()
+            {
+                assert!(status.success());
+                break;
+            }
+
+            if Instant::now() >= deadline {
+                let _ = waiter.kill();
+                let _ = waiter.wait();
+
+                panic!("lock remained held after SIGKILL");
+            }
+
+            std::thread::sleep(
+                Duration::from_millis(10)
+            );
+        }
+
+        assert!(blocked,
+            "second process bypassed transaction lock");
+
+        let reopened = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        assert_eq!(
+            reopened.standing(&key, Level::Root),
+            Standing::Locked
+        );
+    }
+
+    #[test]
+    fn symlink_transaction_lock_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+
+        let target = d.path().join("unrelated");
+
+        std::fs::write(&target, b"unchanged").unwrap();
+
+        std::os::unix::fs::symlink(
+            &target,
+            d.path().join("lockouts.root.lock")
+        ).unwrap();
+
+        let lockouts = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        assert!(!lockouts.ok(
+            &[32u8; 32], Level::Root
+        ));
+
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"unchanged"
+        );
+    }
+
+    #[test]
+    fn public_transaction_lock_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let d = tempfile::tempdir().unwrap();
+
+        let path = d.path().join("lockouts.root.lock");
+
+        std::fs::write(&path, b"").unwrap();
+
+        std::fs::set_permissions(
+            &path,
+            std::fs::Permissions::from_mode(0o666)
+        ).unwrap();
+
+        let lockouts = Lockouts::persistent(
+            d.path(), "root"
+        );
+
+        assert_eq!(
+            lockouts.standing(&[33u8; 32], Level::Root),
+            Standing::Locked
+        );
+
+        assert!(!lockouts.ok(
+            &[33u8; 32], Level::Root
+        ));
+    }
+}
+
+#[cfg(test)]
+mod rev005_recovery_tests {
+    use super::*;
+
+    fn fail_sync() {
+        REV005_FAIL_SYNC.with(|flag| flag.set(true));
+    }
+
+    #[test]
+    fn failed_counter_write_remains_closed_after_reopen() {
+        let d = tempfile::tempdir().unwrap();
+        let key = [41u8; 32];
+
+        {
+            let lockouts =
+                Lockouts::persistent(d.path(), "root");
+
+            assert_eq!(
+                lockouts.standing(&key, Level::Root),
+                Standing::Open
+            );
+
+            fail_sync();
+
+            lockouts.fail(&key, Level::Root);
+
+            assert_eq!(
+                lockouts.standing(&key, Level::Root),
+                Standing::Locked
+            );
+        }
+
+        let reopened =
+            Lockouts::persistent(d.path(), "root");
+
+        assert_eq!(
+            reopened.standing(&key, Level::Root),
+            Standing::Locked,
+            "persistence fault was forgotten after reopen"
+        );
+    }
+
+    #[test]
+    fn failed_approval_remains_closed_after_reopen() {
+        let d = tempfile::tempdir().unwrap();
+        let key = [42u8; 32];
+
+        {
+            let lockouts =
+                Lockouts::persistent(d.path(), "sudo");
+
+            assert!(lockouts.ok(&key, Level::Sudo));
+
+            fail_sync();
+
+            assert!(!lockouts.ok(&key, Level::Sudo));
+        }
+
+        let reopened =
+            Lockouts::persistent(d.path(), "sudo");
+
+        assert!(
+            !reopened.ok(&key, Level::Sudo),
+            "reopen discarded previous persistence fault"
+        );
+    }
+
+    #[test]
+    fn administrative_reset_recovers_persistent_store() {
+        let d = tempfile::tempdir().unwrap();
+        let key = [43u8; 32];
+
+        {
+            let lockouts =
+                Lockouts::persistent(d.path(), "root");
+
+            for _ in 0..3 {
+                lockouts.fail(&key, Level::Root);
+            }
+
+            assert!(!lockouts.ok(&key, Level::Root));
+        }
+
+        Lockouts::reset_files(d.path(), "root")
+            .unwrap();
+
+        let reopened =
+            Lockouts::persistent(d.path(), "root");
+
+        assert_eq!(
+            reopened.standing(&key, Level::Root),
+            Standing::Open
+        );
+
+        assert!(reopened.ok(&key, Level::Root));
+    }
+}
+
+#[cfg(test)]
+mod rev005_transaction_fault_tests {
+    use super::*;
+
+    fn inject_at(stage: usize) {
+        REV005_FAIL_SYNC_AT.with(|counter| {
+            counter.set(stage);
+        });
+    }
+
+    fn assert_fault_consumed() {
+        REV005_FAIL_SYNC_AT.with(|counter| {
+            assert_eq!(
+                counter.get(), 0,
+                "requested fault stage was not reached"
+            );
+        });
+    }
+
+    fn check_failure(stage: usize, level: Level) {
+        let d = tempfile::tempdir().unwrap();
+
+        let name = match level {
+            Level::Root => "root",
+            Level::Sudo => "sudo",
+        };
+
+        let key = [51u8; 32];
+        let other = [52u8; 32];
+
+        let dirty = d.path().join(
+            format!("lockouts.{name}.dirty")
+        );
+
+        {
+            let lockouts =
+                Lockouts::persistent(d.path(), name);
+
+            assert!(lockouts.ok(&key, level));
+
+            assert!(!dirty.exists());
+
+            lockouts.fail(&key, level);
+
+            inject_at(stage);
+
+            assert!(
+                !lockouts.ok(&key, level),
+                "approval succeeded at fault stage {stage}"
+            );
+
+            assert_fault_consumed();
+
+            assert_eq!(
+                lockouts.standing(&key, level),
+                Standing::Locked
+            );
+
+            assert_eq!(
+                lockouts.standing(&other, level),
+                Standing::Locked
+            );
+
+            assert!(
+                dirty.exists(),
+                "missing refusal marker at stage {stage}"
+            );
+
+            // A separate instance must also refuse.
+            let independent =
+                Lockouts::persistent(d.path(), name);
+
+            assert!(!independent.ok(&other, level));
+        }
+
+        // Reopen without the original in-memory fault.
+        {
+            let reopened =
+                Lockouts::persistent(d.path(), name);
+
+            assert_eq!(
+                reopened.standing(&key, level),
+                Standing::Locked
+            );
+
+            assert!(!reopened.ok(&key, level));
+            assert!(!reopened.ok(&other, level));
+        }
+
+        // Only explicit local recovery clears the fault.
+        Lockouts::reset_files(d.path(), name)
+            .unwrap();
+
+        assert!(!dirty.exists());
+
+        let recovered =
+            Lockouts::persistent(d.path(), name);
+
+        assert_eq!(
+            recovered.standing(&key, level),
+            Standing::Open
+        );
+
+        assert!(recovered.ok(&key, level));
+        assert!(!dirty.exists());
+    }
+
+    #[test]
+    fn root_dirty_publication_failure() {
+        check_failure(1, Level::Root);
+    }
+
+    #[test]
+    fn root_state_publication_failure() {
+        check_failure(2, Level::Root);
+    }
+
+    #[test]
+    fn root_dirty_removal_failure() {
+        check_failure(3, Level::Root);
+    }
+
+    #[test]
+    fn sudo_dirty_publication_failure() {
+        check_failure(1, Level::Sudo);
+    }
+
+    #[test]
+    fn sudo_state_publication_failure() {
+        check_failure(2, Level::Sudo);
+    }
+
+    #[test]
+    fn sudo_dirty_removal_failure() {
+        check_failure(3, Level::Sudo);
+    }
+}
+
+#[cfg(test)]
+mod rev005_crash_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    const WORKER: &str =
+        "stepup::rev005_crash_tests::crash_worker";
+
+    const KEY: [u8; 32] = [61u8; 32];
+
+    #[test]
+    #[ignore]
+    fn crash_worker() {
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("YRL_REV005_CRASH_DIR")
+                .unwrap()
+        );
+
+        let stage: usize = std::env::var(
+            "YRL_REV005_CRASH_STAGE"
+        ).unwrap().parse().unwrap();
+
+        let store = Store {
+            path: dir.join("lockouts.root"),
+            key_path: dir.join("lockouts.root.key"),
+        };
+
+        let _guard = store.transaction_lock().unwrap();
+
+        let mut state = store.load().unwrap();
+
+        store.begin_transaction().unwrap();
+
+        if stage >= 2 {
+            state.recs.insert(
+                (KEY.to_vec(), Level::Root),
+                Rec {
+                    fails: 0,
+                    locked: true,
+                    until: 0,
+                }
+            );
+
+            store.save(&state).unwrap();
+        }
+
+        if stage >= 3 {
+            store.finish_transaction().unwrap();
+        }
+
+        std::fs::write(
+            dir.join("crash.ready"),
+            b"ready"
+        ).unwrap();
+
+        loop {
+            std::thread::sleep(
+                Duration::from_millis(100)
+            );
+        }
+    }
+
+    fn check_crash(stage: usize) {
+        let d = tempfile::tempdir().unwrap();
+
+        {
+            let initial =
+                Lockouts::persistent(d.path(), "root");
+
+            assert_eq!(
+                initial.standing(&KEY, Level::Root),
+                Standing::Open
+            );
+
+            initial.fail(&KEY, Level::Root);
+            initial.fail(&KEY, Level::Root);
+
+            assert_eq!(
+                initial.standing(&KEY, Level::Root),
+                Standing::Open
+            );
+        }
+
+        let mut child =
+            Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(WORKER)
+                .arg("--ignored")
+                .arg("--test-threads=1")
+                .env("YRL_REV005_CRASH_DIR", d.path())
+                .env(
+                    "YRL_REV005_CRASH_STAGE",
+                    stage.to_string()
+                )
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+
+        let deadline =
+            Instant::now() + Duration::from_secs(5);
+
+        while !d.path().join("crash.ready").exists() {
+            if Instant::now() >= deadline
+                || child.try_wait().unwrap().is_some()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+
+                panic!(
+                    "worker failed at stage {stage}"
+                );
+            }
+
+            std::thread::sleep(
+                Duration::from_millis(10)
+            );
+        }
+
+        child.kill().unwrap();
+
+        let status = child.wait().unwrap();
+
+        use std::os::unix::process::ExitStatusExt;
+
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL)
+        );
+
+        let dirty =
+            d.path().join("lockouts.root.dirty");
+
+        assert_eq!(
+            dirty.exists(),
+            stage < 3
+        );
+
+        let reopened =
+            Lockouts::persistent(d.path(), "root");
+
+        assert_eq!(
+            reopened.standing(&KEY, Level::Root),
+            Standing::Locked
+        );
+
+        assert!(!reopened.ok(&KEY, Level::Root));
+
+        let other = [62u8; 32];
+
+        if stage < 3 {
+            // Incomplete transaction refuses the entire store.
+            assert_eq!(
+                reopened.standing(&other, Level::Root),
+                Standing::Locked
+            );
+
+            assert!(!reopened.ok(&other, Level::Root));
+        } else {
+            // Completed transaction preserves only the
+            // intended device lockout.
+            assert_eq!(
+                reopened.standing(&other, Level::Root),
+                Standing::Open
+            );
+
+            assert!(reopened.ok(&other, Level::Root));
+        }
+
+        drop(reopened);
+
+        Lockouts::reset_files(d.path(), "root")
+            .unwrap();
+
+        assert!(!dirty.exists());
+
+        let recovered =
+            Lockouts::persistent(d.path(), "root");
+
+        assert!(recovered.ok(&KEY, Level::Root));
+    }
+
+    #[test]
+    fn sigkill_after_dirty_publication() {
+        check_crash(1);
+    }
+
+    #[test]
+    fn sigkill_after_state_publication() {
+        check_crash(2);
+    }
+
+    #[test]
+    fn sigkill_after_transaction_completion() {
+        check_crash(3);
     }
 }

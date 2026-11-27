@@ -262,3 +262,55 @@ Limits:
   be rolled back.
 - Exclusive ownership assumes a trusted state directory.
 - Full workspace and installed-system regression pending.
+
+## REV-005: Durable privileged lockout state
+
+Priority: HIGH.
+
+### Remediation
+
+- Require durable persistence before privileged approval.
+- Propagate file and directory synchronization errors.
+- Refuse approval when persistent lockout state is faulted.
+- Serialize independent persistent store instances.
+- Preserve a stable exclusive transaction lock inode.
+- Reject unsafe transaction lock files.
+- Publish a durable pending marker before state mutation.
+- Preserve fail-closed behavior across process restart.
+- Apply persistence checks to password and FIDO2 approval.
+
+### Recovery contract
+
+Ordinary administrative unlocking remains effective
+without restarting a healthy running instance.
+
+A detected integrity or persistence fault remains latched
+in the affected instance. Local administrative repair
+followed by service restart is required.
+
+The persistent lock file is an intentional store artifact
+and must not be removed during ordinary operation.
+
+### Verification
+
+- Default workspace regression: PASS.
+- Hybrid-signatures and FIDO2 regression: PASS.
+- Lockstore integration: 12/12 PASS in both configurations.
+- Step-up integration: 17/17 PASS in hybrid configuration.
+- Separate-process serialization: PASS.
+- SIGKILL transaction recovery: PASS.
+- Targeted persistence fault injection: PASS.
+- Administrative repair and fresh-instance recovery: PASS.
+
+Status: CONDITIONALLY ACCEPTED.
+
+Limits:
+- Physical power-loss durability remains untested.
+- Combined storage failures can prevent durable
+  publication of the refusal marker.
+- The marker protects state mutation, not the entire
+  credential verification interval.
+- Direct proof-path persistence fault testing remains
+  incomplete.
+- Installed-service restart after integrity repair
+  remains unverified.

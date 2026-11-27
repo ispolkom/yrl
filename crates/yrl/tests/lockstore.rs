@@ -85,7 +85,7 @@ fn assert_fails_closed(d: &std::path::Path, why: &str) {
     assert_eq!(l.standing(&key(1), Level::Root), Standing::Locked, "{why}: a damaged store must not mean 'no lockouts'");
     assert_eq!(l.standing(&key(77), Level::Root), Standing::Locked, "{why}: for every key");
     assert!(l.remote_root_off(), "{why}");
-    l.ok(&key(1), Level::Root);
+    assert!(!l.ok(&key(1), Level::Root));
     l.fail(&key(1), Level::Root); // nothing is saved over a damaged store
     assert_eq!(std::fs::read(d.join("lockouts.root")).ok(), before, "{why}: nothing is written over a damaged store, only the owner repairs it");
 }
@@ -164,7 +164,7 @@ fn k7_files_that_others_can_write_or_read_are_not_trusted() {
 }
 
 #[test]
-fn k8_only_the_owner_on_the_machine_can_repair_and_it_acts_at_once() {
+fn k8_owner_repair_preserves_fault_until_restart() {
     let d = dir();
     let running = Lockouts::persistent(d.path(), "root"); // the running broker's object
     for _ in 0..3 {
@@ -180,7 +180,24 @@ fn k8_only_the_owner_on_the_machine_can_repair_and_it_acts_at_once() {
     std::fs::write(d.path().join("lockouts.root"), "junk").unwrap();
     assert!(running.remote_root_off());
     Lockouts::reset_files(d.path(), "root").unwrap();
-    assert!(!running.remote_root_off() && running.standing(&key(1), Level::Root) == Standing::Open);
+    // A detected integrity fault remains latched in the
+    // running instance, even after administrative repair.
+    assert!(running.remote_root_off());
+    assert_eq!(
+        running.standing(&key(1), Level::Root),
+        Standing::Locked
+    );
+
+    drop(running);
+
+    // A fresh instance must accept the repaired store.
+    let restarted = Lockouts::persistent(d.path(), "root");
+
+    assert!(!restarted.remote_root_off());
+    assert_eq!(
+        restarted.standing(&key(1), Level::Root),
+        Standing::Open
+    );
 }
 
 #[tokio::test]
@@ -284,13 +301,31 @@ fn k11_the_store_stays_small_and_tidy() {
     let l = Lockouts::persistent(d.path(), "root");
     for i in 0..40u8 {
         l.fail(&key(i), Level::Root);
-        l.ok(&key(i), Level::Root); // a success wipes the count: nothing needs remembering
+        assert!(l.ok(&key(i), Level::Root)); // a success wipes the count: nothing needs remembering
     }
     let text = std::fs::read_to_string(d.path().join("lockouts.root")).unwrap();
     assert_eq!(text.lines().filter(|l| l.starts_with("REC ")).count(), 0, "records with nothing in them are not kept:\n{text}");
     let names: Vec<String> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     assert!(names.iter().all(|n| !n.ends_with(".tmp")), "no leftovers of the atomic write: {names:?}");
-    assert_eq!(names.len(), 2, "{names:?}");
+    let mut names = names;
+    names.sort();
+
+    assert_eq!(
+        names,
+        vec![
+            "lockouts.root",
+            "lockouts.root.key",
+            "lockouts.root.lock",
+        ],
+        "unexpected persistent store artifacts"
+    );
+
+    assert_eq!(
+        std::fs::metadata(
+            d.path().join("lockouts.root.lock")
+        ).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[test]
@@ -301,6 +336,28 @@ fn k12_a_store_with_a_bad_key_file_is_repaired_by_the_owner_too() {
     let l = Lockouts::persistent(d.path(), "root");
     assert!(l.remote_root_off());
     Lockouts::reset_files(d.path(), "root").unwrap();
-    assert!(!l.remote_root_off(), "a key file with the wrong rights was replaced, not kept");
+    assert!(
+        l.remote_root_off(),
+        "the running instance must retain its integrity fault"
+    );
+
+    assert_eq!(
+        l.standing(&key(1), Level::Root),
+        Standing::Locked
+    );
+
+    drop(l);
+
+    let restarted = Lockouts::persistent(d.path(), "root");
+
+    assert!(
+        !restarted.remote_root_off(),
+        "the repaired key must be accepted after restart"
+    );
+
+    assert_eq!(
+        restarted.standing(&key(1), Level::Root),
+        Standing::Open
+    );
     assert_eq!(std::fs::metadata(d.path().join("lockouts.root.key")).unwrap().permissions().mode() & 0o777, 0o600);
 }
