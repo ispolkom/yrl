@@ -24,6 +24,8 @@ Stage 8.4 focused tests: 35 passed in `resources`, `cli`, `audit_proc` and libra
 
 Stage 8.5 focused key/Audit/release suite: 43 tests passed across `keylife`, `audit_keys`, `audit_export`, `audit_integrity`, `audit_rotation`, `auditlog`, `release` and `audit_e2e`. Independent-host restore, external anchors and interrupted installed update remain NOT RUN. Local trust state cannot detect complete privileged rollback without an external anchor. 8.4 was published as `7fe9846`. Continue with 8.6 extended crypto, 8.7 measurements and 8.8 isolated install/report.
 
+Stage 8.6 available four-feature focused tests: 10 profile tests and 29 library tests passed; OPAQUE context and hybrid-signature AND unit checks included. Full enabled-profile workspace suites remain FAIL due raw handshake fixtures; FIDO2/TPM builds blocked by absent native libraries and swtpm. Source review still shows hybrid-signature helpers unused by claimed handshake/Audit/update paths (FAIL). Physical device/PCR/NV acceptance remains BLOCKED and no real TPM state was changed. 8.5 was published as `0cde962`. Continue with 8.7 measured performance, 8.8 isolated install, and feature integration defects.
+
 ## Architecture at the baseline
 
 ```text
