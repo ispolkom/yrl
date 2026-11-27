@@ -48,3 +48,61 @@ Limits:
 - Concurrent independent file descriptors were tested using threads.
 - Separate-process stress and power-loss durability were not tested.
 - Full workspace regression remains pending.
+
+## REV-002: Durable upload publication
+
+Priority: HIGH.
+
+### Defect
+
+The upload helper acknowledged success after rename and
+reservation-tag removal without synchronizing the destination
+directory and final inode metadata.
+
+Atomic visibility did not imply crash durability.
+
+### Remediation
+
+- Synchronize file contents and permissions before rename.
+- Remove the reservation tag after publication.
+- Synchronize final inode metadata.
+- Synchronize the destination directory.
+- Acknowledge success only after all synchronization succeeds.
+- Support absolute and relative destination paths.
+- Propagate synchronization errors to the caller.
+
+### Verification
+
+Default configuration:
+- File transfers: 15/15 PASS.
+- Filesystem operations: 10/10 PASS.
+- Resource limits: 5/5 PASS.
+
+Hybrid-signatures configuration:
+- File transfers: 15/15 PASS.
+- Filesystem operations: 10/10 PASS.
+- Resource limits: 5/5 PASS.
+
+Direct helper syscall inspection with strace 6.1:
+- Absolute destination: PASS.
+- Relative destination: PASS.
+- First file fsync EIO injection: PASS.
+- Second file fsync EIO injection: PASS.
+- Directory fsync EIO injection: PASS.
+
+All injected synchronization failures returned ERR 13.
+No injected failure produced an OK acknowledgement.
+Successful publication preserved the requested permissions
+and removed the partial-file reservation tag.
+
+Status: FIXED within the verified regression scope.
+
+Limits:
+- Physical power-loss durability was not tested.
+- Direct syscall fault tests used empty files.
+- Errors after rename may leave a published target without
+  a success acknowledgement.
+- Write-only destination directories may require additional
+  compatibility handling.
+- End-to-end reservation recovery after injected fsync
+  failures remains unverified.

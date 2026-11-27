@@ -111,16 +111,39 @@ fn put(f: &[&str], input: &mut impl Read, out: &mut impl Write) -> Result<(), u1
         file.write_all(&buf[..n]).map_err(|e| io_code(&e))?;
         left -= n as u64;
     }
-    file.sync_data().map_err(|e| io_code(&e))?;
     let mut h = blake3::Hasher::new();
     hash_prefix(&mut file, size, &mut h).map_err(|_| E_IO)?;
     if *h.finalize().as_bytes() != want {
         let _ = fs::remove_file(&part);
         return Err(E_VERIFY);
     }
-    file.set_permissions(fs::Permissions::from_mode(mode)).map_err(|_| E_IO)?;
+    // REV-002: successful upload acknowledgement requires durable
+    // file contents, metadata and destination directory publication.
+    let parent = path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(parent)
+        .map_err(|e| io_code(&e))?;
+
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|e| io_code(&e))?;
+
+    file.sync_all().map_err(|e| io_code(&e))?;
+
     fs::rename(&part, &path).map_err(|e| io_code(&e))?;
-    remove_tag(&file).map_err(|_| E_IO)?;
+
+    remove_tag(&file).map_err(|e| io_code(&e))?;
+
+    // Removing the reservation tag changes inode metadata.
+    file.sync_all().map_err(|e| io_code(&e))?;
+
+    // A successful rename alone is not a durability guarantee.
+    directory.sync_all().map_err(|e| io_code(&e))?;
+
     writeln!(out, "OK").map_err(|_| E_IO)
 }
 
