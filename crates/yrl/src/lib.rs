@@ -10,6 +10,8 @@ pub mod client_tun;
 pub mod enroll;
 pub mod exec;
 pub mod executor;
+#[cfg(feature = "fido2")]
+pub mod fido;
 pub mod disk;
 pub mod ipc;
 pub mod ipc_admission;

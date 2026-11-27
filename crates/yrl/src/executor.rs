@@ -413,15 +413,67 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     drop(resource);
                 });
             }
-            stepup::STEPUP_BEGIN | stepup::STEPUP_PROOF => {
+            stepup::STEPUP_BEGIN
+            | stepup::STEPUP_PROOF
+            | stepup::FIDO_STEPUP_BEGIN
+            | stepup::FIDO_STEPUP_ASSERTION => {
                 // ROOT is the broker's business, end to end: the executor only carries those bytes. SUDO is answered here.
-                let is_root = if frame.kind == stepup::STEPUP_BEGIN { stepup::decode_begin(&frame.payload).map(|b| b.1 == stepup::Level::Root).unwrap_or(false) } else { root_ids.contains(&stepup::decode_msg(&frame.payload).map(|m| m.0).unwrap_or(0)) };
+                let is_root = if frame.kind == stepup::STEPUP_BEGIN {
+                    stepup::decode_begin(&frame.payload)
+                        .map(|b| b.1 == stepup::Level::Root)
+                        .unwrap_or(false)
+                } else if cfg!(feature = "fido2") && frame.kind == stepup::FIDO_STEPUP_BEGIN {
+                    frame.payload.get(8) == Some(&stepup::Level::Root.code())
+                } else {
+                    root_ids.contains(
+                        &frame
+                            .payload
+                            .get(..8)
+                            .and_then(|b| b.try_into().ok())
+                            .map(u64::from_be_bytes)
+                            .unwrap_or(0),
+                    )
+                };
                 if is_root {
-                    let decoded = if frame.kind == stepup::STEPUP_BEGIN { stepup::decode_begin(&frame.payload).ok() } else { None };
-                    let rid = decoded.as_ref().map(|b| b.0).unwrap_or_else(|| stepup::decode_msg(&frame.payload).map(|m| m.0).unwrap_or(0));
-                    if frame.kind == stepup::STEPUP_BEGIN {
-                        let Some((_, _, op, _)) = decoded else { break };
-                        let guard = cfg.operations.as_ref().and_then(|j| j.accept(&who.public, &account, rid, crate::opjournal::KIND_ROOT, &op.encode()).ok());
+                    let decoded = if frame.kind == stepup::STEPUP_BEGIN {
+                        stepup::decode_begin(&frame.payload)
+                            .ok()
+                            .map(|(id, l, o, _)| (id, l, o))
+                    } else if cfg!(feature = "fido2")
+                        && frame.kind == stepup::FIDO_STEPUP_BEGIN
+                        && frame.payload.len() >= 11
+                    {
+                        let n = u16::from_be_bytes([frame.payload[9], frame.payload[10]]) as usize;
+                        stepup::Level::from_code(frame.payload[8]).and_then(|l| {
+                            let id = u64::from_be_bytes(frame.payload[..8].try_into().ok()?);
+                            let op = stepup::Op::decode(frame.payload.get(11..11 + n)?).ok()?;
+                            Some((id, l, op))
+                        })
+                    } else {
+                        None
+                    };
+                    let rid = decoded.as_ref().map(|b| b.0).unwrap_or_else(|| {
+                        frame
+                            .payload
+                            .get(..8)
+                            .and_then(|b| b.try_into().ok())
+                            .map(u64::from_be_bytes)
+                            .unwrap_or(0)
+                    });
+                    let is_begin = frame.kind == stepup::STEPUP_BEGIN
+                        || cfg!(feature = "fido2") && frame.kind == stepup::FIDO_STEPUP_BEGIN;
+                    if is_begin {
+                        let Some((_, _, op)) = decoded else { break };
+                        let guard = cfg.operations.as_ref().and_then(|j| {
+                            j.accept(
+                                &who.public,
+                                &account,
+                                rid,
+                                crate::opjournal::KIND_ROOT,
+                                &op.encode(),
+                            )
+                            .ok()
+                        });
                         let Some(guard) = guard else {
                             let _ = tx.send(Frame::new(stepup::STEPUP_RESULT, 0, stepup::encode_result(rid, stepup::R_UNKNOWN, ""))).await;
                             continue;
@@ -442,13 +494,13 @@ pub(crate) async fn session_main(cfg: ServerConfig, label: String, account: Stri
                     if broker_pipe.as_ref().is_some_and(mpsc::Sender::is_closed) {
                         broker_pipe = None;
                     }
-                    if broker_pipe.is_none() && frame.kind == stepup::STEPUP_BEGIN {
+                    if broker_pipe.is_none() && is_begin {
                         broker_pipe = match &cfg.broker {
                             Some(b) => open_broker(b, &who.public, &account, &session_rights, tx.clone(), root_guards.clone(), root_proofs.clone()).await,
                             None => None,
                         };
                     }
-                    let was_proof = frame.kind == stepup::STEPUP_PROOF;
+                    let was_proof = !is_begin;
                     let sent = match &broker_pipe {
                         Some(to_broker) => to_broker.send(frame).await.is_ok(),
                         None => false,

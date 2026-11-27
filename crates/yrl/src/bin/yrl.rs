@@ -46,6 +46,17 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
             let k = keys::init(&PathBuf::from(&a[2]))?;
             println!("client public key (authorize it on the server): {}", hex::encode(&k.public));
         }
+        #[cfg(feature = "fido2")]
+        Some("fido-list") => {
+            for (path,product) in yrl::fido::list_devices(16)? {println!("{path}\t{product}");}
+        }
+        #[cfg(feature = "fido2")]
+        Some("fido-register-file") if a.len()==8 => {
+            // yrl fido-register-file <key-dir> <account> <device-path> <label> <output> <uv|required|optional>
+            let me=keys::load(&PathBuf::from(&a[2]))?;let mut policy=yrl::fido::Policy::from_env()?;policy.user_verification=match a[7].as_str(){"required"=>true,"optional"=>false,_=>anyhow::bail!("UV policy must be required or optional")};
+            let pin=if policy.user_verification{Some(zeroize::Zeroizing::new(String::from_utf8(yrl::prompt::read_password("FIDO2 PIN: ")?)?))}else{None};
+            let id=yrl::fido::create_registration_artifact(&PathBuf::from(&a[6]),&a[4],&policy,&a[3],&me.public,&a[5],pin.as_ref())?;println!("credential id: {}",hex::encode(id));
+        }
         Some("ping") => {
             let c = connect(a).await?;
             let t = std::time::Instant::now();
@@ -110,6 +121,11 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
                 _ => anyhow::bail!("operation: test | restart <service>"),
             };
             let c = connect(a).await?;
+            #[cfg(feature="fido2")]
+            if let Some(device)=std::env::var_os("YRL_FIDO2_DEVICE") {
+                let policy=yrl::fido::Policy::from_env()?;let pin=if policy.user_verification{Some(zeroize::Zeroizing::new(String::from_utf8(yrl::prompt::read_password("FIDO2 PIN: ")?)?))}else{None};
+                println!("{}",c.elevate_fido(level,&op,&device.to_string_lossy(),pin,Duration::from_secs(60)).await?);return Ok(())
+            }
             let phrase = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("{} phrase: ", level.right()))?);
             println!("{}", c.elevate(level, &op, &phrase, &exec_pub, Duration::from_secs(30)).await?);
         }
@@ -161,7 +177,29 @@ async fn connect(a: &[String]) -> anyhow::Result<Client> {
     let knock = std::env::var("YRL_KNOCK").ok().map(|udp| yrl::client::Knock { udp, settle: Duration::from_millis(300) });
     let opts = yrl::client::ClientOptions { executor_public: Some(executor_public), crypto_profile_store: Some(PathBuf::from(&a[2]).join("crypto-profiles")), connect_timeout: Duration::from_secs(if relay.is_some() || knock.is_some() { 15 } else { 5 }), relay, knock, udp: std::env::var("YRL_UDP").ok(), ..Default::default() };
     let c = Client::connect_opts(&a[3], &me, &server, opts).await?;
-    let pw = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("password for {}: ", a[5]))?);
+    #[cfg(feature = "fido2")]
+    if let Some(device) = std::env::var_os("YRL_FIDO2_DEVICE") {
+        let policy = yrl::fido::Policy::from_env()?;
+        let pin = if policy.user_verification {
+            Some(zeroize::Zeroizing::new(String::from_utf8(
+                yrl::prompt::read_password("FIDO2 PIN: ")?,
+            )?))
+        } else {
+            None
+        };
+        c.login_fido(
+            &a[5],
+            &device.to_string_lossy(),
+            pin,
+            Duration::from_secs(60),
+        )
+        .await?;
+        return Ok(c);
+    }
+    let pw = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!(
+        "password for {}: ",
+        a[5]
+    ))?);
     #[cfg(feature = "opaque-rfc9807")]
     if std::env::var_os("YRL_AUTH_OPAQUE").is_some() {
         c.login_opaque(&a[5], &pw, Duration::from_secs(30)).await?;

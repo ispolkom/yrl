@@ -140,7 +140,17 @@ impl Secure {
 }
 
 fn sensitive_frame(kind: u8) -> bool {
-    matches!(kind, crate::wire::LOGIN | crate::wire::OPAQUE_LOGIN_START | crate::wire::OPAQUE_LOGIN_FINISH | crate::wire::OPAQUE_REG_START | crate::wire::OPAQUE_REG_FINISH | crate::stepup::STEPUP_PROOF)
+    matches!(
+        kind,
+        crate::wire::LOGIN
+            | crate::wire::OPAQUE_LOGIN_START
+            | crate::wire::OPAQUE_LOGIN_FINISH
+            | crate::wire::OPAQUE_REG_START
+            | crate::wire::OPAQUE_REG_FINISH
+            | crate::wire::FIDO_ASSERTION
+            | crate::stepup::STEPUP_PROOF
+            | crate::stepup::FIDO_STEPUP_ASSERTION
+    )
 }
 
 #[cfg(feature = "hybrid-signatures")]

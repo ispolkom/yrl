@@ -13,7 +13,7 @@ This file distinguishes the **accepted implementation-stage sequence** from the 
 | **4. Key and secret lifecycle** | Protect role-private key files, clear secret buffers, support unattended services, offline encrypted recovery, safe Noise-key rotation, device revocation and protected migration. | Implemented in **`f69e4b7`**; deployment acceptance and the Audit journal-signing rollover limit are in `STAGE4_ACCEPTANCE.md`. |
 | **5. Failure and overload resilience** | Find and remove failure modes exposed by sustained load, repeated disconnects and bounded-resource operation without weakening authentication, cryptography or delivery guarantees. | In progress. The initial correction and substages 5.1–5.6 are implemented, including bounded admission, containment and explicit crash-recovery semantics. Final integration and deployment acceptance remain pending. |
 | **6. Trusted audit and software delivery** | Rotated and independently verifiable Audit history, signing-key lifecycle, signed releases and downgrade-safe updates. | Implemented through substages 6.1–6.6. Focused tests are prepared and compilation/unit policy verification pass; comprehensive and installed-host acceptance remain Stage 8. |
-| **7. Extended cryptographic protection** | Versioned profiles, hybrid post-quantum transport/signatures, OPAQUE, FIDO2 and optional TPM-backed key handling. | In progress. Substages 7.1–7.4 are implemented behind default-off feature gates; none is enabled in production before Stage 8 acceptance. |
+| **7. Extended cryptographic protection** | Versioned profiles, hybrid post-quantum transport/signatures, OPAQUE, FIDO2 and optional TPM-backed key handling. | In progress. Substages 7.1–7.5 are implemented behind default-off feature gates; none is enabled in production before Stage 8 acceptance. |
 
 ## Current Stage 7: extended cryptographic protection
 
@@ -45,9 +45,9 @@ Purposes independently cover device/server identity, handshake proof, Audit entr
 
 ### Substage 7.5: FIDO2 hardware confirmation
 
-Blocked at the real CTAP2 backend and native relying-party model. The development/build environment has no libfido2, while server-only WebAuthn libraries do not supply YRL CLI's authenticator interaction. Adding a home-grown signed challenge would not be FIDO2. The project also needs a reviewed native RP ID/origin decision and persistent one-use ceremony/credential/recovery state.
+Implemented behind the default-off `fido2` feature using `fido2-rs` and Yubico libfido2. The native CLI talks CTAP2 directly, forces FIDO2 (no U2F downgrade), creates ES256 credentials, and requests user presence plus configurable user verification/PIN. The relying-party identifier is a stable administrator-configured DNS-style name (`YRL_FIDO2_RP_ID`); both peers must agree on it and on the UV policy.
 
-The compile-only `fido2` feature always fails closed and cannot silently use a password. No credential or fake authenticator is created. `docs/CRYPTOGRAPHY.md` records UP/UV/PIN, counter, multiple-token, revocation, recovery, account/device binding and operation-bound Broker requirements. Existing users remain unaffected because no FIDO2 policy can yet be enabled.
+Persistent bounded one-use challenges bind account, device key, role/channel and, for step-up, the exact level, operation parameters, request and Broker identity. Server verification checks RP hash, UP/UV, ES256 signature and monotonic counters. Credentials are account/device-bound, support multiple tokens and audited administrative import/revocation. Executor owns login/SUDO records; Broker independently owns ROOT records. Once a relevant credential exists, failed token/PIN/UV verification never falls back to password or OPAQUE. Physical-token interoperability and recovery drills remain Stage 8 acceptance; FIDO2 is classical, not post-quantum.
 
 ### Substage 7.6: TPM 2.0 key protection
 

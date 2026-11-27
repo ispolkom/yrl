@@ -19,6 +19,9 @@ pub const STEPUP_BEGIN: u8 = 70;
 pub const STEPUP_CHALLENGE: u8 = 71;
 pub const STEPUP_PROOF: u8 = 72;
 pub const STEPUP_RESULT: u8 = 73;
+pub const FIDO_STEPUP_BEGIN: u8 = 74;
+pub const FIDO_STEPUP_CHALLENGE: u8 = 75;
+pub const FIDO_STEPUP_ASSERTION: u8 = 76;
 
 pub const NOISE_XK: &str = "Noise_XK_25519_ChaChaPoly_BLAKE2s";
 pub const MAX_PHRASE: usize = 256;
@@ -645,13 +648,20 @@ impl Ctx<'_> {
 
 pub struct StepServer {
     pending: HashMap<u64, Pending>,
+    #[cfg(feature = "fido2")]
+    pending_fido: HashMap<u64, (Level, Op, crate::fido::Challenge)>,
     /// how long a challenge may wait for its answer
     pub life: Duration,
 }
 
 impl Default for StepServer {
     fn default() -> Self {
-        StepServer { pending: HashMap::new(), life: PENDING_LIFE }
+        StepServer {
+            pending: HashMap::new(),
+            #[cfg(feature = "fido2")]
+            pending_fido: HashMap::new(),
+            life: PENDING_LIFE,
+        }
     }
 }
 
@@ -660,6 +670,179 @@ fn frame(kind: u8, payload: Vec<u8>) -> crate::wire::Frame {
 }
 
 impl StepServer {
+    #[cfg(feature = "fido2")]
+    pub fn fido_begin(&mut self, payload: &[u8], ctx: &Ctx) -> Result<Vec<crate::wire::Frame>, ()> {
+        if payload.len() < 11 {
+            return Err(());
+        }
+        let rid = u64::from_be_bytes(payload[..8].try_into().map_err(|_| ())?);
+        let level = Level::from_code(payload[8]).ok_or(())?;
+        let n = u16::from_be_bytes(payload[9..11].try_into().map_err(|_| ())?) as usize;
+        if n > 80 || payload.len() != 11 + n {
+            return Err(());
+        }
+        let op = Op::decode(&payload[11..]).map_err(|_| ())?;
+        let reply = |status| vec![frame(STEPUP_RESULT, encode_result(rid, status, ""))];
+        ctx.report_tamper(level);
+        if !ctx.serves.contains(&level)
+            || !ctx.session_rights.iter().any(|r| r == level.right())
+            || op.required() != Some(level)
+            || self.pending_fido.len() >= MAX_PENDING
+            || self.pending_fido.contains_key(&rid)
+        {
+            return Ok(reply(R_DENIED));
+        }
+        if ctx.lockouts.standing(ctx.device_key, level) == Standing::Locked {
+            return Ok(reply(R_LOCKED));
+        }
+        let policy = crate::fido::Policy::from_env().map_err(|_| ())?;
+        let root = if level == Level::Root {
+            crate::ipc::state_dir(ctx.dir, "broker")
+        } else {
+            ctx.dir.to_path_buf()
+        };
+        let credentials =
+            crate::fido::CredentialStore::open(&root.join("fido/credentials")).map_err(|_| ())?;
+        let ah = *blake3::hash(ctx.account.as_bytes()).as_bytes();
+        let dh = *blake3::hash(ctx.device_key).as_bytes();
+        let ids: Vec<_> = credentials
+            .for_account_hash(&ah)
+            .map_err(|_| ())?
+            .into_iter()
+            .filter(|r| r.device_hash == dh && !r.revoked)
+            .map(|r| r.id)
+            .collect();
+        if ids.is_empty() {
+            return Ok(reply(R_DENIED));
+        }
+        let operation = prologue(rid, level, &op, &ctx.my_key.public);
+        let challenges =
+            crate::fido::ChallengeStore::open(&root.join("fido/challenges")).map_err(|_| ())?;
+        let challenge = challenges
+            .issue(
+                crate::fido::Ceremony::RootStepUp,
+                ctx.account.as_bytes(),
+                ctx.device_key,
+                &operation,
+                crate::fido::now_secs(),
+                PENDING_LIFE.as_secs(),
+                policy.user_verification,
+            )
+            .map_err(|_| ())?;
+        let encoded =
+            crate::fido::encode_challenge(rid, &policy, &challenge, &ids).map_err(|_| ())?;
+        self.pending_fido.insert(rid, (level, op, challenge));
+        Ok(vec![frame(FIDO_STEPUP_CHALLENGE, encoded)])
+    }
+
+    #[cfg(feature = "fido2")]
+    pub async fn fido_proof(
+        &mut self,
+        payload: &[u8],
+        ctx: &Ctx<'_>,
+    ) -> Result<Vec<crate::wire::Frame>, ()> {
+        let (rid, assertion) = crate::fido::decode_assertion(payload).map_err(|_| ())?;
+        let reply =
+            |status, text: &str| vec![frame(STEPUP_RESULT, encode_result(rid, status, text))];
+        let Some((level, op, challenge)) = self.pending_fido.remove(&rid) else {
+            return Ok(reply(R_EXPIRED, ""));
+        };
+        let policy = crate::fido::Policy::from_env().map_err(|_| ())?;
+        let root = if level == Level::Root {
+            crate::ipc::state_dir(ctx.dir, "broker")
+        } else {
+            ctx.dir.to_path_buf()
+        };
+        let operation = prologue(rid, level, &op, &ctx.my_key.public);
+        let challenges =
+            crate::fido::ChallengeStore::open(&root.join("fido/challenges")).map_err(|_| ())?;
+        let credentials =
+            crate::fido::CredentialStore::open(&root.join("fido/credentials")).map_err(|_| ())?;
+        let ah = *blake3::hash(ctx.account.as_bytes()).as_bytes();
+        let dh = *blake3::hash(ctx.device_key).as_bytes();
+        let good = (|| -> anyhow::Result<()> {
+            let uv = challenges.consume(
+                &challenge.client_data,
+                crate::fido::Ceremony::RootStepUp,
+                ctx.account.as_bytes(),
+                ctx.device_key,
+                &operation,
+                crate::fido::now_secs(),
+            )?;
+            let mut record = credentials.load(&assertion.credential_id)?;
+            if record.account_hash != ah || record.device_hash != dh {
+                anyhow::bail!("credential identity mismatch")
+            }
+            crate::fido::verify_assertion(
+                &policy,
+                &mut record,
+                &challenge.client_data,
+                &assertion,
+                uv,
+            )?;
+            credentials.save(&record)
+        })()
+        .is_ok();
+        if !good {
+            ctx.lockouts.fail(ctx.device_key, level);
+            let locked = ctx.lockouts.standing(ctx.device_key, level) == Standing::Locked;
+            ctx.report(
+                ctx.event(
+                    level,
+                    if locked {
+                        crate::auditlog::RESULT_LOCKED
+                    } else {
+                        crate::auditlog::RESULT_DENIED
+                    },
+                    rid,
+                )
+                .target("FIDO2 assertion denied"),
+            );
+            return Ok(reply(if locked { R_LOCKED } else { R_DENIED }, ""));
+        }
+        ctx.lockouts.ok(ctx.device_key, level);
+        let mut cap = Cap::issue(level, &op, ctx.session_no, CAP_LIFE);
+        if let Some(a) = ctx.audit {
+            let desc = match &op {
+                Op::Status => "status".into(),
+                Op::TestPrivileged(n) => format!("test:{n}"),
+                Op::RestartService(n) => format!("restart:{n}"),
+            };
+            if a.record_critical(
+                ctx.event(level, crate::auditlog::RESULT_OK, rid)
+                    .cap(&cap.id)
+                    .target(&desc),
+            )
+            .await
+            .is_err()
+            {
+                return Ok(reply(R_DENIED, ""));
+            }
+        }
+        Ok(
+            match broker_execute(ctx.dir, &mut cap, &op, ctx.session_no) {
+                Ok(text) => {
+                    if level == Level::Root {
+                        ctx.report(
+                            crate::auditlog::Event::new(
+                                "broker_op",
+                                crate::auditlog::LEVEL_ROOT,
+                                crate::auditlog::RESULT_OK,
+                            )
+                            .session(&ctx.session_no.to_be_bytes())
+                            .device(ctx.device_key)
+                            .user(ctx.account)
+                            .request(rid)
+                            .cap(&cap.id)
+                            .target(&text),
+                        );
+                    }
+                    reply(R_OK, &text)
+                }
+                Err(_) => reply(R_DENIED, ""),
+            },
+        )
+    }
     /// Err = the request is malformed: end the session
     pub fn begin(&mut self, payload: &[u8], ctx: &Ctx) -> Result<Vec<crate::wire::Frame>, ()> {
         let (rid, level, op, msg1) = decode_begin(payload).map_err(|_| ())?;
@@ -677,8 +860,34 @@ impl StepServer {
             ctx.report(ctx.event(level, crate::auditlog::RESULT_LOCKED, rid).target("locked"));
             return Ok(reply(R_LOCKED));
         }
-        let built = snow::Builder::new(NOISE_XK.parse().expect("params")).local_private_key(&ctx.my_key.private).prologue(&prologue(rid, level, &op, &ctx.my_key.public)).build_responder();
-        let (Ok(mut hs), mut buf, mut out) = (built, vec![0u8; 512], vec![0u8; 512]) else { return Ok(reply(R_DENIED)) };
+        #[cfg(feature = "fido2")]
+        {
+            let root = if level == Level::Root {
+                crate::ipc::state_dir(ctx.dir, "broker")
+            } else {
+                ctx.dir.to_path_buf()
+            };
+            let required = match crate::fido::CredentialStore::open(&root.join("fido/credentials"))
+                .and_then(|s| s.for_account_hash(blake3::hash(ctx.account.as_bytes()).as_bytes()))
+            {
+                Ok(v) => v.into_iter().any(|r| !r.revoked),
+                Err(_) => return Ok(reply(R_DENIED)),
+            };
+            if required {
+                ctx.report(
+                    ctx.event(level, crate::auditlog::RESULT_DENIED, rid)
+                        .target("password fallback forbidden by FIDO2 policy"),
+                );
+                return Ok(reply(R_DENIED));
+            }
+        }
+        let built = snow::Builder::new(NOISE_XK.parse().expect("params"))
+            .local_private_key(&ctx.my_key.private)
+            .prologue(&prologue(rid, level, &op, &ctx.my_key.public))
+            .build_responder();
+        let (Ok(mut hs), mut buf, mut out) = (built, vec![0u8; 512], vec![0u8; 512]) else {
+            return Ok(reply(R_DENIED));
+        };
         if hs.read_message(&msg1, &mut buf).is_err() {
             return Ok(reply(R_DENIED));
         }

@@ -47,6 +47,14 @@ async fn main() {
             let dir = PathBuf::from(&a[2]);
             yrl::keylife::service_guard(&dir).and_then(|_guard| yrl::opaque_auth::Store::init(&dir.join("opaque"))).map(|_| println!("OPAQUE server state initialized"))
         }
+        #[cfg(feature = "fido2")]
+        Some("fido-import") if a.len()==6 => fido_import(&a[2],&a[3],&a[4],&a[5],false).await,
+        #[cfg(feature = "fido2")]
+        Some("fido-import-root") if a.len()==6 => fido_import(&a[2],&a[3],&a[4],&a[5],true).await,
+        #[cfg(feature = "fido2")]
+        Some("fido-revoke") if a.len()==4 => fido_revoke(&a[2],&a[3],false).await,
+        #[cfg(feature = "fido2")]
+        Some("fido-revoke-root") if a.len()==4 => fido_revoke(&a[2],&a[3],true).await,
         Some("word") => word_set(&a).await,
         Some("unlock") => unlock(&a).await,
         Some("enroll") if a.get(2).map(String::as_str) == Some("enable") => enroll_enable(&a[3], &a).await,
@@ -70,6 +78,96 @@ async fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+#[cfg(feature = "fido2")]
+async fn fido_import(
+    dir: &str,
+    account: &str,
+    device_hex: &str,
+    artifact: &str,
+    root: bool,
+) -> anyhow::Result<()> {
+    let dir = PathBuf::from(dir);
+    let _guard = yrl::keylife::service_guard(&dir)?;
+    let device = hex::decode(device_hex)?;
+    let record = yrl::fido::read_registration_artifact(&PathBuf::from(artifact))?;
+    if record.account_hash != *blake3::hash(account.as_bytes()).as_bytes()
+        || record.device_hash != *blake3::hash(&device).as_bytes()
+    {
+        anyhow::bail!("registration artifact account/device mismatch")
+    }
+    if !yrl::users::read_users(&dir.join("users"))
+        .iter()
+        .any(|u| u.login == account)
+        || !yrl::keys::read_authorized(&dir.join("authorized_keys"))
+            .iter()
+            .any(|k| k.public == device)
+    {
+        anyhow::bail!("account or device is not authorized")
+    }
+    let role = if root { "broker" } else { "executor" };
+    let audit = yrl::ipc::audit_client(&dir, role)
+        .ok_or_else(|| anyhow::anyhow!("Audit unavailable; refusing FIDO2 credential import"))?;
+    audit
+        .record_critical(
+            yrl::auditlog::Event::new(
+                "fido_credential_import",
+                if root {
+                    yrl::auditlog::LEVEL_ROOT
+                } else {
+                    yrl::auditlog::LEVEL_USER
+                },
+                yrl::auditlog::RESULT_OK,
+            )
+            .device(&device)
+            .user(account)
+            .target(&hex::encode(blake3::hash(&record.id).as_bytes())),
+        )
+        .await?;
+    let base = if root {
+        yrl::ipc::state_dir(&dir, "broker")
+    } else {
+        dir.clone()
+    };
+    yrl::fido::CredentialStore::open(&base.join("fido/credentials"))?.save(&record)?;
+    println!(
+        "FIDO2 credential imported{}: {}",
+        if root { " for ROOT" } else { "" },
+        hex::encode(&record.id)
+    );
+    Ok(())
+}
+#[cfg(feature = "fido2")]
+async fn fido_revoke(dir: &str, id: &str, root: bool) -> anyhow::Result<()> {
+    let dir = PathBuf::from(dir);
+    let _guard = yrl::keylife::service_guard(&dir)?;
+    let raw = hex::decode(id)?;
+    let role = if root { "broker" } else { "executor" };
+    let audit = yrl::ipc::audit_client(&dir, role)
+        .ok_or_else(|| anyhow::anyhow!("Audit unavailable; refusing FIDO2 revocation"))?;
+    audit
+        .record_critical(
+            yrl::auditlog::Event::new(
+                "fido_credential_revoke",
+                if root {
+                    yrl::auditlog::LEVEL_ROOT
+                } else {
+                    yrl::auditlog::LEVEL_USER
+                },
+                yrl::auditlog::RESULT_OK,
+            )
+            .target(&hex::encode(blake3::hash(&raw).as_bytes())),
+        )
+        .await?;
+    let base = if root {
+        yrl::ipc::state_dir(&dir, "broker")
+    } else {
+        dir.clone()
+    };
+    yrl::fido::CredentialStore::open(&base.join("fido/credentials"))?.revoke(&raw)?;
+    println!("FIDO2 credential revoked");
+    Ok(())
 }
 
 async fn serve(dir: &str, bind: &str, relay: Option<String>) -> anyhow::Result<()> {

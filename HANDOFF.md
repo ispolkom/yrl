@@ -7,7 +7,7 @@
 - Implementation baseline: Stage 4 was published in **`f69e4b7`** (`Harden secret handling and add offline key recovery lifecycle`). Stage 5 — failure and overload resilience — is in progress: the throughput/liveness correction and substages 5.1–5.6 are implemented. Formal end-to-end deployment acceptance has not been recorded.
 - Scope boundary: this repository is YRL. Do not modify the separate YANDI NODE source tree. Do not interpret the future desktop or other-OS design documents as implemented features.
 - Stage 6 substages 6.1–6.6 are implemented: trusted segmented Audit, key lifecycle/export, offline-rooted releases and manual downgrade-safe transactional activation. Comprehensive and installed-host acceptance is intentionally deferred to Stage 8.
-- Stage 7.1 is implemented behind the default-off `crypto-profiles` feature. No Stage 7 profile is enabled in an installed production service before Stage 8 acceptance.
+- Stage 7.1–7.5 are implemented behind default-off features. No Stage 7 profile is enabled in an installed production service before Stage 8 acceptance.
 - This handoff records outcomes and verification at the baseline, not a development diary.
 
 ## Architecture at the baseline
@@ -45,7 +45,7 @@ Key code: `client.rs` (route manager), `link.rs` (SEQ/ACK, bounded buffers, prio
 | 4 — key and secret lifecycle | Implemented in **`f69e4b7`**. Private-file checks, zeroizing buffers, separated role keys, offline encrypted recovery, Noise-key rotation, device revocation and migration. Services start without an interactive unlock. | `tests/keylife.rs`, `STAGE4_ACCEPTANCE.md`. Audit journal-signing-key rollover is not implemented. |
 | 5 — failure and overload resilience | In progress. Throughput/liveness correction and substages 5.1–5.6 are implemented: hierarchical budgets, containment, bounded IPC, network/disk admission and explicit crash/restart semantics. | Focused tests are prepared but intentionally not run. Final workspace and installed-host acceptance are pending. |
 | 6 — trusted audit and software delivery | Implemented through 6.1–6.6: signed segment rotation/retention, rollback anchors, offline verification/export, Audit key generations, offline-rooted releases and transactional downgrade-safe activation. | Focused tests compile but were intentionally not run. Real signed publication, service activation/recovery and final integration acceptance remain Stage 8. |
-| 7 — extended cryptographic protection | In progress: 7.1 profiles, 7.2 hybrid transport, 7.3 OPAQUE and 7.4 hybrid signature engine are implemented. | Default-off features; focused tests are compile-only until Stage 8. FIDO2 and TPM follow. |
+| 7 — extended cryptographic protection | In progress: 7.1 profiles, 7.2 hybrid transport, 7.3 OPAQUE, 7.4 hybrid signatures and 7.5 FIDO2 are implemented. | Default-off features; focused tests are compile-only until Stage 8. TPM follows. |
 
 ## Stage 7.1 cryptographic profiles
 
@@ -73,11 +73,11 @@ The default-off `hybrid-signatures` feature implements a single canonical Ed2551
 
 Mutual handshake-proof helpers operate after Noise and bind pre-pinned hybrid keys to both X25519 identities, role, negotiated profile and transcript; no asymmetric signature is added per data frame. Key creation is explicit owner action; planned rotation requires old+new proof and emergency replacement requires a distinct Recovery key. Offline `yrl-release hybrid-keygen|hybrid-sign|hybrid-verify` commands use the same format for release and exported Audit artifacts. Existing historical formats stay classical rather than being relabelled. RustCrypto `ml-dsa` 0.1.2 is MIT/Apache-2.0 but explicitly unaudited, so the feature remains production-off pending Stage 8 vectors/review.
 
-## Stage 7.5 FIDO2 blocker
+## Stage 7.5 FIDO2
 
-No real CTAP2 backend is available in the build environment: libfido2 is not installed, its Rust crates are FFI bindings, and server-side WebAuthn libraries do not operate a native client's token. YRL also requires an explicit native RP ID/origin model and reviewed ceremony persistence before it can safely verify credentials or operation-bound ROOT assertions.
+The default-off `fido2` feature uses `fido2-rs` 0.6 and Yubico libfido2 for real CTAP2 device interaction. Registration produces a private artifact that an authorized administrator imports after Audit records the change; the first assertion proves token possession. Login and SUDO use Executor-owned records, while ROOT uses a separate Broker store and an operation-bound challenge. Multiple credentials, revocation, UP, optional mandatory UV/PIN, RP hash, ES256 signature, replay and counter checks are implemented. PINs stay in zeroizing client memory and never cross the wire.
 
-`fido2` is compile-only; `require(Fido2)` always fails closed and there is no password fallback or proprietary challenge imitation. Existing users cannot enable a FIDO2 policy yet. Exact libfido2 packaging, UP/UV/PIN, credential/counter, revocation/recovery and Broker binding requirements are in `docs/CRYPTOGRAPHY.md`.
+The native RP model uses a stable DNS-style `YRL_FIDO2_RP_ID` and raw CTAP2 client data rather than claiming a browser origin. One-use challenge files bind account, device key and channel/operation context and are burned before verification. A configured FIDO credential forbids password/OPAQUE fallback for that account or step-up contour. Build verification used isolated Debian libfido2/libcbor development packages because the host has no system installation; no host configuration or token was changed. Real hardware interoperability, PIN/UV variants, loss/recovery and counter behavior remain Stage 8 acceptance.
 
 ## Stage 7.6 TPM 2.0 blocker
 
@@ -85,7 +85,7 @@ The current standard Rust TSS binding is an alpha line, and this host has neithe
 
 `tpm2` is compile-only and `require(Tpm2)` always fails closed, with no automatic software fallback. TPM-native keys are explicitly distinct from sealed software secrets; common TPMs do not execute YRL's X25519, Ed25519, ML-KEM or ML-DSA. Exact backend, simulator, PCR update, NV anti-rollback, rotation/revocation and hardware-replacement recovery requirements are in `docs/CRYPTOGRAPHY.md`.
 
-Stage 7 outcome at this point is intentionally partial: 7.1 is implemented and published; 7.2–7.6 have precise security blockers and fail-closed compile-only gates, not claimed implementations. This follows the requirement to avoid unsafe imitations and continue independent substages.
+Stage 7 remains incomplete only at 7.6. Substages 7.1–7.5 are implemented but production-disabled pending Stage 8 acceptance; their focused tests were prepared and not run.
 
 Stage 0 guarantees apply only while the Executor's server session remains alive. After a server-process restart or session-grace expiry, RESUME cannot recover it. Link retransmits stored logical frames after a fresh Noise handshake, so connection-local nonces are not reused. Confirmed frames are not re-executed, and control/interactive traffic has priority over unsent bulk file data within the bounded Link window. Stage 2 rechecks authority during a live session and before RESUME. Stages 3 and 4 must preserve these properties.
 

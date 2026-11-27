@@ -153,10 +153,8 @@ Security rules are also checked with targeted source mutants listed under `tools
 - Remote desktop, Windows, macOS, and Android clients are not implemented.
 - UDP lacks NAT hole punching, UDP relay, path-MTU discovery, in-place address migration, and pacing. Automatic failover uses a fresh Noise-authenticated connection and RESUME; it does not race or score routes.
 - Sessions survive connection loss but not an `yrld` restart; active session state is currently in memory.
-- The transport does not yet include hybrid post-quantum key exchange (ML-KEM).
-- PAKE/OPAQUE, FIDO2/TPM-backed confirmation, and second-device approval are planned hardening steps.
-- Audit logs need deployment-level append-only protection, off-host checkpoint retention, and rotation.
-- Audit journal signing-key rollover is not implemented; preserve that key with its journal when backing up or restoring.
+- Stage 7 cryptographic profiles, hybrid ML-KEM transport/signatures, OPAQUE and FIDO2 are default-off and await Stage 8 interoperability, hardware and performance acceptance.
+- TPM-backed key handling and second-device approval remain planned hardening steps.
 - Metadata such as IP addresses, timing, and traffic volume remains visible to the network or relay.
 
 Do not treat a secret port, SPA, or an untrusted relay as authentication. Device keys, passwords, explicit rights, and end-to-end cryptography remain mandatory.

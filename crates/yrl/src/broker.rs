@@ -84,6 +84,10 @@ async fn handle(mut stream: UnixStream, peer: Peer, handshake: IpcPermit, admiss
         let out = match f.kind {
             stepup::STEPUP_BEGIN => server.begin(&f.payload, &ctx),
             stepup::STEPUP_PROOF => server.proof(&f.payload, &ctx).await,
+            #[cfg(feature = "fido2")]
+            stepup::FIDO_STEPUP_BEGIN => server.fido_begin(&f.payload, &ctx),
+            #[cfg(feature = "fido2")]
+            stepup::FIDO_STEPUP_ASSERTION => server.fido_proof(&f.payload, &ctx).await,
             _ => break, // the broker speaks of nothing else
         };
         let Ok(frames) = out else { break };

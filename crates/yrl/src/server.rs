@@ -433,6 +433,21 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
             let password = zeroize::Zeroizing::new(password);
             attempts += 1;
             let typed_login = String::from_utf8_lossy(&login).into_owned();
+            #[cfg(feature = "fido2")]
+            {
+                let required = match crate::fido::CredentialStore::open(&cfg.dir.join("fido/credentials"))
+                    .and_then(|s| s.for_account_hash(blake3::hash(&login).as_bytes()))
+                {
+                    Ok(v) => v.into_iter().any(|r| !r.revoked),
+                    Err(_) => return,
+                };
+                if required {
+                    cfg.log(format!("password login refused via '{}': account requires FIDO2", who.label));
+                    cfg.rec(1, crate::auditlog::Event::new("login_downgrade", crate::auditlog::LEVEL_NONE, crate::auditlog::RESULT_DENIED).device(&who.public));
+                    let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                    return;
+                }
+            }
             #[cfg(feature = "opaque-rfc9807")]
             {
                 let opaque_root = cfg.dir.join("opaque");
@@ -569,6 +584,270 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                 }
             }
             }
+            #[cfg(feature = "fido2")]
+            wire::FIDO_LOGIN_BEGIN => {
+                let login = match crate::fido::decode_login_begin(&frame.payload) {
+                    Ok(v) => v.to_vec(),
+                    Err(_) => return,
+                };
+                frame.payload.zeroize();
+                attempts += 1;
+                let typed_login = String::from_utf8_lossy(&login).into_owned();
+                if cfg.throttle.locked(&key_id) || cfg.throttle.locked(&ip_id) {
+                    let _ =
+                        send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                    return;
+                }
+                let policy = match crate::fido::Policy::from_env() {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let credentials =
+                    match crate::fido::CredentialStore::open(&cfg.dir.join("fido/credentials")) {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                let ah = *blake3::hash(&login).as_bytes();
+                let dh = *blake3::hash(&who.public).as_bytes();
+                let real: Vec<_> = credentials
+                    .for_account_hash(&ah)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| r.device_hash == dh && !r.revoked)
+                    .collect();
+                let mut ids: Vec<Vec<u8>> = real.iter().map(|r| r.id.clone()).collect();
+                if ids.is_empty() {
+                    let mut fake = vec![0u8; 32];
+                    argon2::password_hash::rand_core::RngCore::fill_bytes(
+                        &mut argon2::password_hash::rand_core::OsRng,
+                        &mut fake,
+                    );
+                    ids.push(fake)
+                }
+                let mut operation = b"executor-login\0".to_vec();
+                operation.extend_from_slice(sec.channel_binding());
+                operation.extend_from_slice(&sec.profile().to_be_bytes());
+                let challenges = match crate::fido::ChallengeStore::open(
+                    &cfg.dir.join("fido/challenges-executor"),
+                ) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let challenge = match challenges.issue(
+                    crate::fido::Ceremony::Login,
+                    &login,
+                    &who.public,
+                    &operation,
+                    crate::fido::now_secs(),
+                    30,
+                    policy.user_verification,
+                ) {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let payload = match crate::fido::encode_challenge(0, &policy, &challenge, &ids) {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                if !send_plain(&mut wr, &sec, Frame::new(wire::FIDO_CHALLENGE, 0, payload)).await {
+                    return;
+                }
+                let wait = login_deadline.saturating_duration_since(Instant::now());
+                let msg = match tokio::time::timeout(wait, read_msg(&mut rd)).await {
+                    Ok(Ok(m)) => m,
+                    _ => return,
+                };
+                let Ok(mut proof) = sec.open(&msg) else {
+                    return;
+                };
+                if proof.kind != wire::FIDO_ASSERTION {
+                    proof.payload.zeroize();
+                    return;
+                }
+                let parsed = crate::fido::decode_assertion(&proof.payload);
+                proof.payload.zeroize();
+                let Ok((_rid, assertion)) = parsed else {
+                    return;
+                };
+                let consumed = challenges.consume(
+                    &challenge.client_data,
+                    crate::fido::Ceremony::Login,
+                    &login,
+                    &who.public,
+                    &operation,
+                    crate::fido::now_secs(),
+                );
+                let record = credentials.load(&assertion.credential_id);
+                let user = read_users(&cfg.dir.join("users"))
+                    .into_iter()
+                    .find(|u| u.login.as_bytes() == login);
+                let granted = match (consumed, record, user) {
+                    (Ok(uv), Ok(mut record), Some(user))
+                        if record.account_hash == ah && record.device_hash == dh =>
+                    {
+                        match crate::fido::verify_assertion(
+                            &policy,
+                            &mut record,
+                            &challenge.client_data,
+                            &assertion,
+                            uv,
+                        )
+                        .and_then(|_| credentials.save(&record))
+                        {
+                            Ok(()) => Some(
+                                user.rights
+                                    .into_iter()
+                                    .filter(|r| who.rights.contains(r))
+                                    .collect::<Vec<_>>(),
+                            ),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let Some(eff) = granted else {
+                    cfg.throttle.fail(&key_id);
+                    cfg.throttle.fail(&ip_id);
+                    cfg.rec(
+                        1,
+                        crate::auditlog::Event::new(
+                            "fido_login",
+                            crate::auditlog::LEVEL_NONE,
+                            crate::auditlog::RESULT_DENIED,
+                        )
+                        .device(&who.public),
+                    );
+                    let _ =
+                        send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                    if attempts >= cfg.max_login_attempts {
+                        return;
+                    }
+                    continue;
+                };
+                cfg.throttle.ok(&key_id);
+                cfg.throttle.ok(&ip_id);
+                cfg.rec(
+                    1,
+                    crate::auditlog::Event::new(
+                        "fido_login",
+                        crate::auditlog::LEVEL_USER,
+                        crate::auditlog::RESULT_OK,
+                    )
+                    .device(&who.public)
+                    .user(&typed_login),
+                );
+                let Some(resources) = cfg.resources.try_session(
+                    &who.public,
+                    &typed_login,
+                    cfg.max_sessions,
+                    cfg.max_sessions_per_key,
+                    cfg.max_sessions_per_account,
+                ) else {
+                    let _ =
+                        send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                    return;
+                };
+                let Some(network) = cfg
+                    .resources
+                    .try_network_connection(&who.public, &typed_login)
+                else {
+                    let _ =
+                        send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                    return;
+                };
+                let Some(auth) =
+                    crate::executor::auth_snapshot(&cfg.dir, &who.public, &typed_login)
+                else {
+                    return;
+                };
+                let Some((to_exec, mut from_exec)) =
+                    crate::executor::direct_session(&cfg, &who.public, &typed_login, &eff).await
+                else {
+                    let _ =
+                        send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                    return;
+                };
+                if crate::executor::auth_snapshot(&cfg.dir, &who.public, &typed_login).as_ref()
+                    != Some(&auth)
+                {
+                    return;
+                }
+                let sid = new_sid();
+                let link = Link::new_budgeted(cfg.link_window, resources.link_budget());
+                let (in_tx, mut in_rx) = mpsc::channel::<Frame>(64);
+                let entry = Arc::new(SessionEntry {
+                    link: link.clone(),
+                    key: who.public.clone(),
+                    account: typed_login,
+                    auth,
+                    resources: Mutex::new(Some(resources)),
+                    inbound: Mutex::new(Some(in_tx)),
+                    attach_gen: Default::default(),
+                });
+                cfg.sessions.map.lock().unwrap().insert(sid, entry.clone());
+                let (watch, watch_cfg) = (entry.clone(), cfg.clone());
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_millis(200));
+                    loop {
+                        tick.tick().await;
+                        if watch.link.is_closed() {
+                            break;
+                        }
+                        if crate::executor::auth_snapshot(
+                            &watch_cfg.dir,
+                            &watch.key,
+                            &watch.account,
+                        )
+                        .as_ref()
+                            != Some(&watch.auth)
+                        {
+                            let _ = tokio::time::timeout(
+                                Duration::from_millis(200),
+                                watch.link.push(&Frame::new(wire::CLOSE, 0, vec![])),
+                            )
+                            .await;
+                            watch.end();
+                            watch_cfg.sessions.remove(&sid);
+                            break;
+                        }
+                    }
+                });
+                let l2 = link.clone();
+                let (e2, cfg2) = (entry.clone(), cfg.clone());
+                tokio::spawn(async move {
+                    let up = async {
+                        while let Some(f) = in_rx.recv().await {
+                            if to_exec.send(f).await.is_err() {
+                                break;
+                            }
+                        }
+                    };
+                    let down = async {
+                        while let Some(f) = from_exec.recv().await {
+                            if l2.push(&f).await.is_err() {
+                                break;
+                            }
+                        }
+                    };
+                    tokio::select! {_=up=>{},_=down=>{}}
+                    e2.end();
+                    cfg2.sessions.remove(&sid);
+                });
+                if !send_plain(
+                    &mut wr,
+                    &sec,
+                    Frame::new(wire::LOGIN_OK, 0, eff.join(",").into_bytes()),
+                )
+                .await
+                    || !send_plain(&mut wr, &sec, Frame::new(link::SESSION, 0, sid.to_vec())).await
+                {
+                    entry.end();
+                    cfg.sessions.remove(&sid);
+                    return;
+                }
+                run_connection(entry, rd, wr, sec, 0, sid, &cfg, network).await;
+                return;
+            }
             #[cfg(feature = "opaque-rfc9807")]
             wire::OPAQUE_LOGIN_START => {
                 let parsed = wire::decode_opaque_start(&frame.payload).map(|(login, ke1)| (login.to_vec(), ke1.to_vec()));
@@ -576,6 +855,20 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
                 let Ok((login, mut ke1)) = parsed else { return };
                 attempts += 1;
                 let typed_login = String::from_utf8_lossy(&login).into_owned();
+                #[cfg(feature = "fido2")]
+                {
+                    let required = match crate::fido::CredentialStore::open(&cfg.dir.join("fido/credentials"))
+                        .and_then(|s| s.for_account_hash(blake3::hash(&login).as_bytes()))
+                    {
+                        Ok(v) => v.into_iter().any(|r| !r.revoked),
+                        Err(_) => return,
+                    };
+                    if required {
+                        cfg.rec(1, crate::auditlog::Event::new("login_downgrade", crate::auditlog::LEVEL_NONE, crate::auditlog::RESULT_DENIED).device(&who.public));
+                        let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;
+                        return;
+                    }
+                }
                 let locked = cfg.throttle.locked(&key_id) || cfg.throttle.locked(&ip_id);
                 if locked {
                     let _ = send_plain(&mut wr, &sec, Frame::new(wire::LOGIN_FAIL, 0, vec![])).await;

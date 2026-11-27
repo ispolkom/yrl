@@ -24,9 +24,20 @@ pub fn require(mechanism: Mechanism) -> Result<()> {
             #[cfg(feature = "hybrid-signatures")]
             { Ok(()) }
             #[cfg(not(feature = "hybrid-signatures"))]
-            { bail!("hybrid Ed25519 + ML-DSA-65 backend is unavailable") }
-        },
-        Mechanism::Fido2 => bail!("FIDO2/CTAP2 backend is unavailable"),
+            {
+                bail!("hybrid Ed25519 + ML-DSA-65 backend is unavailable")
+            }
+        }
+        Mechanism::Fido2 => {
+            #[cfg(feature = "fido2")]
+            {
+                Ok(())
+            }
+            #[cfg(not(feature = "fido2"))]
+            {
+                bail!("FIDO2/CTAP2 backend is unavailable")
+            }
+        }
         Mechanism::Tpm2 => bail!("TPM 2.0 backend is unavailable"),
     }
 }

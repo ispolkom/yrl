@@ -514,7 +514,28 @@ impl Client {
                     wire::PONG => {
                         let _ = pong_tx.send(f).await;
                     }
-                    wire::STDOUT | wire::STDERR | wire::EXIT | wire::ERROR | wire::OP_ACCEPTED | wire::OP_STATUS_RESULT | wire::OPAQUE_REG_RESPONSE | wire::OPAQUE_REG_OK | wire::PTY_OUT | wire::PTY_EXIT | fw::FILE_DATA | fw::FILE_READY | fw::FILE_END | crate::fsops::FS_RESP | crate::fsops::FS_DONE | crate::stepup::STEPUP_CHALLENGE | crate::stepup::STEPUP_RESULT | crate::tunwire::TUN_READY | crate::tunwire::TUN_DATA | crate::tunwire::TUN_EOF | crate::tunwire::TUN_CLOSE => {
+                    wire::STDOUT
+                    | wire::STDERR
+                    | wire::EXIT
+                    | wire::ERROR
+                    | wire::OP_ACCEPTED
+                    | wire::OP_STATUS_RESULT
+                    | wire::OPAQUE_REG_RESPONSE
+                    | wire::OPAQUE_REG_OK
+                    | wire::PTY_OUT
+                    | wire::PTY_EXIT
+                    | fw::FILE_DATA
+                    | fw::FILE_READY
+                    | fw::FILE_END
+                    | crate::fsops::FS_RESP
+                    | crate::fsops::FS_DONE
+                    | crate::stepup::STEPUP_CHALLENGE
+                    | crate::stepup::FIDO_STEPUP_CHALLENGE
+                    | crate::stepup::STEPUP_RESULT
+                    | crate::tunwire::TUN_READY
+                    | crate::tunwire::TUN_DATA
+                    | crate::tunwire::TUN_EOF
+                    | crate::tunwire::TUN_CLOSE => {
                         if let Ok((id, _)) = split_id(&f.payload) {
                             let t = waiting.lock().await.get(&id).cloned();
                             if let Some(t) = t {
@@ -569,10 +590,175 @@ impl Client {
         tokio::spawn(async move {
             while let Some(f) = inbound.recv().await {
                 match f.kind {
-                    wire::CLOSE => { lost.store(true, std::sync::atomic::Ordering::SeqCst); link.close(); break }
-                    wire::PONG => { let _ = pong_tx.send(f).await; }
-                    wire::STDOUT | wire::STDERR | wire::EXIT | wire::ERROR | wire::OP_ACCEPTED | wire::OP_STATUS_RESULT | wire::OPAQUE_REG_RESPONSE | wire::OPAQUE_REG_OK | wire::PTY_OUT | wire::PTY_EXIT | fw::FILE_DATA | fw::FILE_READY | fw::FILE_END | crate::fsops::FS_RESP | crate::fsops::FS_DONE | crate::stepup::STEPUP_CHALLENGE | crate::stepup::STEPUP_RESULT | crate::tunwire::TUN_READY | crate::tunwire::TUN_DATA | crate::tunwire::TUN_EOF | crate::tunwire::TUN_CLOSE => {
-                        if let Ok((id, _)) = split_id(&f.payload) { if let Some(t) = waiting.lock().await.get(&id).cloned() { let _ = t.send(f).await; } }
+                    wire::CLOSE => {
+                        lost.store(true, std::sync::atomic::Ordering::SeqCst);
+                        link.close();
+                        break;
+                    }
+                    wire::PONG => {
+                        let _ = pong_tx.send(f).await;
+                    }
+                    wire::STDOUT
+                    | wire::STDERR
+                    | wire::EXIT
+                    | wire::ERROR
+                    | wire::OP_ACCEPTED
+                    | wire::OP_STATUS_RESULT
+                    | wire::OPAQUE_REG_RESPONSE
+                    | wire::OPAQUE_REG_OK
+                    | wire::PTY_OUT
+                    | wire::PTY_EXIT
+                    | fw::FILE_DATA
+                    | fw::FILE_READY
+                    | fw::FILE_END
+                    | crate::fsops::FS_RESP
+                    | crate::fsops::FS_DONE
+                    | crate::stepup::STEPUP_CHALLENGE
+                    | crate::stepup::FIDO_STEPUP_CHALLENGE
+                    | crate::stepup::STEPUP_RESULT
+                    | crate::tunwire::TUN_READY
+                    | crate::tunwire::TUN_DATA
+                    | crate::tunwire::TUN_EOF
+                    | crate::tunwire::TUN_CLOSE => {
+                        if let Ok((id, _)) = split_id(&f.payload) {
+                            if let Some(t) = waiting.lock().await.get(&id).cloned() {
+                                let _ = t.send(f).await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            finish_waiters(&waiting, lost.load(std::sync::atomic::Ordering::SeqCst)).await;
+        });
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::spawn(manage(
+            self.link.clone(),
+            self.ident.clone(),
+            sess.payload,
+            pre,
+            sink,
+            self.lost.clone(),
+        ));
+        Ok(rights)
+    }
+
+    #[cfg(feature = "fido2")]
+    pub async fn login_fido(
+        &self,
+        login: &str,
+        device_path: &str,
+        pin: Option<zeroize::Zeroizing<String>>,
+        timeout: Duration,
+    ) -> Result<Vec<String>> {
+        if self.ident.opts.executor_public.is_none() {
+            bail!("a pinned Executor public key is required before login")
+        }
+        let mut guard = self.pre.lock().await;
+        let Some(pre) = guard.as_mut() else {
+            bail!("already logged in")
+        };
+        let payload = crate::fido::encode_login_begin(login.as_bytes())?;
+        let sealed = pre
+            .sec
+            .seal(&Frame::new(wire::FIDO_LOGIN_BEGIN, 0, payload))?;
+        write_msg(&mut pre.wr, &sealed).await?;
+        let msg = tokio::time::timeout(timeout, read_msg(&mut pre.rd))
+            .await
+            .map_err(|_| anyhow::anyhow!("no FIDO2 challenge"))??;
+        let challenge = pre.sec.open(&msg)?;
+        if challenge.kind != wire::FIDO_CHALLENGE {
+            bail!("FIDO2 login refused")
+        }
+        let (_rid, policy, client_data, ids) = crate::fido::decode_challenge(&challenge.payload)?;
+        let local = crate::fido::Policy::from_env()?;
+        if policy.rp_id != local.rp_id || policy.user_verification != local.user_verification {
+            bail!("FIDO2 policy mismatch")
+        }
+        let path = device_path.to_owned();
+        let hw_policy = policy.clone();
+        let hw_data = client_data.clone();
+        let assertion = tokio::task::spawn_blocking(move || {
+            crate::fido::hardware_assert_any(
+                &path,
+                &hw_policy,
+                &ids,
+                &hw_data,
+                hw_policy.user_verification,
+                pin.as_ref(),
+            )
+        })
+        .await??;
+        let sealed = pre.sec.seal(&Frame::new(
+            wire::FIDO_ASSERTION,
+            0,
+            crate::fido::encode_assertion(0, &assertion)?,
+        ))?;
+        write_msg(&mut pre.wr, &sealed).await?;
+        let mut next = async || -> Result<Frame> {
+            let msg = tokio::time::timeout(timeout, read_msg(&mut pre.rd))
+                .await
+                .map_err(|_| anyhow::anyhow!("no answer to FIDO2 login"))??;
+            pre.sec.open(&msg)
+        };
+        let ok = next().await?;
+        if ok.kind != wire::LOGIN_OK {
+            bail!("FIDO2 login refused")
+        }
+        let rights: Vec<String> = String::from_utf8_lossy(&ok.payload)
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        let sess = next().await?;
+        if sess.kind != link::SESSION || sess.payload.len() != link::SID_LEN {
+            bail!("the server did not open a session")
+        }
+        let pre = guard.take().unwrap();
+        let (sink, mut inbound) = mpsc::channel::<Frame>(256);
+        let (waiting, pong_tx, lost, link) = (
+            self.waiting.clone(),
+            self.pong_tx.clone(),
+            self.lost.clone(),
+            self.link.clone(),
+        );
+        tokio::spawn(async move {
+            while let Some(f) = inbound.recv().await {
+                match f.kind {
+                    wire::CLOSE => {
+                        lost.store(true, std::sync::atomic::Ordering::SeqCst);
+                        link.close();
+                        break;
+                    }
+                    wire::PONG => {
+                        let _ = pong_tx.send(f).await;
+                    }
+                    wire::STDOUT
+                    | wire::STDERR
+                    | wire::EXIT
+                    | wire::ERROR
+                    | wire::OP_ACCEPTED
+                    | wire::OP_STATUS_RESULT
+                    | wire::PTY_OUT
+                    | wire::PTY_EXIT
+                    | fw::FILE_DATA
+                    | fw::FILE_READY
+                    | fw::FILE_END
+                    | crate::fsops::FS_RESP
+                    | crate::fsops::FS_DONE
+                    | crate::stepup::STEPUP_CHALLENGE
+                    | crate::stepup::FIDO_STEPUP_CHALLENGE
+                    | crate::stepup::STEPUP_RESULT
+                    | crate::tunwire::TUN_READY
+                    | crate::tunwire::TUN_DATA
+                    | crate::tunwire::TUN_EOF
+                    | crate::tunwire::TUN_CLOSE => {
+                        if let Ok((id, _)) = split_id(&f.payload) {
+                            if let Some(t) = waiting.lock().await.get(&id).cloned() {
+                                let _ = t.send(f).await;
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -1063,6 +1249,97 @@ impl Client {
 }
 
 impl Client {
+    #[cfg(feature = "fido2")]
+    pub async fn elevate_fido(
+        &self,
+        level: crate::stepup::Level,
+        op: &crate::stepup::Op,
+        device_path: &str,
+        pin: Option<zeroize::Zeroizing<String>>,
+        wait: Duration,
+    ) -> Result<String> {
+        use crate::stepup::*;
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (tx, mut rx) = mpsc::channel(8);
+        self.waiting.lock().await.insert(id, tx);
+        let r = async {
+            let o = op.encode();
+            let mut begin = id.to_be_bytes().to_vec();
+            begin.push(level.code());
+            begin.extend_from_slice(&(o.len() as u16).to_be_bytes());
+            begin.extend_from_slice(&o);
+            self.send(&Frame::new(FIDO_STEPUP_BEGIN, 0, begin)).await?;
+            let challenge = loop {
+                match tokio::time::timeout(wait, rx.recv()).await {
+                    Ok(Some(f)) if f.kind == wire::OP_ACCEPTED => continue,
+                    Ok(Some(f)) if f.kind == FIDO_STEPUP_CHALLENGE => break f,
+                    Ok(Some(f)) if f.kind == STEPUP_RESULT => {
+                        let (_, st, _) =
+                            decode_result(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                        bail!("{}", result_text(st))
+                    }
+                    Ok(Some(f)) if f.kind == wire::ERROR => return Err(server_error(&f)),
+                    _ if self.session_lost() => return Err(SessionLost.into()),
+                    _ => bail!("no FIDO2 step-up challenge"),
+                }
+            };
+            let (rid, policy, data, ids) = crate::fido::decode_challenge(&challenge.payload)?;
+            if rid != id {
+                bail!("FIDO2 request id mismatch")
+            }
+            let local = crate::fido::Policy::from_env()?;
+            if local.rp_id != policy.rp_id || local.user_verification != policy.user_verification {
+                bail!("FIDO2 policy mismatch")
+            }
+            let path = device_path.to_owned();
+            let hw_policy = policy.clone();
+            let hw_data = data.clone();
+            let assertion = tokio::task::spawn_blocking(move || {
+                crate::fido::hardware_assert_any(
+                    &path,
+                    &hw_policy,
+                    &ids,
+                    &hw_data,
+                    hw_policy.user_verification,
+                    pin.as_ref(),
+                )
+            })
+            .await??;
+            self.send(&Frame::new(
+                FIDO_STEPUP_ASSERTION,
+                0,
+                crate::fido::encode_assertion(id, &assertion)?,
+            ))
+            .await?;
+            match tokio::time::timeout(wait, rx.recv()).await {
+                Ok(Some(f)) if f.kind == STEPUP_RESULT => {
+                    let (_, st, text) =
+                        decode_result(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                    if st == R_OK {
+                        let _ = self
+                            .send(&Frame::new(
+                                wire::OP_RESULT_ACK,
+                                0,
+                                id.to_be_bytes().to_vec(),
+                            ))
+                            .await;
+                        Ok(text)
+                    } else {
+                        bail!("{}", result_text(st))
+                    }
+                }
+                Ok(Some(f)) if f.kind == wire::ERROR => Err(server_error(&f)),
+                _ if self.session_lost() => Err(SessionLost.into()),
+                _ => bail!("no answer to FIDO2 step-up"),
+            }
+        }
+        .await;
+        self.waiting.lock().await.remove(&id);
+        r
+    }
+
     /// Asks for ONE operation that needs more than a user may do. `executor_public` is the executor's key, pinned when the machine was set up: the phrase is
     /// encrypted to it, so the gatekeeper in between cannot read it. Returns the text the operation answered with.
     pub async fn elevate(&self, level: crate::stepup::Level, op: &crate::stepup::Op, phrase: &[u8], executor_public: &[u8], wait: Duration) -> Result<String> {

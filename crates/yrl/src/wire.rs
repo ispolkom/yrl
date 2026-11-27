@@ -146,6 +146,9 @@ pub const OPAQUE_REG_FINISH: u8 = 115;
 pub const OPAQUE_REG_OK: u8 = 116;
 pub const HYBRID_CLIENT_PROOF: u8 = 117;
 pub const HYBRID_SERVER_PROOF: u8 = 118;
+pub const FIDO_LOGIN_BEGIN: u8 = 119;
+pub const FIDO_CHALLENGE: u8 = 120;
+pub const FIDO_ASSERTION: u8 = 121;
 pub const MAX_LOGIN: usize = 64;
 pub const MAX_PASSWORD: usize = 256;
 
