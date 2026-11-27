@@ -248,6 +248,7 @@ fn i6_update_service_is_manual_offline_and_narrowly_writable() {
     let t = unit("yrl-update.service");
     assert_eq!(val(&t, "Type"), vec!["oneshot"]);
     assert!(val(&t, "ExecStart")[0].starts_with("/opt/yrl/current/yrl-update apply "));
+    assert_eq!(val(&t, "ExecStartPre"), vec!["+/opt/yrl/current/yrld install check /var/lib/yrl /run/yrl"]);
     assert!(val(&t, "RestrictAddressFamilies").contains(&"AF_UNIX".to_string()));
     assert!(val(&t, "CapabilityBoundingSet").iter().all(|v| v.is_empty()));
     let rw = words(val(&t, "ReadWritePaths"));

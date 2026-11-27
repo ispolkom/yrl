@@ -8,7 +8,11 @@ Wants=yrl-audit.service
 Type=oneshot
 User=root
 Group=root
+SupplementaryGroups=yrl-to-audit
+Environment=YRL_RUN=/run/yrl
+Environment=YRL_UPDATE_RESTRICTED_HEALTH=1
 EnvironmentFile=/etc/yrl/update.env
+ExecStartPre=+/opt/yrl/current/yrld install check /var/lib/yrl /run/yrl
 ExecStart=/opt/yrl/current/yrl-update apply ${YRL_UPDATE_BUNDLE} /etc/yrl/release-trust /opt/yrl /var/lib/yrl-update /var/lib/yrl
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -16,6 +20,8 @@ PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/yrl /var/lib/yrl-update
+StateDirectory=yrl-update
+StateDirectoryMode=0700
 ReadOnlyPaths=/var/lib/yrl /etc/yrl/release-trust
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=

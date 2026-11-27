@@ -3,6 +3,7 @@ use crate::auditlog::{Event, LEVEL_NONE, RESULT_ERROR, RESULT_OK};
 use anyhow::{bail, Context, Result};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -107,6 +108,27 @@ fn load_state(dir: &Path) -> Result<State> {
 fn save_state(dir: &Path, s: &State) -> Result<()> {
     atomic(&dir.join("state"), &s.encode())
 }
+
+fn lock_ledger(ledger: &Path) -> Result<File> {
+    ensure_dir(ledger, 0o700)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(ledger.join("lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("cannot lock update ledger");
+    }
+    Ok(lock)
+}
+
+fn clear_transaction(ledger: &Path) -> Result<()> {
+    fs::remove_file(ledger.join("transaction"))?;
+    File::open(ledger)?.sync_all()?;
+    Ok(())
+}
 fn ensure_dir(path: &Path, mode: u32) -> Result<()> {
     if !path.exists() {
         fs::create_dir_all(path)?;
@@ -179,9 +201,12 @@ fn health(release: &Path, yrl_state: &Path) -> Result<()> {
     if !yrld.exists() {
         bail!("release has no yrld health-check binary")
     };
-    let mut child = Command::new(yrld)
-        .args(["install", "check"])
-        .arg(yrl_state)
+    let mut command = Command::new(yrld);
+    command.args(["install", "check"]).arg(yrl_state);
+    if std::env::var_os("YRL_UPDATE_RESTRICTED_HEALTH").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        command.args(["/run/yrl", "--restricted-update-health"]);
+    }
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -275,11 +300,16 @@ pub async fn apply(
 ) -> Result<()> {
     ensure_dir(root, 0o755)?;
     ensure_dir(&root.join("releases"), 0o755)?;
-    ensure_dir(ledger, 0o700)?;
+    let _lock = lock_ledger(ledger)?;
     if ledger.join("transaction").exists() {
         bail!("an interrupted update exists; run yrl-update recover first")
     }
     let mut state = load_state(ledger)?;
+    if state.current.is_none()
+        && fs::read_link(root.join("current")).is_ok_and(|p| p == Path::new("releases/00000000000000000000/artifacts"))
+    {
+        state.current = Some(0);
+    }
     if now < state.time_floor {
         bail!("system time moved behind the trusted update time floor")
     }
@@ -320,7 +350,7 @@ pub async fn apply(
         health(&stage, yrl_state)
     }) {
         let _ = fs::remove_dir_all(&stage);
-        let _ = fs::remove_file(ledger.join("transaction"));
+        let _ = clear_transaction(ledger);
         let _ = note(audit, "update_failed", manifest.number, RESULT_ERROR).await;
         return Err(e);
     }
@@ -342,7 +372,7 @@ pub async fn apply(
         state.previous = None;
         save_state(ledger, &state)?;
         let _ = note(audit, "update_failed", manifest.number, RESULT_ERROR).await;
-        let _ = fs::remove_file(ledger.join("transaction"));
+        let _ = clear_transaction(ledger);
         return Err(e);
     }
     if let Err(e) = note(audit, "update_activate", manifest.number, RESULT_OK).await {
@@ -350,11 +380,10 @@ pub async fn apply(
         state.current = old;
         state.previous = None;
         save_state(ledger, &state)?;
-        let _ = fs::remove_file(ledger.join("transaction"));
+        let _ = clear_transaction(ledger);
         return Err(e);
     }
-    fs::remove_file(ledger.join("transaction"))?;
-    File::open(ledger)?.sync_all()?;
+    clear_transaction(ledger)?;
     Ok(())
 }
 
@@ -366,6 +395,7 @@ pub async fn recover(
     now: u64,
     audit: &crate::audit::AuditClient,
 ) -> Result<()> {
+    let _lock = lock_ledger(ledger)?;
     let tx = fs::read_to_string(ledger.join("transaction"))?;
     let f: Vec<_> = tx.split_whitespace().collect();
     if f.len() != 4 || f[0] != "YRL-UPDATE-TXN-1" {
@@ -373,11 +403,17 @@ pub async fn recover(
     };
     let n: u64 = f[1].parse()?;
     let old = unopt(f[2])?;
+    let mut state = load_state(ledger)?;
+    if n < state.max || now < state.time_floor {
+        bail!("interrupted release is behind the trusted release or time floor");
+    }
     let final_dir = release_dir(root, n);
     if !final_dir.exists() {
         let stage = root.join(format!(".staging-{n:020}"));
         if !stage.exists() {
-            bail!("interrupted update has neither staged nor published release")
+            note(audit, "update_failed", n, RESULT_ERROR).await?;
+            clear_transaction(ledger)?;
+            bail!("update interrupted before staging; active release unchanged")
         }
         let manifest = verify_staged(&stage, trust, now);
         match manifest {
@@ -392,8 +428,8 @@ pub async fn recover(
             _ => {
                 let quarantine = root.join(format!(".failed-{n:020}-{}", std::process::id()));
                 fs::rename(&stage, quarantine)?;
-                fs::remove_file(ledger.join("transaction"))?;
                 note(audit, "update_failed", n, RESULT_ERROR).await?;
+                clear_transaction(ledger)?;
                 bail!("incomplete staged release was quarantined")
             }
         }
@@ -406,15 +442,20 @@ pub async fn recover(
     }
     health(&final_dir, yrl_state)?;
     switch(root, Some(n))?;
-    let mut state = load_state(ledger)?;
     state.max = state.max.max(n);
     state.current = Some(n);
     state.previous = old;
     state.time_floor = state.time_floor.max(now);
     state.metadata_expiry = state.metadata_expiry.max(manifest.expires);
     save_state(ledger, &state)?;
-    note(audit, "update_activate", n, RESULT_OK).await?;
-    fs::remove_file(ledger.join("transaction"))?;
+    if let Err(error) = note(audit, "update_activate", n, RESULT_OK).await {
+        switch(root, old)?;
+        state.current = old;
+        state.previous = None;
+        save_state(ledger, &state)?;
+        return Err(error);
+    }
+    clear_transaction(ledger)?;
     Ok(())
 }
 
@@ -425,6 +466,10 @@ pub async fn rollback(
     yrl_state: &Path,
     audit: &crate::audit::AuditClient,
 ) -> Result<()> {
+    let _lock = lock_ledger(ledger)?;
+    if ledger.join("transaction").exists() {
+        bail!("an interrupted update exists; run yrl-update recover first");
+    }
     let mut state = load_state(ledger)?;
     let target = state
         .previous
@@ -475,5 +520,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("missing", d.path().join("state")).unwrap();
         assert!(load_state(d.path()).is_err());
+    }
+
+    #[test]
+    fn update_transactions_cannot_race_on_the_same_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = tmp.path().join("ledger");
+        let first = lock_ledger(&ledger).unwrap();
+        assert!(lock_ledger(&ledger).is_err());
+        drop(first);
+        lock_ledger(&ledger).unwrap();
     }
 }

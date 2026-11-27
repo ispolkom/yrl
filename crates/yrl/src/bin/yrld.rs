@@ -238,7 +238,16 @@ fn install_cmd(a: &[String]) -> anyhow::Result<()> {
         }
         Some("check") => {
             let dir = PathBuf::from(a.get(3).ok_or_else(|| anyhow::anyhow!("usage: yrld install check <state-dir> [run-dir]"))?);
-            let mut problems = check(&dir, &state_layout(), &SystemNames, true);
+            let mut layout = state_layout();
+            if a.get(5).is_some_and(|flag| flag == "--restricted-update-health") {
+                // The update unit first checks the complete installed layout.
+                // The candidate runs with no capabilities and cannot traverse
+                // role-private directories even as UID 0.
+                layout.retain(|item| !SIDES.iter().any(|(side, user)| {
+                    *user != "root" && item.path == format!("ipc/{side}/static.key")
+                }));
+            }
+            let mut problems = check(&dir, &layout, &SystemNames, true);
             problems.extend(check(&PathBuf::from(run(4)), &run_layout(), &SystemNames, false));
             for p in &problems {
                 println!("PROBLEM: {}", describe(p));
