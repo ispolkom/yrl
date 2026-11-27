@@ -20,6 +20,8 @@ Stage 8.2 focused transport suite: 91 tests passed across `routes`, `relay`, `re
 
 Stage 8.3 focused authority suite: 88 tests passed across IPC, revocation, Broker, step-up, SPA, threats and unit-policy tests. Real nft outer tests skipped their kernel checks because `nft` is absent; installed units are disabled and no YRL service processes were available for `/proc` inspection. Runtime isolation remains BLOCKED. 8.2 was published as `f530686`. Continue with 8.4 overload/crash checks and isolated runtime checks when prerequisites are available.
 
+Stage 8.4 focused tests: 35 passed in `resources`, `cli`, `audit_proc` and library tests, including disk ledger and operation-journal UNKNOWN cases. Kernel OOM, ENOSPC/EDQUOT, watchdog restart storms and neighbor isolation remain BLOCKED pending a disposable environment. 8.3 was published as `c304b7a`. Continue with 8.5 key/Audit/update lifecycle tests.
+
 ## Architecture at the baseline
 
 ```text
