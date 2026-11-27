@@ -114,15 +114,22 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
             visual(c).await?;
         }
         Some("elevate") => {
-            // yrl elevate <dir> <addr> <srv> <login> <sudo|root> <executor-key-hex> <op> [argument]
+            // The positional pin selects the step-up authority. ROOT also
+            // needs the independent Executor pin for the login channel.
             use yrl::stepup::{Level, Op};
             let level = match a.get(6).map(String::as_str) {
                 Some("sudo") => Level::Sudo,
                 Some("root") => Level::Root,
                 _ => anyhow::bail!("level: sudo or root"),
             };
-            let exec_pub = hex::decode(a.get(7).ok_or_else(|| anyhow::anyhow!("need the executor key"))?)?;
-            std::env::set_var("YRL_EXECUTOR_KEY", &a[7]);
+            let authority_key = a.get(7).ok_or_else(|| anyhow::anyhow!("need the step-up authority key"))?;
+            let authority_public = hex::decode(authority_key)?;
+            if std::env::var_os("YRL_EXECUTOR_KEY").is_none() {
+                if level == Level::Root {
+                    anyhow::bail!("ROOT step-up requires --executor for login and a separate Broker public key for approval");
+                }
+                std::env::set_var("YRL_EXECUTOR_KEY", authority_key);
+            }
             let arg = a.get(9).cloned().unwrap_or_default();
             let op = match a.get(8).map(String::as_str) {
                 Some("test") => Op::TestPrivileged(arg),
@@ -136,7 +143,9 @@ async fn run(a: &[String]) -> anyhow::Result<()> {
                 println!("{}",c.elevate_fido(level,&op,&device.to_string_lossy(),pin,Duration::from_secs(60)).await?);return Ok(())
             }
             let phrase = zeroize::Zeroizing::new(yrl::prompt::read_password(&format!("{} phrase: ", level.right()))?);
-            println!("{}", c.elevate(level, &op, &phrase, &exec_pub, Duration::from_secs(30)).await?);
+            let result = c.elevate(level, &op, &phrase, &authority_public, Duration::from_secs(30)).await;
+            c.close().await;
+            println!("{}", result?);
         }
         Some("enroll") => {
             // yrl enroll <dir> <addr> <srv-key> <name>: add THIS device (its key is in <dir>) to a server whose owner has opened a window

@@ -644,7 +644,11 @@ fn restore_owners(stage: &Path) -> Result<()> {
         }
         Ok(())
     }
-    extras(stage, stage, &layout)
+    extras(stage, stage, &layout)?;
+    if stage.join("users").exists() {
+        crate::users::publish_broker_policy(stage, crate::ipc::gid_of_group(crate::install::BROKER)?)?;
+    }
+    Ok(())
 }
 
 fn yrl_names_available() -> bool {

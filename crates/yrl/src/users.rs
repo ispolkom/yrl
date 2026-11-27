@@ -5,8 +5,93 @@ use anyhow::{bail, Context, Result};
 use argon2::password_hash::{rand_core::OsRng, rand_core::RngCore, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use std::fs;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
+use std::io::{Read, Write};
+
+pub const BROKER_POLICY: &str = "broker-accounts";
+const MAX_BROKER_POLICY: usize = 1024 * 1024;
+
+fn account_revision(meta: &fs::Metadata) -> String {
+    format!("{} {} {} {} {} {} {}", meta.dev(), meta.ino(), meta.len(),
+        meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec())
+}
+
+/// The owner publishes authorization data without password verifiers.
+/// Bind it to the installed accounts file so edits invalidate old grants.
+pub fn publish_broker_policy(dir: &Path, group: u32) -> Result<()> {
+    let source = dir.join("users");
+    let meta = fs::symlink_metadata(&source)?;
+    if !meta.is_file() || meta.nlink() != 1 || meta.uid() != 0 || meta.mode() & 0o077 != 0 {
+        bail!("unsafe source accounts file for Broker policy");
+    }
+    let revision = account_revision(&meta);
+    let mut body = format!("YRL-BROKER-ACCOUNTS-1 {revision}\n");
+    let mut seen = std::collections::HashSet::new();
+    for user in read_users(&source) {
+        if seen.insert(user.login.clone()) {
+            body.push_str(&user.login);
+            body.push(' ');
+            if user.rights.is_empty() {
+                body.push('-');
+            } else {
+                body.push_str(&user.rights.join(","));
+            }
+            body.push('\n');
+        }
+    }
+    if body.len() > MAX_BROKER_POLICY || account_revision(&fs::symlink_metadata(&source)?) != revision {
+        bail!("accounts changed during Broker policy publication or policy is oversized");
+    }
+    let temp = dir.join(format!(".broker-accounts-{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o640)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&temp)?;
+        if unsafe { libc::fchown(file.as_raw_fd(), 0, group) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o640))?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp, dir.join(BROKER_POLICY))?;
+        fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
+pub(crate) fn broker_policy_allows(dir: &Path, account: &str, wanted: &[String]) -> Result<bool> {
+    let file = fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(dir.join(BROKER_POLICY))?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 || meta.uid() != 0
+        || meta.mode() & 0o137 != 0 || meta.len() > MAX_BROKER_POLICY as u64
+    {
+        bail!("unsafe Broker accounts policy");
+    }
+    let mut text = String::new();
+    file.take(MAX_BROKER_POLICY as u64 + 1).read_to_string(&mut text)?;
+    if text.len() > MAX_BROKER_POLICY {
+        bail!("oversized Broker accounts policy");
+    }
+    let account_meta = fs::symlink_metadata(dir.join("users"))?;
+    let mut lines = text.lines();
+    let revision = account_revision(&account_meta);
+    Ok(account_meta.is_file() && account_meta.nlink() == 1 && account_meta.uid() == 0
+        && account_meta.mode() & 0o077 == 0
+        && lines.next().and_then(|line| line.strip_prefix("YRL-BROKER-ACCOUNTS-1 ")) == Some(revision.as_str())
+        && lines.filter_map(|line| line.split_once(' '))
+            .find(|(login, _)| *login == account)
+            .is_some_and(|(_, rights)| wanted.iter().all(|right| {
+                right != "-" && rights.split(',').any(|allowed| allowed == right)
+            })))
+}
 
 #[derive(Clone, Debug)]
 pub struct User {

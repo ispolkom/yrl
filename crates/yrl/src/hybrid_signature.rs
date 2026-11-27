@@ -93,6 +93,7 @@ pub(crate) fn handshake_keys(context: crate::crypto_profile::Context, local: &[u
     let variable = match context {
         Role::Gatekeeper => "YRL_HYBRID_GATE_KEYS",
         Role::Executor => "YRL_HYBRID_EXECUTOR_KEYS",
+        Role::Broker => "YRL_HYBRID_BROKER_KEYS",
         _ => bail!("no hybrid identity store for this context"),
     };
     let root = std::env::var_os(variable).ok_or_else(|| anyhow::anyhow!("hybrid handshake identity store missing"))?;

@@ -33,7 +33,8 @@ fn i1_the_table_says_what_it_should_about_secrets() {
     let l = state_layout();
     // only these files may be read by any group, and only by the group named
     let group_readable: BTreeSet<(String, &str)> = l.iter().filter(|i| i.kind == Kind::File && i.mode & 0o040 != 0 && !i.path.ends_with(".pub")).map(|i| (i.path.clone(), i.group)).collect();
-    let want: BTreeSet<(String, &str)> = [("authorized_keys", G_CONF), ("words.root", "yrl-broker")].iter().map(|(p, g)| (p.to_string(), *g)).collect();
+    let want: BTreeSet<(String, &str)> = [("authorized_keys", G_CONF), ("words.root", "yrl-broker"), (yrl::users::BROKER_POLICY, BROKER)].iter().map(|(p, g)| (p.to_string(), *g)).collect();
+    assert_eq!(find(&l, "users").mode, 0o600);
     assert_eq!(group_readable, want, "which files a group may read");
     // nothing is open to everybody except the public keys
     let everyone: BTreeSet<String> = l.iter().filter(|i| i.kind == Kind::File && i.mode & 0o004 != 0).map(|i| i.path.clone()).collect();

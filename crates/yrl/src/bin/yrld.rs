@@ -31,7 +31,11 @@ async fn main() {
             pw.and_then(|pw| {
                 let dir = PathBuf::from(&a[2]);
                 let _key_guard = yrl::keylife::service_guard(&dir)?;
-                yrl::users::set_user_os(&dir.join("users"), &a[3], &a[4], a.get(5).map(String::as_str), &pw)
+                yrl::users::set_user_os(&dir.join("users"), &a[3], &a[4], a.get(5).map(String::as_str), &pw)?;
+                if dir.join(yrl::users::BROKER_POLICY).exists() {
+                    yrl::users::publish_broker_policy(&dir, yrl::ipc::gid_of_group(yrl::install::BROKER)?)?;
+                }
+                Ok(())
             }).map(|_| println!("account saved"))
         }
         #[cfg(feature = "opaque-rfc9807")]
@@ -228,6 +232,9 @@ fn install_cmd(a: &[String]) -> anyhow::Result<()> {
         Some("layout") => {
             let dir = PathBuf::from(a.get(3).ok_or_else(|| anyhow::anyhow!("usage: yrld install layout <state-dir> [run-dir]"))?);
             let mut missing = apply(&dir, &state_layout(), &SystemNames)?;
+            if dir.join("users").exists() {
+                yrl::users::publish_broker_policy(&dir, yrl::ipc::gid_of_group(BROKER)?)?;
+            }
             let run = PathBuf::from(run(4));
             std::fs::create_dir_all(&run)?;
             missing.extend(apply(&run, &run_layout(), &SystemNames)?);

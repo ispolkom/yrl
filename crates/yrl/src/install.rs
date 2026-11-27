@@ -26,7 +26,7 @@ pub const MEMBERS: &[(&str, &[&str])] = &[
     (GATE, &[G_CONF, G_TO_AUDIT, G_TO_EXEC, G_TO_FW]),
     (FW, &[G_TO_AUDIT, G_TO_FW]),
     (AUDIT, &[G_TO_AUDIT]),
-    (BROKER, &[G_TO_AUDIT, G_TO_BROKER]),
+    (BROKER, &[G_CONF, G_TO_AUDIT, G_TO_BROKER]),
     (EXEC, &[G_CONF, G_TO_AUDIT, G_TO_BROKER, G_TO_EXEC]),
 ];
 
@@ -66,6 +66,7 @@ pub fn state_layout() -> Vec<Item> {
         it("static.key", File, GATE, GATE, 0o600, true, "the server's identity: the gatekeeper alone"),
         it("authorized_keys", File, "root", G_CONF, 0o640, true, "the devices that may come in: read by the gatekeeper and the executor, written by the owner"),
         it("users", File, EXEC, "root", 0o600, true, "accounts and password verifiers: read by the executor alone, written by the owner"),
+        it(crate::users::BROKER_POLICY, File, "root", BROKER, 0o640, false, "credential-free ROOT account policy"),
         it("tunnels", File, EXEC, "root", 0o600, false, "which destinations tunnels may reach: read by the executor alone"),
         it("words", File, EXEC, "root", 0o600, false, "SUDO phrase verifiers: the executor alone"),
         it("words.root", File, "root", "yrl-broker", 0o640, false, "ROOT phrase verifiers: the broker alone"),

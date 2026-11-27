@@ -39,3 +39,7 @@ Unsigned `install.sh update` replacement is disabled. After bootstrap, install `
 - Real-machine SUDO and ROOT step-up (phrases and broker). The broker currently supports only test operations; real privileged operations require separate design and implementation.
 - A second clean installation from scratch; the script has been exercised once.
 - UDP, TCP and Relay are implemented, but their current installed-host Stage 8 acceptance is pending (`STAGE8_ACCEPTANCE.md`).
+
+### Broker account policy
+
+The installed Broker uses a root-owned `broker-accounts` file containing account names and rights. The login verifier file `users` remains private to Executor. The Broker checks the account policy revision against the filesystem metadata of `users` and separately checks the device's rights. Run `install.sh fix` when deploying the updated Broker unit or after a manual edit of `users`. The `yrld passwd` command refreshes an existing policy. A missing or stale policy denies Broker requests until the owner publishes the current revision.

@@ -134,6 +134,46 @@ pub fn prologue(request_id: u64, level: Level, op: &Op, executor_public: &[u8]) 
     p
 }
 
+#[cfg(feature = "hybrid-signatures")]
+pub(crate) fn proof_context(level: Level) -> crate::crypto_profile::Context {
+    match level {
+        Level::Sudo => crate::crypto_profile::Context::Executor,
+        Level::Root => crate::crypto_profile::Context::Broker,
+    }
+}
+
+pub(crate) fn hybrid_required(level: Level) -> bool {
+    let setting = match level {
+        Level::Sudo => "YRL_HYBRID_EXECUTOR_KEYS",
+        Level::Root => "YRL_HYBRID_BROKER_KEYS",
+    };
+    std::env::var_os(setting).is_some()
+}
+
+pub(crate) fn proof_prologue(request_id: u64, level: Level, op: &Op, public: &[u8], hybrid: bool) -> Vec<u8> {
+    let mut p = prologue(request_id, level, op, public);
+    if hybrid {
+        p.extend_from_slice(b"\0YRL Ed25519 ML-DSA step-up 1");
+    }
+    p
+}
+
+#[cfg(feature = "hybrid-signatures")]
+pub(crate) fn hybrid_stepup_body(level: Level, handshake_hash: &[u8], device: &[u8], authority: &[u8], signer: u8) -> Vec<u8> {
+    let mut bytes = b"YRL hybrid step-up proof v1\0".to_vec();
+    bytes.extend_from_slice(&crate::hybrid_signature::PROFILE.to_be_bytes());
+    bytes.push(proof_context(level) as u8);
+    bytes.push(signer);
+    bytes.extend_from_slice(handshake_hash);
+    bytes.extend_from_slice(device);
+    bytes.extend_from_slice(authority);
+    bytes
+}
+
+pub(crate) fn proof_buffer(hybrid: bool) -> usize {
+    if hybrid { 4096 } else { 512 }
+}
+
 /// BEGIN: `[request_id u64][level u8][op_len u16][op][noise message 1]`, exact
 pub fn encode_begin(request_id: u64, level: Level, op: &Op, msg1: &[u8]) -> Vec<u8> {
     let o = op.encode();
@@ -170,10 +210,15 @@ pub fn encode_msg(request_id: u64, msg: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_msg(b: &[u8]) -> Result<(u64, &[u8]), WireError> {
+    decode_proof_msg(b, false)
+}
+
+pub(crate) fn decode_proof_msg(b: &[u8], hybrid: bool) -> Result<(u64, &[u8]), WireError> {
     if b.len() < 9 {
         return Err(WireError::Short);
     }
-    if b.len() > 8 + 400 {
+    let max = if hybrid { proof_buffer(true) } else { 400 };
+    if b.len() > 8 + max {
         return Err(WireError::TooLarge);
     }
     Ok((u64::from_be_bytes(b[..8].try_into().unwrap()), &b[8..]))
@@ -598,6 +643,8 @@ pub struct Pending {
     level: Level,
     op: Op,
     born: Instant,
+    #[cfg(feature = "hybrid-signatures")]
+    hybrid_peer: Option<crate::hybrid_signature::PublicKey>,
 }
 
 /// everything one side of a step-up needs to know about the session it serves
@@ -881,23 +928,49 @@ impl StepServer {
                 return Ok(reply(R_DENIED));
             }
         }
-        let built = snow::Builder::new(NOISE_XK.parse().expect("params"))
-            .local_private_key(&ctx.my_key.private)
-            .prologue(&prologue(rid, level, &op, &ctx.my_key.public))
-            .build_responder();
-        let (Ok(mut hs), mut buf, mut out) = (built, vec![0u8; 512], vec![0u8; 512]) else {
-            return Ok(reply(R_DENIED));
-        };
-        if hs.read_message(&msg1, &mut buf).is_err() {
+        let hybrid = hybrid_required(level);
+        if hybrid && !cfg!(feature = "hybrid-signatures") {
             return Ok(reply(R_DENIED));
         }
-        let Ok(n) = hs.write_message(&[], &mut out) else { return Ok(reply(R_DENIED)) };
-        self.pending.insert(rid, Pending { hs, level, op, born: Instant::now() });
+        let built = snow::Builder::new(NOISE_XK.parse().expect("params"))
+            .local_private_key(&ctx.my_key.private)
+            .prologue(&proof_prologue(rid, level, &op, &ctx.my_key.public, hybrid))
+            .build_responder();
+        let (Ok(mut hs), mut buf, mut out) = (built, vec![0u8; 512], vec![0u8; proof_buffer(hybrid)]) else {
+            return Ok(reply(R_DENIED));
+        };
+        if !matches!(hs.read_message(&msg1, &mut buf), Ok(0)) {
+            return Ok(reply(R_DENIED));
+        }
+        #[cfg(feature = "hybrid-signatures")]
+        let (proof, hybrid_peer) = if hybrid {
+            let Ok((own, peer)) = crate::hybrid_signature::handshake_keys(proof_context(level), &ctx.my_key.public, ctx.device_key) else {
+                return Ok(reply(R_DENIED));
+            };
+            let body = hybrid_stepup_body(level, hs.get_handshake_hash(), ctx.device_key, &ctx.my_key.public, b'R');
+            let Ok(proof) = own.sign(&body) else { return Ok(reply(R_DENIED)); };
+            (proof.encode(), Some(peer))
+        } else { (Vec::new(), None) };
+        #[cfg(not(feature = "hybrid-signatures"))]
+        let proof = [];
+        let Ok(n) = hs.write_message(&proof, &mut out) else { return Ok(reply(R_DENIED)) };
+        self.pending.insert(rid, Pending {
+            hs, level, op, born: Instant::now(),
+            #[cfg(feature = "hybrid-signatures")]
+            hybrid_peer,
+        });
         Ok(vec![frame(STEPUP_CHALLENGE, encode_msg(rid, &out[..n]))])
     }
 
     pub async fn proof(&mut self, payload: &[u8], ctx: &Ctx<'_>) -> Result<Vec<crate::wire::Frame>, ()> {
-        let (rid, msg3) = decode_msg(payload).map_err(|_| ())?;
+        #[cfg(feature = "hybrid-signatures")]
+        let hybrid = payload.get(..8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .and_then(|bytes| self.pending.get(&u64::from_be_bytes(bytes)))
+            .is_some_and(|pending| pending.hybrid_peer.is_some());
+        #[cfg(not(feature = "hybrid-signatures"))]
+        let hybrid = false;
+        let (rid, msg3) = decode_proof_msg(payload, hybrid).map_err(|_| ())?;
         let reply = |status: u8, text: &str| vec![frame(STEPUP_RESULT, encode_result(rid, status, text))];
         // one attempt per challenge: whatever happens next, this one is used up
         let Some(mut p) = self.pending.remove(&rid) else {
@@ -909,12 +982,28 @@ impl StepServer {
             ctx.report(ctx.event(p.level, crate::auditlog::RESULT_DENIED, rid).target("expired"));
             return Ok(reply(R_EXPIRED, ""));
         }
-        let mut phrase = vec![0u8; 512];
+        #[cfg(feature = "hybrid-signatures")]
+        let hybrid_body = p.hybrid_peer.as_ref().map(|_| {
+            hybrid_stepup_body(p.level, p.hs.get_handshake_hash(), ctx.device_key, &ctx.my_key.public, b'I')
+        });
+        let mut phrase = zeroize::Zeroizing::new(vec![0u8; proof_buffer(hybrid)]);
         let Ok(n) = p.hs.read_message(msg3, &mut phrase) else {
             // not authenticated: whoever sent this did not hold a device key, so no key is blamed for it
             return Ok(reply(R_DENIED, ""));
         };
         phrase.truncate(n);
+        #[cfg(feature = "hybrid-signatures")]
+        if let Some((pin, body)) = p.hybrid_peer.as_ref().zip(hybrid_body) {
+            use crate::hybrid_signature::{SignatureEnvelope, ENVELOPE_LEN};
+            if phrase.len() <= ENVELOPE_LEN {
+                return Ok(reply(R_DENIED, ""));
+            }
+            let boundary = phrase.len() - ENVELOPE_LEN;
+            if SignatureEnvelope::decode(&phrase[boundary..]).and_then(|sig| pin.verify(&body, &sig)).is_err() {
+                return Ok(reply(R_DENIED, ""));
+            }
+            phrase.truncate(boundary);
+        }
         let device = p.hs.get_remote_static().map(|k| k.to_vec()).unwrap_or_default();
         if device != ctx.device_key || phrase.is_empty() || phrase.len() > MAX_PHRASE {
             // the device key that took part is not the key of this session: nobody in between can make one up

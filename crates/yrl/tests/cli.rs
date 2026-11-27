@@ -21,6 +21,17 @@ fn c1_a_command_that_logs_in_but_has_no_login_explains_instead_of_panicking() {
     assert!(!ok && text.contains("usage: yrl keygen") && text.contains("ping <dir> <host:port> <server-public-hex> <login>"), "{text}");
 }
 
+#[test]
+fn root_stepup_requires_a_separate_login_pin() {
+    let key = "ab".repeat(32);
+    let output = Command::new(YRL)
+        .env_remove("YRL_EXECUTOR_KEY")
+        .args(["elevate", "unused", "127.0.0.1:1", &key, "anna", "root", &key, "restart", "test"])
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ROOT step-up requires --executor"));
+}
+
 mod common;
 
 #[tokio::test]

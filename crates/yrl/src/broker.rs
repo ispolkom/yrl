@@ -10,6 +10,16 @@ use crate::stepup::{self, StepServer};
 use crate::wire::Frame;
 use std::sync::Arc;
 use std::time::Duration;
+
+fn broker_authorized(dir: &std::path::Path, key: &[u8], account: &str, wanted: &[String]) -> bool {
+    if std::env::var_os("YRL_BROKER_POLICY").is_none() {
+        return rights_for(dir, key, account, wanted).is_some();
+    }
+    crate::users::broker_policy_allows(dir, account, wanted).unwrap_or(false)
+        && crate::keys::read_authorized(&dir.join("authorized_keys")).iter()
+            .find(|device| device.public == key)
+            .is_some_and(|device| wanted.iter().all(|right| device.rights.contains(right)))
+}
 use tokio::net::{UnixListener, UnixStream};
 
 pub const IPC_LIMITS: AdmissionLimits = AdmissionLimits { handshakes: 16, handshakes_per_peer: 8, active: 256, active_per_principal: 256 };
@@ -62,7 +72,8 @@ async fn handle(mut stream: UnixStream, peer: Peer, handshake: IpcPermit, admiss
         return;
     }
     // the broker checks the account files for itself: the executor's word alone is not enough
-    let verified = decode_open(&open.payload).ok().and_then(|(key, account, wanted)| rights_for(&cfg.dir, &key, &account, &wanted).map(|(rights, _)| (key, account, rights)));
+    let verified = decode_open(&open.payload).ok().filter(|(key, account, wanted)|
+        broker_authorized(&cfg.dir, key, account, wanted));
     let Some((key, account, rights)) = verified else {
         cfg.log("broker: request refused: more than the account and the key allow".into());
         if let Ok(m) = sec.seal(&Frame::new(IPC_REFUSED, 0, vec![])) {
@@ -80,6 +91,9 @@ async fn handle(mut stream: UnixStream, peer: Peer, handshake: IpcPermit, admiss
     let mut server = StepServer::default();
     while let Ok(Ok(msg)) = tokio::time::timeout(IPC_IDLE_TIMEOUT, read_msg(&mut rd)).await {
         let Ok(f) = sec.open(&msg) else { break };
+        if !broker_authorized(&cfg.dir, &key, &account, &rights) {
+            break;
+        }
         let ctx = stepup::Ctx { dir: &cfg.dir, lockouts: &cfg.root_lockouts, my_key: &ipc.key, session_rights: &rights, device_key: &key, session_no, label: "broker", serves: &[stepup::Level::Root], log: &|l| cfg.log(l), audit: cfg.audit.broker.as_ref(), account: &account };
         let out = match f.kind {
             stepup::STEPUP_BEGIN => server.begin(&f.payload, &ctx),

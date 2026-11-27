@@ -11,8 +11,9 @@ NotifyAccess=main
 WatchdogSec=30s
 User=yrl-broker
 Group=yrl-broker
-SupplementaryGroups=yrl-to-audit yrl-to-broker
+SupplementaryGroups=yrl-conf yrl-to-audit yrl-to-broker
 Environment=YRL_RUN=/run/yrl
+Environment=YRL_BROKER_POLICY=required
 Environment=YRL_SOCKET_GROUP=yrl-to-broker
 ExecStart=/opt/yrl/current/yrld broker /var/lib/yrl --exec-uid root --exec-exe -
 Restart=on-failure

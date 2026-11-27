@@ -1348,18 +1348,28 @@ impl Client {
         let (tx, mut rx) = mpsc::channel(8);
         self.waiting.lock().await.insert(id, tx);
         let r = async {
+            let hybrid = hybrid_required(level);
+            if hybrid && !cfg!(feature = "hybrid-signatures") {
+                bail!("hybrid step-up is unavailable");
+            }
+            #[cfg(feature = "hybrid-signatures")]
+            let keys = if hybrid {
+                Some(crate::hybrid_signature::handshake_keys(
+                    proof_context(level), &self.ident.me.public, executor_public,
+                )?)
+            } else { None };
             let mut hs = snow::Builder::new(NOISE_XK.parse()?)
                 .local_private_key(&self.ident.me.private)
                 .remote_public_key(executor_public)
-                .prologue(&prologue(id, level, op, executor_public))
+                .prologue(&proof_prologue(id, level, op, executor_public, hybrid))
                 .build_initiator()?;
-            let mut buf = vec![0u8; 512];
+            let mut buf = vec![0u8; proof_buffer(hybrid)];
             let n = hs.write_message(&[], &mut buf)?;
             self.send(&Frame::new(STEPUP_BEGIN, 0, encode_begin(id, level, op, &buf[..n]))).await?;
             let msg2 = loop {
                 match tokio::time::timeout(wait, rx.recv()).await {
                     Ok(Some(f)) if f.kind == wire::OP_ACCEPTED => continue,
-                    Ok(Some(f)) if f.kind == STEPUP_CHALLENGE => break decode_msg(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?.1.to_vec(),
+                    Ok(Some(f)) if f.kind == STEPUP_CHALLENGE => break decode_proof_msg(&f.payload, hybrid).map_err(|e| anyhow::anyhow!("{e:?}"))?.1.to_vec(),
                     Ok(Some(f)) if f.kind == STEPUP_RESULT => {
                         let (_, st, _) = decode_result(&f.payload).map_err(|e| anyhow::anyhow!("{e:?}"))?;
                         bail!("{}", result_text(st));
@@ -1369,9 +1379,26 @@ impl Client {
                     _ => bail!("no answer to the step-up request"),
                 }
             };
-            let mut scratch = vec![0u8; 512];
-            hs.read_message(&msg2, &mut scratch)?; // the executor proves its key here: a different one fails
-            let n = hs.write_message(phrase, &mut buf)?;
+            #[cfg(feature = "hybrid-signatures")]
+            let body = keys.as_ref().map(|_| hybrid_stepup_body(
+                level, hs.get_handshake_hash(), &self.ident.me.public, executor_public, b'R',
+            ));
+            let mut scratch = vec![0u8; proof_buffer(hybrid)];
+            let size = hs.read_message(&msg2, &mut scratch)?;
+            let mut payload = zeroize::Zeroizing::new(phrase.to_vec());
+            #[cfg(feature = "hybrid-signatures")]
+            if let Some(((own, pin), body)) = keys.zip(body) {
+                let proof = crate::hybrid_signature::SignatureEnvelope::decode(&scratch[..size])?;
+                pin.verify(&body, &proof)?;
+                payload.extend_from_slice(&own.sign(&hybrid_stepup_body(
+                    level, hs.get_handshake_hash(), &self.ident.me.public, executor_public, b'I',
+                ))?.encode());
+            } else if size != 0 {
+                bail!("unexpected classical step-up payload");
+            }
+            #[cfg(not(feature = "hybrid-signatures"))]
+            if size != 0 { bail!("unexpected classical step-up payload"); }
+            let n = hs.write_message(&payload, &mut buf)?;
             self.send(&Frame::new(STEPUP_PROOF, 0, encode_msg(id, &buf[..n]))).await?;
             match tokio::time::timeout(wait, rx.recv()).await {
                 Ok(Some(f)) if f.kind == STEPUP_RESULT => {
