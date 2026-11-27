@@ -154,7 +154,7 @@ Security rules are also checked with targeted source mutants listed under `tools
 - UDP lacks NAT hole punching, UDP relay, path-MTU discovery, in-place address migration, and pacing. Automatic failover uses a fresh Noise-authenticated connection and RESUME; it does not race or score routes.
 - Sessions survive connection loss but not an `yrld` restart; active session state is currently in memory.
 - Stage 7 cryptographic profiles, hybrid ML-KEM transport/signatures, OPAQUE and FIDO2 are default-off and await Stage 8 interoperability, hardware and performance acceptance.
-- TPM-backed key handling and second-device approval remain planned hardening steps.
+- Optional TPM2-TSS key sealing/native P-256 support is default-off and awaits Stage 8 simulator/hardware acceptance; second-device approval remains planned.
 - Metadata such as IP addresses, timing, and traffic volume remains visible to the network or relay.
 
 Do not treat a secret port, SPA, or an untrusted relay as authentication. Device keys, passwords, explicit rights, and end-to-end cryptography remain mandatory.

@@ -13,15 +13,7 @@ async fn main() {
     }
     let a: Vec<String> = std::env::args().collect();
     let r = match a.get(1).map(String::as_str) {
-        Some("init") => keys::init(&PathBuf::from(&a[2])).and_then(|k| {
-            yrl::ipc::init_keys(&PathBuf::from(&a[2]))?; // the keys of the local door between the gatekeeper and the executor
-            println!("server public key (give it to the client): {}", hex::encode(&k.public));
-            let e = std::fs::read_to_string(PathBuf::from(&a[2]).join("ipc/executor.pub"))?;
-            println!("executor public key (pin it on every client for the end-to-end channel): {}", e.trim());
-            let b = std::fs::read_to_string(PathBuf::from(&a[2]).join("ipc/broker.pub"))?;
-            println!("broker public key (give it to the client for ROOT step-up): {}", b.trim());
-            Ok(())
-        }),
+        Some("init") => server_init(&PathBuf::from(&a[2])),
         Some("authorize") => {
             let dir = PathBuf::from(&a[2]);
             yrl::keylife::service_guard(&dir).and_then(|_key_guard| keys::authorize(&dir.join("authorized_keys"), &a[3], &a[4], &a[5]).map(|_| println!("authorized")))
@@ -55,6 +47,16 @@ async fn main() {
         Some("fido-revoke") if a.len()==4 => fido_revoke(&a[2],&a[3],false).await,
         #[cfg(feature = "fido2")]
         Some("fido-revoke-root") if a.len()==4 => fido_revoke(&a[2],&a[3],true).await,
+        #[cfg(feature = "tpm2")]
+        Some("tpm-provision-counter") if a.len()==2 => (|| -> anyhow::Result<()> {let mut b=yrl::tpm::Backend::connect(yrl::tpm::Policy::from_env()?)?;let n=b.provision_counter()?;println!("TPM NV generation: {n}");Ok(())})(),
+        #[cfg(feature = "tpm2")]
+        Some("tpm-seal-key") if a.len()==3 => yrl::tpm::migrate_noise_key(&PathBuf::from(&a[2])).map(|_|println!("Noise key migrated to TPM-sealed storage")),
+        #[cfg(feature = "tpm2")]
+        Some("tpm-rotate-key") if a.len()==3 => yrl::tpm::rotate_noise_key(&PathBuf::from(&a[2])).map(|p|println!("rotated TPM-backed Noise public key: {}",hex::encode(p))),
+        #[cfg(feature = "tpm2")]
+        Some("tpm-generation") if a.len()==2 => (|| -> anyhow::Result<()> {let mut b=yrl::tpm::Backend::connect(yrl::tpm::Policy::from_env()?)?;println!("{}",b.current_generation()?);Ok(())})(),
+        #[cfg(feature = "tpm2")]
+        Some("tpm-recovery-export") if a.len()==5 => yrl::tpm::recovery_export(&PathBuf::from(&a[2]),&a[3],&PathBuf::from(&a[4])).map(|_|println!("TPM secret exported for explicit recovery")),
         Some("word") => word_set(&a).await,
         Some("unlock") => unlock(&a).await,
         Some("enroll") if a.get(2).map(String::as_str) == Some("enable") => enroll_enable(&a[3], &a).await,
@@ -78,6 +80,21 @@ async fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn server_init(dir: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(feature = "tpm2")]
+    if yrl::tpm::Policy::from_env()?.requirement == yrl::tpm::Requirement::Required {
+        anyhow::bail!("initialize the server with TPM policy off, retain the encrypted Stage 4 recovery package, then migrate each service key with its own NV index")
+    }
+    let k=keys::init(dir)?;
+    yrl::ipc::init_keys(dir)?;
+    println!("server public key (give it to the client): {}",hex::encode(&k.public));
+    let e=std::fs::read_to_string(dir.join("ipc/executor.pub"))?;
+    println!("executor public key (pin it on every client for the end-to-end channel): {}",e.trim());
+    let b=std::fs::read_to_string(dir.join("ipc/broker.pub"))?;
+    println!("broker public key (give it to the client for ROOT step-up): {}",b.trim());
+    Ok(())
 }
 
 #[cfg(feature = "fido2")]

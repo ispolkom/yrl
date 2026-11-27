@@ -13,7 +13,7 @@ This file distinguishes the **accepted implementation-stage sequence** from the 
 | **4. Key and secret lifecycle** | Protect role-private key files, clear secret buffers, support unattended services, offline encrypted recovery, safe Noise-key rotation, device revocation and protected migration. | Implemented in **`f69e4b7`**; deployment acceptance and the Audit journal-signing rollover limit are in `STAGE4_ACCEPTANCE.md`. |
 | **5. Failure and overload resilience** | Find and remove failure modes exposed by sustained load, repeated disconnects and bounded-resource operation without weakening authentication, cryptography or delivery guarantees. | In progress. The initial correction and substages 5.1–5.6 are implemented, including bounded admission, containment and explicit crash-recovery semantics. Final integration and deployment acceptance remain pending. |
 | **6. Trusted audit and software delivery** | Rotated and independently verifiable Audit history, signing-key lifecycle, signed releases and downgrade-safe updates. | Implemented through substages 6.1–6.6. Focused tests are prepared and compilation/unit policy verification pass; comprehensive and installed-host acceptance remain Stage 8. |
-| **7. Extended cryptographic protection** | Versioned profiles, hybrid post-quantum transport/signatures, OPAQUE, FIDO2 and optional TPM-backed key handling. | In progress. Substages 7.1–7.5 are implemented behind default-off feature gates; none is enabled in production before Stage 8 acceptance. |
+| **7. Extended cryptographic protection** | Versioned profiles, hybrid post-quantum transport/signatures, OPAQUE, FIDO2 and optional TPM-backed key handling. | Implemented through 7.1–7.6 behind default-off feature gates. Production activation, vectors, hardware and interoperability acceptance remain Stage 8. |
 
 ## Current Stage 7: extended cryptographic protection
 
@@ -51,9 +51,9 @@ Persistent bounded one-use challenges bind account, device key, role/channel and
 
 ### Substage 7.6: TPM 2.0 key protection
 
-Blocked at the standard backend and hardware-lifecycle acceptance boundary. Current `tss-esapi` head is alpha, and this host has neither TPM2-TSS development libraries nor swtpm. Adding a feature that cannot compile or be exercised would violate the required feature matrix. No TPM, PCR, NV or firmware state was touched.
+Implemented behind the default-off `tpm2` feature using stable `tss-esapi` 7.7 and TPM2-TSS. `device`, `swtpm` and other standard TCTIs are selected explicitly. YRL can seal arbitrary bounded software secrets with a TPM-protected XChaCha20-Poly1305 wrapping key, load Noise keys through that backend, and generate/sign with TPM-native non-exportable P-256 keys for explicitly compatible purposes. Sealed X25519, Ed25519, ML-KEM and ML-DSA material is still software cryptography after unseal and is never labelled hardware execution.
 
-The compile-only `tpm2` feature always fails closed and cannot fall back to software storage. Documentation distinguishes TPM-native non-exportable operations from sealing software X25519/Ed25519/ML-KEM/ML-DSA secrets. `docs/CRYPTOGRAPHY.md` records PCR-update, anti-rollback, timeout, rotation, revocation, swtpm and hardware-replacement recovery requirements. Software-only YRL remains unchanged.
+Optional PCR binding is exact and fail-closed. Required policy also requires a dedicated owner-authorized TPM NV counter; blob generations must match it, and planned Noise-key rotation uses a durable pending blob before incrementing the counter so startup can finish an interrupted commit without rollback. Required policy never uses a plaintext key when the TPM/blob/PCR/counter is unavailable. Explicit migration and recovery-export commands, per-role NV-index requirements and motherboard/TPM/OS replacement procedures are documented. Software-only operation remains unchanged when policy is off. swtpm and physical-hardware tests are prepared but intentionally deferred to Stage 8; no TPM, PCR, NV or firmware state on this host was touched.
 
 ## Current Stage 5: Failure and overload resilience
 

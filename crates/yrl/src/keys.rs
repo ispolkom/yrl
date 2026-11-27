@@ -41,7 +41,11 @@ pub fn key_path(dir: &Path) -> PathBuf {
 pub fn init(dir: &Path) -> Result<KeyPair> {
     ensure_private_dir(dir)?;
     let path = key_path(dir);
-    if path.exists() {
+    #[cfg(feature = "tpm2")]
+    let tpm_path = crate::tpm::blob_path(&path);
+    #[cfg(not(feature = "tpm2"))]
+    let tpm_path = path.with_extension("key.tpm");
+    if path.exists() || tpm_path.exists() {
         bail!("{} already exists: not replacing an identity", path.display());
     }
     let kp = generate();
@@ -49,9 +53,17 @@ pub fn init(dir: &Path) -> Result<KeyPair> {
     body.push('\n');
     body.push_str(&hex::encode(&kp.public));
     body.push('\n');
+    #[cfg(feature = "tpm2")]
+    if crate::tpm::Policy::from_env()?.requirement == crate::tpm::Requirement::Required {
+        let policy = crate::tpm::Policy::from_env()?;
+        let mut backend = crate::tpm::Backend::connect(policy)?;
+        let generation = backend.current_generation()?;
+        let blob = backend.seal("noise-static", generation, body.as_bytes())?;
+        crate::tpm::write_blob(&tpm_path, &blob)?;
+        return Ok(kp);
+    }
     let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&path)?;
-    std::io::Write::write_all(&mut f, body.as_bytes())?;
-    f.sync_all()?;
+    std::io::Write::write_all(&mut f, body.as_bytes())?; f.sync_all()?;
     Ok(kp)
 }
 
@@ -84,6 +96,20 @@ pub fn read_secret_hex(path: &Path, length: usize) -> Result<Zeroizing<Vec<u8>>>
 
 fn parse_key_file(path: &Path) -> Result<KeyPair> {
     use std::io::Read;
+    #[cfg(feature = "tpm2")]
+    {
+        let policy = crate::tpm::Policy::from_env()?;
+        let blob_path = crate::tpm::blob_path(path);
+        crate::tpm::recover_pending(&blob_path, &policy)?;
+        if blob_path.exists() {
+            if policy.requirement == crate::tpm::Requirement::Off { bail!("TPM key exists but TPM policy is disabled") }
+            let blob = crate::tpm::read_blob(&blob_path)?;
+            let mut backend = crate::tpm::Backend::connect(policy)?;
+            let clear = backend.unseal("noise-static", &blob)?;
+            return parse_key_bytes(&clear);
+        }
+        if policy.requirement == crate::tpm::Requirement::Required { bail!("required TPM key is missing") }
+    }
     let mut f = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
     let m = f.metadata()?;
     if !m.file_type().is_file() || m.nlink() != 1 || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 || m.len() > 256 {
@@ -91,6 +117,11 @@ fn parse_key_file(path: &Path) -> Result<KeyPair> {
     }
     let mut text = Zeroizing::new(String::new());
     f.read_to_string(&mut text)?;
+    parse_key_bytes(text.as_bytes())
+}
+
+fn parse_key_bytes(bytes: &[u8]) -> Result<KeyPair> {
+    let text = std::str::from_utf8(bytes).context("key file is not UTF-8")?;
     let mut lines = text.lines();
     let private = Zeroizing::new(hex::decode(lines.next().context("empty key file")?.trim())?);
     let public = hex::decode(lines.next().context("key file has no public key")?.trim())?;
@@ -112,12 +143,16 @@ pub fn load_shared(dir: &Path) -> Result<KeyPair> {
     if !dm.file_type().is_dir() || dm.mode() & 0o022 != 0 {
         bail!("directory {} is writable by others (mode {:o}); refusing to use a key in it", dir.display(), dm.mode() & 0o777);
     }
-    let m = fs::symlink_metadata(&path).with_context(|| format!("no key at {}", path.display()))?;
+    #[cfg(feature = "tpm2")]
+    let checked_path = { let sealed=crate::tpm::blob_path(&path); if sealed.exists(){sealed}else{path.clone()} };
+    #[cfg(not(feature = "tpm2"))]
+    let checked_path = path.clone();
+    let m = fs::symlink_metadata(&checked_path).with_context(|| format!("no key at {}", checked_path.display()))?;
     if m.mode() & 0o077 != 0 {
-        bail!("private key {} has mode {:o}; it must not be accessible by others", path.display(), m.mode() & 0o777);
+        bail!("private key {} has mode {:o}; it must not be accessible by others", checked_path.display(), m.mode() & 0o777);
     }
     if m.uid() != unsafe { libc::geteuid() } {
-        bail!("private key {} belongs to another user", path.display());
+        bail!("private key {} belongs to another user", checked_path.display());
     }
     parse_key_file(&path)
 }

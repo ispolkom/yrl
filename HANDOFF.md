@@ -45,7 +45,7 @@ Key code: `client.rs` (route manager), `link.rs` (SEQ/ACK, bounded buffers, prio
 | 4 — key and secret lifecycle | Implemented in **`f69e4b7`**. Private-file checks, zeroizing buffers, separated role keys, offline encrypted recovery, Noise-key rotation, device revocation and migration. Services start without an interactive unlock. | `tests/keylife.rs`, `STAGE4_ACCEPTANCE.md`. Audit journal-signing-key rollover is not implemented. |
 | 5 — failure and overload resilience | In progress. Throughput/liveness correction and substages 5.1–5.6 are implemented: hierarchical budgets, containment, bounded IPC, network/disk admission and explicit crash/restart semantics. | Focused tests are prepared but intentionally not run. Final workspace and installed-host acceptance are pending. |
 | 6 — trusted audit and software delivery | Implemented through 6.1–6.6: signed segment rotation/retention, rollback anchors, offline verification/export, Audit key generations, offline-rooted releases and transactional downgrade-safe activation. | Focused tests compile but were intentionally not run. Real signed publication, service activation/recovery and final integration acceptance remain Stage 8. |
-| 7 — extended cryptographic protection | In progress: 7.1 profiles, 7.2 hybrid transport, 7.3 OPAQUE, 7.4 hybrid signatures and 7.5 FIDO2 are implemented. | Default-off features; focused tests are compile-only until Stage 8. TPM follows. |
+| 7 — extended cryptographic protection | Substages 7.1–7.6 are implemented: profiles, hybrid transport/signatures, OPAQUE, FIDO2 and optional TPM2-TSS key protection. | All are default-off; focused tests are compile-only until Stage 8 hardware/interoperability acceptance. |
 
 ## Stage 7.1 cryptographic profiles
 
@@ -79,13 +79,19 @@ The default-off `fido2` feature uses `fido2-rs` 0.6 and Yubico libfido2 for real
 
 The native RP model uses a stable DNS-style `YRL_FIDO2_RP_ID` and raw CTAP2 client data rather than claiming a browser origin. One-use challenge files bind account, device key and channel/operation context and are burned before verification. A configured FIDO credential forbids password/OPAQUE fallback for that account or step-up contour. Build verification used isolated Debian libfido2/libcbor development packages because the host has no system installation; no host configuration or token was changed. Real hardware interoperability, PIN/UV variants, loss/recovery and counter behavior remain Stage 8 acceptance.
 
-## Stage 7.6 TPM 2.0 blocker
+## Stage 7.6 TPM 2.0
 
-The current standard Rust TSS binding is an alpha line, and this host has neither TPM2-TSS development libraries nor swtpm. A real backend and its PCR/recovery behavior therefore cannot be compiled and validated here. No working-host TPM/PCR/NV/firmware state was read or changed.
+The default-off `tpm2` feature uses stable Apache-2.0 `tss-esapi` 7.7 over BSD-2-Clause TPM2-TSS. `YRL_TPM_TCTI` selects a device or swtpm TCTI. The backend seals a random XChaCha20-Poly1305 wrapping key and encrypts bounded software secrets with purpose/generation/PCR/blob binding; Noise key loading understands `static.key.tpm`. This protects at rest and binds the blob to its TPM, but unsealing exposes software key bytes to zeroizing process memory. A separate API creates and signs with native non-exportable P-256 ECDSA keys; current X25519/Ed25519/PQ protocol identities are not silently replaced.
 
-`tpm2` is compile-only and `require(Tpm2)` always fails closed, with no automatic software fallback. TPM-native keys are explicitly distinct from sealed software secrets; common TPMs do not execute YRL's X25519, Ed25519, ML-KEM or ML-DSA. Exact backend, simulator, PCR update, NV anti-rollback, rotation/revocation and hardware-replacement recovery requirements are in `docs/CRYPTOGRAPHY.md`.
+`YRL_TPM_POLICY=required` requires a dedicated `YRL_TPM_NV_INDEX`; missing TPM/blob/PCR/counter fails startup with no plaintext fallback. `YRL_TPM_PCRS` optionally binds up to eight SHA-256 PCRs. `yrld tpm-provision-counter`, `tpm-seal-key`, `tpm-rotate-key`, `tpm-generation` and guarded `tpm-recovery-export` implement explicit lifecycle operations. Rotation writes and fsyncs a next-generation pending blob before incrementing NV and startup completes an interrupted rename. Allocate a distinct NV counter to each independently rotated key/service.
 
-Stage 7 remains incomplete only at 7.6. Substages 7.1–7.5 are implemented but production-disabled pending Stage 8 acceptance; their focused tests were prepared and not run.
+Because `yrld init` creates several independent service identities at once, it refuses required TPM policy: initialize with TPM policy off, make the encrypted Stage 4 recovery package, then provision and migrate each role under its own service environment and dedicated NV index. This prevents one role's rotation from invalidating every other role sharing a counter.
+
+Compilation used TPM2-TSS 3.2 headers/libraries extracted into an isolated build sysroot; nothing was installed and no host TPM state was touched. The ignored swtpm round-trip/native-sign test and physical PCR/update/replacement exercises remain Stage 8. Before enabling PCR policy, retain a Stage 4 encrypted offline recovery copy. After firmware/OS changes, reseal from that recovery through an explicitly provisioned new generation; never reset the counter to make an old blob work.
+
+The selected Rust/TSS licenses are compatible and the stable line includes the historical ESAPI session-nonce fix. A RustSec web lookup found no advisory for `tss-esapi`, `tss-esapi-sys` or RustCrypto `chacha20poly1305`; the local `cargo audit` attempt could not refresh its advisory Git repository because that fetch failed, so Stage 8 must rerun the complete lockfile audit rather than treating this as a clean-audit claim.
+
+Stage 7.1–7.6 are now implemented but remain production-disabled pending Stage 8 acceptance. Prepared tests were not run.
 
 Stage 0 guarantees apply only while the Executor's server session remains alive. After a server-process restart or session-grace expiry, RESUME cannot recover it. Link retransmits stored logical frames after a fresh Noise handshake, so connection-local nonces are not reused. Confirmed frames are not re-executed, and control/interactive traffic has priority over unsent bulk file data within the bounded Link window. Stage 2 rechecks authority during a live session and before RESUME. Stages 3 and 4 must preserve these properties.
 

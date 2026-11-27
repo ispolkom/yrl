@@ -46,6 +46,8 @@ pub mod spa;
 pub mod stepup;
 pub mod session;
 pub mod throttle;
+#[cfg(feature = "tpm2")]
+pub mod tpm;
 pub mod tunnel;
 pub mod udp;
 pub mod update;
