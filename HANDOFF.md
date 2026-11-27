@@ -22,6 +22,8 @@ Stage 8.3 focused authority suite: 88 tests passed across IPC, revocation, Broke
 
 Stage 8.4 focused tests: 35 passed in `resources`, `cli`, `audit_proc` and library tests, including disk ledger and operation-journal UNKNOWN cases. Kernel OOM, ENOSPC/EDQUOT, watchdog restart storms and neighbor isolation remain BLOCKED pending a disposable environment. 8.3 was published as `c304b7a`. Continue with 8.5 key/Audit/update lifecycle tests.
 
+Stage 8.5 focused key/Audit/release suite: 43 tests passed across `keylife`, `audit_keys`, `audit_export`, `audit_integrity`, `audit_rotation`, `auditlog`, `release` and `audit_e2e`. Independent-host restore, external anchors and interrupted installed update remain NOT RUN. Local trust state cannot detect complete privileged rollback without an external anchor. 8.4 was published as `7fe9846`. Continue with 8.6 extended crypto, 8.7 measurements and 8.8 isolated install/report.
+
 ## Architecture at the baseline
 
 ```text
