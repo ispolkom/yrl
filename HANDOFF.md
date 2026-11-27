@@ -16,6 +16,8 @@
 
 The current worktree contains Stage 8 regression fixes and `STAGE8_ACCEPTANCE.md`; no Stage 8 substage has been accepted yet. Default workspace testing found invalid test fixtures and stale protocol expectations, plus production defects in Audit repeat reporting, file completion ordering, interrupted-upload retention and file error classification. Focused tests for each fix pass; the serial default workspace suite passed 412 tests with one explicit cgroup test skip and two ignored tests; the cgroup runtime test is blocked by host `memory.max` permission. The default release build passed in 2m 38s. Fresh `cargo audit` could not fetch; cached audit and `cargo deny` report actionable dependency advisories. Hybrid-signature helpers have no callers in the claimed handshake/Audit/update paths; 7.4 integration is a recorded FAIL. Continue with feature-suite compatibility fixes and dependency triage, then isolated runtime, install and performance checks. Keep all Stage 7 features default-off.
 
+Stage 8.2 focused transport suite: 91 tests passed across `routes`, `relay`, `resume`, `udp_session`, `link`, `files`, `terminal` and `tunnels` with serial test execution. Long-duration parallel unstable-network and installed-host scenarios remain NOT RUN; details in `STAGE8_ACCEPTANCE.md`. 8.1 findings were published as `e401e08`. Continue with 8.3 runtime isolation and remaining 8.2 duration/chaos checks when isolation is available.
+
 ## Architecture at the baseline
 
 ```text
