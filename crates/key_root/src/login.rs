@@ -52,12 +52,15 @@ pub fn verify_login_in(dir: &KeyDir, password: &str) -> Result<bool, String> {
 
 /// Never overwrite existing key material: an auth.json that exists (even one this build cannot open) is somebody's master key.
 pub fn ensure_no_existing_auth(path: &std::path::Path) -> Result<(), String> {
-    if std::fs::symlink_metadata(path).is_ok() {
-        return Err(
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Err(
             "Auth is already set up; refusing to overwrite the existing key file".to_string(),
-        );
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(
+            "Не удалось проверить существующее хранилище ключей".to_string(),
+        ),
     }
-    Ok(())
 }
 
 /// The rules for what the person typed at first setup, in words that are safe to show.
@@ -89,7 +92,7 @@ pub fn check_setup_inputs(
 
 /// First-time creation of the keys from what the person typed: a login password and a master password (the person's own recovery
 /// secret — not generated). The actual root key is random; it is wrapped for THIS device (a device key file) and for the master password
-/// (Argon2id). Nothing is stored that could open the root without the device key or the master password. Fails, changing nothing, if key
+/// (Argon2id). Nothing is stored that could open the root without the device key or the master password. Refuses initialization if key
 /// material already exists. Returns the root (the caller decides what to do with it: the node keeps it in memory, the tool drops it).
 pub fn create_keys(
     dir: &KeyDir,
@@ -100,6 +103,16 @@ pub fn create_keys(
     params: KdfParams,
     policy: &KdfPolicy,
 ) -> Result<Zeroizing<[u8; 32]>, String> {
+    let _transaction = dir.transaction_lock()
+        .map_err(|e| format!(
+            "Хранилище ключей недоступно: {}", e
+        ))?;
+    dir.ensure_clean()
+        .map_err(|e| format!(
+            "Хранилище ключей недоступно: {}", e
+        ))?;
+
+
     let auth_path = dir.auth_file();
     ensure_no_existing_auth(&auth_path)?;
     if device.load().map(|k| k.is_some()).unwrap_or(true) {
@@ -107,9 +120,31 @@ pub fn create_keys(
     }
     let root = Zeroizing::new(crate::wrap::random_bytes::<32>());
     let login_hash = hash_login_password(login_password)?;
+    // Validate the recovery parameters before modifying disk.
+    RootDocument::create(
+        &root,
+        &login_hash,
+        &[0u8; 32],
+        "validation",
+        machine,
+        master_password,
+        params,
+        policy,
+    ).map_err(|e| format!(
+        "Не удалось проверить параметры ключей: {}", e
+    ))?;
+
+    dir.begin_pending()
+        .map_err(|_| {
+            "Не удалось начать транзакцию ключей".to_string()
+        })?;
+
     let device_key = device
         .create()
-        .map_err(|_| "Не удалось создать ключ устройства".to_string())?;
+        .map_err(|_| {
+            "Создание ключа устройства не подтверждено; требуется локальная проверка"
+                .to_string()
+        })?;
     let created = (|| -> Result<(), String> {
         let doc = RootDocument::create(
             &root,
@@ -140,12 +175,16 @@ pub fn create_keys(
         }
         Ok(())
     })();
-    if let Err(e) = created {
-        // undo only what this call has just created (nothing existed before: that was checked above)
-        let _ = std::fs::remove_file(&auth_path);
-        let _ = std::fs::remove_file(dir.file("device.key"));
-        return Err(e);
-    }
+    // Publication may already have happened despite an error.
+    // Preserve all artifacts and leave the pending marker intact.
+    created?;
+
+    dir.finish_pending()
+        .map_err(|_| {
+            "Завершение транзакции ключей не подтверждено; требуется локальная проверка"
+                .to_string()
+        })?;
+
     Ok(root)
 }
 
@@ -158,6 +197,16 @@ pub fn reset_login(
     new_login_password: &str,
     policy: &KdfPolicy,
 ) -> Result<(), String> {
+    let _transaction = dir.transaction_lock()
+        .map_err(|e| format!(
+            "Хранилище ключей недоступно: {}", e
+        ))?;
+    dir.ensure_clean()
+        .map_err(|e| format!(
+            "Хранилище ключей недоступно: {}", e
+        ))?;
+
+
     if new_login_password.chars().count() < 8 {
         return Err("Новый пароль входа должен быть не короче 8 символов".to_string());
     }
@@ -201,6 +250,446 @@ pub fn reset_login(
             })
             .unwrap_or(false)
     })
-    .map_err(|_| "Не удалось записать новый пароль; ничего не изменено".to_string())?;
+    .map_err(|_| "Не удалось подтвердить запись нового пароля; проверьте состояние ключей".to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod rev006_setup_tests {
+    use super::*;
+    use crate::{FileDeviceKey, FixedMachine};
+
+    const LOGIN: &str = "synthetic-login";
+    const MASTER: &str = "synthetic-recovery-phrase";
+
+    const PARAMS: KdfParams = KdfParams {
+        memory_kib: 32,
+        iterations: 1,
+        parallelism: 1,
+    };
+
+    #[test]
+    fn successful_setup_is_reopenable() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = KeyDir::open(d.path()).unwrap();
+
+        let machine = FixedMachine("test-machine".into());
+        let device = FileDeviceKey::new(
+            dir.file("device.key")
+        );
+
+        let root = create_keys(
+            &dir,
+            &machine,
+            &device,
+            LOGIN,
+            MASTER,
+            PARAMS,
+            &KdfPolicy::for_tests(),
+        ).unwrap();
+
+        assert!(dir.ensure_clean().is_ok());
+
+        let reopened = KeyDir::open(d.path()).unwrap();
+
+        let (loaded, _) = crate::unlock_root(
+            &reopened,
+            &machine,
+            &device,
+        ).unwrap();
+
+        assert!(*root == *loaded);
+
+        assert!(verify_login_in(
+            &reopened, LOGIN
+        ).unwrap());
+    }
+
+    #[test]
+    fn existing_setup_is_never_replaced() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = KeyDir::open(d.path()).unwrap();
+
+        let machine = FixedMachine("test-machine".into());
+
+        let device = FileDeviceKey::new(
+            dir.file("device.key")
+        );
+
+        create_keys(
+            &dir,
+            &machine,
+            &device,
+            LOGIN,
+            MASTER,
+            PARAMS,
+            &KdfPolicy::for_tests(),
+        ).unwrap();
+
+        let auth = std::fs::read(
+            dir.auth_file()
+        ).unwrap();
+
+        let key = std::fs::read(
+            dir.file("device.key")
+        ).unwrap();
+
+        assert!(create_keys(
+            &dir,
+            &machine,
+            &device,
+            "another-login",
+            "another-recovery-phrase",
+            PARAMS,
+            &KdfPolicy::for_tests(),
+        ).is_err());
+
+        assert_eq!(
+            std::fs::read(dir.auth_file()).unwrap(),
+            auth
+        );
+
+        assert_eq!(
+            std::fs::read(dir.file("device.key")).unwrap(),
+            key
+        );
+
+        assert!(dir.ensure_clean().is_ok());
+    }
+
+    #[test]
+    fn invalid_parameters_do_not_create_key_material() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = KeyDir::open(d.path()).unwrap();
+
+        let machine = FixedMachine("test-machine".into());
+
+        let device = FileDeviceKey::new(
+            dir.file("device.key")
+        );
+
+        assert!(create_keys(
+            &dir,
+            &machine,
+            &device,
+            LOGIN,
+            "short",
+            PARAMS,
+            &KdfPolicy::for_tests(),
+        ).is_err());
+
+        assert!(!dir.auth_file().exists());
+        assert!(!dir.file("device.key").exists());
+        assert!(dir.ensure_clean().is_ok());
+    }
+
+    #[test]
+    fn pending_setup_refuses_reinitialization() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = KeyDir::open(d.path()).unwrap();
+
+        {
+            let _guard = dir.transaction_lock().unwrap();
+            dir.begin_pending().unwrap();
+        }
+
+        let machine = FixedMachine("test-machine".into());
+
+        let device = FileDeviceKey::new(
+            dir.file("device.key")
+        );
+
+        assert!(create_keys(
+            &dir,
+            &machine,
+            &device,
+            LOGIN,
+            MASTER,
+            PARAMS,
+            &KdfPolicy::for_tests(),
+        ).is_err());
+
+        assert!(!dir.auth_file().exists());
+        assert!(!dir.file("device.key").exists());
+        assert!(dir.ensure_clean().is_err());
+    }
+
+    #[test]
+    fn failed_marker_publication_prevents_setup() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = KeyDir::open(d.path()).unwrap();
+
+        let machine = FixedMachine("test-machine".into());
+
+        let device = FileDeviceKey::new(
+            dir.file("device.key")
+        );
+
+        crate::atomic::REV006_FAIL_DIR_SYNC.with(
+            |flag| flag.set(true)
+        );
+
+        assert!(create_keys(
+            &dir,
+            &machine,
+            &device,
+            LOGIN,
+            MASTER,
+            PARAMS,
+            &KdfPolicy::for_tests(),
+        ).is_err());
+
+        assert!(!dir.auth_file().exists());
+        assert!(!dir.file("device.key").exists());
+
+        let reopened = KeyDir::open(d.path()).unwrap();
+
+        assert!(reopened.ensure_clean().is_err());
+    }
+}
+
+#[cfg(test)]
+mod rev006_setup_fault_tests {
+    use super::*;
+    use crate::{FileDeviceKey, FixedMachine};
+
+    const PARAMS: KdfParams = KdfParams {
+        memory_kib: 32,
+        iterations: 1,
+        parallelism: 1,
+    };
+
+    fn check_failure(stage: usize) {
+        let d = tempfile::tempdir().unwrap();
+
+        let dir = KeyDir::open(d.path()).unwrap();
+
+        let machine =
+            FixedMachine("synthetic-test-machine".into());
+
+        let device =
+            FileDeviceKey::new(dir.file("device.key"));
+
+        let policy = KdfPolicy::for_tests();
+
+        crate::atomic::REV006_FAIL_SYNC_AT.with(
+            |counter| counter.set(stage)
+        );
+
+        let result = create_keys(
+            &dir,
+            &machine,
+            &device,
+            "synthetic-login",
+            "synthetic-recovery-phrase",
+            PARAMS,
+            &policy,
+        );
+
+        assert!(
+            result.is_err(),
+            "setup reported success at stage {stage}"
+        );
+
+        crate::atomic::REV006_FAIL_SYNC_AT.with(
+            |counter| {
+                assert_eq!(
+                    counter.get(),
+                    0,
+                    "requested fault was not reached"
+                );
+            }
+        );
+
+        assert!(
+            dir.file(".key-root.pending").exists()
+        );
+
+        assert_eq!(
+            dir.file("device.key").exists(),
+            stage >= 2
+        );
+
+        assert_eq!(
+            dir.auth_file().exists(),
+            stage >= 3
+        );
+
+        let key_before =
+            std::fs::read(dir.file("device.key")).ok();
+
+        let auth_before =
+            std::fs::read(dir.auth_file()).ok();
+
+        let reopened = KeyDir::open(d.path()).unwrap();
+
+        assert!(reopened.ensure_clean().is_err());
+
+        assert!(
+            crate::unlock_root(
+                &reopened,
+                &machine,
+                &device
+            ).is_err()
+        );
+
+        assert!(
+            create_keys(
+                &reopened,
+                &machine,
+                &device,
+                "another-synthetic-login",
+                "another-synthetic-recovery",
+                PARAMS,
+                &policy,
+            ).is_err()
+        );
+
+        assert_eq!(
+            std::fs::read(
+                reopened.file("device.key")
+            ).ok(),
+            key_before
+        );
+
+        assert_eq!(
+            std::fs::read(
+                reopened.auth_file()
+            ).ok(),
+            auth_before
+        );
+    }
+
+    #[test]
+    fn marker_sync_failure_prevents_key_creation() {
+        check_failure(1);
+    }
+
+    #[test]
+    fn device_sync_failure_preserves_published_file() {
+        check_failure(2);
+    }
+
+    #[test]
+    fn auth_sync_failure_preserves_both_files() {
+        check_failure(3);
+    }
+}
+
+#[cfg(test)]
+mod rev006_completion_tests {
+    use super::*;
+    use crate::{FileDeviceKey, FixedMachine};
+
+    const LOGIN: &str = "synthetic-login";
+    const MASTER: &str = "synthetic-recovery-phrase";
+
+    const PARAMS: KdfParams = KdfParams {
+        memory_kib: 32,
+        iterations: 1,
+        parallelism: 1,
+    };
+
+    #[test]
+    fn completed_setup_opens_by_both_wrappers() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = KeyDir::open(d.path()).unwrap();
+
+        let machine = FixedMachine("test-machine".into());
+        let device = FileDeviceKey::new(
+            dir.file("device.key")
+        );
+
+        let policy = KdfPolicy::for_tests();
+
+        let root = create_keys(
+            &dir, &machine, &device,
+            LOGIN, MASTER, PARAMS, &policy,
+        ).unwrap();
+
+        let bytes = crate::keydir::read_private_file(
+            &dir.auth_file()
+        ).unwrap();
+
+        let doc = RootDocument::parse(&bytes).unwrap();
+
+        let device_key = device.load()
+            .unwrap().unwrap();
+
+        let by_device = doc.unlock_with_device(
+            &device_key, &machine
+        ).unwrap();
+
+        let by_password = doc.unlock_with_password(
+            MASTER, &policy
+        ).unwrap();
+
+        assert!(*root == *by_device);
+        assert!(*root == *by_password);
+
+        assert!(dir.ensure_clean().is_ok());
+    }
+
+    #[test]
+    fn completion_sync_failure_preserves_key_material() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = KeyDir::open(d.path()).unwrap();
+
+        let machine = FixedMachine("test-machine".into());
+
+        let device = FileDeviceKey::new(
+            dir.file("device.key")
+        );
+
+        let policy = KdfPolicy::for_tests();
+
+        // 1: pending marker
+        // 2: device file
+        // 3: auth document
+        // 4: transaction completion
+        crate::atomic::REV006_FAIL_SYNC_AT.with(
+            |counter| counter.set(4)
+        );
+
+        assert!(create_keys(
+            &dir, &machine, &device,
+            LOGIN, MASTER, PARAMS, &policy,
+        ).is_err());
+
+        crate::atomic::REV006_FAIL_SYNC_AT.with(
+            |counter| assert_eq!(counter.get(), 0)
+        );
+
+        assert!(dir.auth_file().exists());
+        assert!(dir.file("device.key").exists());
+        assert!(dir.file(".key-root.pending").exists());
+
+        let reopened = KeyDir::open(d.path()).unwrap();
+
+        assert!(reopened.ensure_clean().is_err());
+
+        assert!(crate::unlock_root(
+            &reopened, &machine, &device
+        ).is_err());
+
+        // Verify integrity without modifying the
+        // synthetic test files.
+        let doc = RootDocument::parse(
+            &std::fs::read(
+                reopened.auth_file()
+            ).unwrap()
+        ).unwrap();
+
+        let key = device.load().unwrap().unwrap();
+
+        let first = doc.unlock_with_device(
+            &key, &machine
+        ).unwrap();
+
+        let second = doc.unlock_with_password(
+            MASTER, &policy
+        ).unwrap();
+
+        assert!(*first == *second);
+    }
 }

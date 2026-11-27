@@ -313,6 +313,8 @@ pub fn load_or_initialize(
     ctx: &OpenContext,
     make: impl FnOnce() -> IdentityMaterial,
 ) -> Result<Loaded> {
+    let _transaction = dir.transaction_lock()?;
+    dir.ensure_clean()?;
     let path = dir.identity_file(port);
     match read_private_file(&path) {
         Ok(bytes) => {

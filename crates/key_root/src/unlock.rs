@@ -25,6 +25,8 @@ pub fn unlock_root(
     machine: &dyn MachineContext,
     device: &dyn DeviceKeyProvider,
 ) -> Result<(Zeroizing<[u8; 32]>, RootSource)> {
+    let _transaction = dir.transaction_lock()?;
+    dir.ensure_clean()?;
     let bytes = read_private_file(&dir.auth_file())?;
     match auth_format(&bytes)? {
         AuthFormat::LegacyV1 => match legacy_master_key(&bytes, machine) {

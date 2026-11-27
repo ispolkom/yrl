@@ -3,7 +3,9 @@
 //!
 //! Both are built so that a failure at any point leaves the owner's data openable: every original is backed up before it is
 //! touched (a copy, never overwritten, never removed), every new file is written beside the old one and read back before it
-//! replaces anything, and a failed verification restores the originals.
+//! replaces anything. Migration attempts to restore originals after a failed
+//! verification and reports incomplete rollback explicitly.
+//! Individual atomic writes do not constitute a multi-file transaction.
 use crate::atomic::{backup_copy, write_atomic};
 use crate::device::{DeviceKeyProvider, DeviceProtection};
 use crate::error::{KeyRootError, Result};
@@ -18,6 +20,31 @@ use crate::wrap::{KdfParams, KdfPolicy};
 use std::fs;
 use std::path::PathBuf;
 use zeroize::Zeroizing;
+
+// Attempt every restoration even if an earlier one failed.
+// Never claim a successful rollback unless every write succeeded.
+fn restore_originals(
+    originals: &[(&std::path::Path, &[u8])],
+    mut restore: impl FnMut(
+        &std::path::Path, &[u8]
+    ) -> Result<()>,
+) -> Result<()> {
+    let mut failed = false;
+
+    for (path, bytes) in originals {
+        if restore(path, bytes).is_err() {
+            failed = true;
+        }
+    }
+
+    if failed {
+        Err(KeyRootError::Refused(
+            "rollback incomplete; local recovery required"
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub struct MigrationReport {
@@ -44,6 +71,8 @@ pub struct Migration<'a> {
 impl Migration<'_> {
     /// Nothing is created, changed or removed unless the legacy master key AND the legacy identity both open.
     pub fn run(&self) -> Result<MigrationReport> {
+        let _transaction = self.dir.transaction_lock()?;
+        self.dir.ensure_clean()?;
         let auth_path = self.dir.auth_file();
         let identity_path = self.dir.identity_file(self.port);
         let auth_bytes = read_private_file(&auth_path)?;
@@ -76,6 +105,8 @@ impl Migration<'_> {
             self.params,
             self.policy,
         )?;
+
+        self.dir.begin_pending()?;
 
         let (device_key, device_key_created) = match self.device.load()? {
             Some(k) => (k, false),
@@ -117,12 +148,29 @@ impl Migration<'_> {
         })();
         if let Err(e) = committed {
             // restore the originals (the backups are copies of them; the in-memory bytes are the originals themselves)
-            let _ = write_atomic(&auth_path, &auth_bytes, |_| true);
+            let mut originals: Vec<(
+                &std::path::Path, &[u8]
+            )> = vec![(&auth_path, &auth_bytes)];
+
             if !already_v3 {
-                let _ = write_atomic(&identity_path, &identity_bytes, |_| true);
+                originals.push((
+                    &identity_path, &identity_bytes
+                ));
             }
+
+            restore_originals(
+                &originals,
+                |path, bytes| {
+                    write_atomic(path, bytes, |written| {
+                        written == bytes
+                    })
+                },
+            )?;
+
             return Err(e);
         }
+        self.dir.finish_pending()?;
+
         Ok(MigrationReport {
             node_id: hex::encode(&material.address[..8]),
             backups,
@@ -205,6 +253,8 @@ impl Recovery<'_> {
     /// identity, not merely a password that happened to authenticate); only then is a new device key made and `auth.json`
     /// re-wrapped. A wrong password, a damaged file or a missing identity changes nothing on disk.
     pub fn run(&self) -> Result<RecoveryReport> {
+        let _transaction = self.dir.transaction_lock()?;
+        self.dir.ensure_clean()?;
         let auth_path = self.dir.auth_file();
         let auth_bytes = read_private_file(&auth_path)?;
         match auth_format(&auth_bytes)? {
@@ -220,6 +270,8 @@ impl Recovery<'_> {
             root: Some(&root),
         };
         let material = open_identity(&identity_bytes, &ctx)?;
+
+        self.dir.begin_pending()?;
 
         let mut backups = vec![backup_copy(&auth_path, "before-recovery")?];
         let new_key = match self.device.load() {
@@ -247,6 +299,8 @@ impl Recovery<'_> {
             return Err(KeyRootError::Corrupt);
         }
         backups.retain(|b| fs::metadata(b).is_ok());
+        self.dir.finish_pending()?;
+
         Ok(RecoveryReport {
             node_id: hex::encode(&material.address[..8]),
             backups,
@@ -298,6 +352,8 @@ impl NewRecoveryCode<'_> {
 
     /// Writes the new wrapper only if `typed` is the shown code. The previous `auth.json` is kept as a backup.
     pub fn commit(&self, pending: &PendingRecovery, typed: &str) -> Result<PathBuf> {
+        let _transaction = self.dir.transaction_lock()?;
+        self.dir.ensure_clean()?;
         let typed = crate::recovery_code::RecoveryCode::parse(typed)?;
         if !typed.same_as(&pending.code) {
             return Err(KeyRootError::Invalid(
@@ -322,5 +378,315 @@ impl NewRecoveryCode<'_> {
                 .unwrap_or(false)
         })?;
         Ok(backup)
+    }
+}
+
+#[cfg(test)]
+mod rev006_rollback_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn complete_rollback_restores_every_original() {
+        let d = tempfile::tempdir().unwrap();
+
+        let first = d.path().join("first");
+        let second = d.path().join("second");
+
+        fs::write(&first, b"changed first").unwrap();
+        fs::write(&second, b"changed second").unwrap();
+
+        let originals: &[(&Path, &[u8])] = &[
+            (&first, b"original first"),
+            (&second, b"original second"),
+        ];
+
+        restore_originals(
+            originals,
+            |path, bytes| {
+                write_atomic(path, bytes, |written| {
+                    written == bytes
+                })
+            },
+        ).unwrap();
+
+        assert_eq!(
+            fs::read(&first).unwrap(),
+            b"original first"
+        );
+
+        assert_eq!(
+            fs::read(&second).unwrap(),
+            b"original second"
+        );
+    }
+
+    #[test]
+    fn first_failure_does_not_prevent_second_restore() {
+        let first = Path::new("first");
+        let second = Path::new("second");
+
+        let mut attempted = Vec::new();
+
+        let result = restore_originals(
+            &[(first, b"a"), (second, b"b")],
+            |path, _| {
+                attempted.push(path.to_path_buf());
+
+                if path == first {
+                    Err(KeyRootError::Io)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert_eq!(
+            attempted,
+            vec![
+                first.to_path_buf(),
+                second.to_path_buf()
+            ]
+        );
+
+        assert!(matches!(
+            result,
+            Err(KeyRootError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn last_failure_is_reported() {
+        let first = Path::new("first");
+        let second = Path::new("second");
+
+        let result = restore_originals(
+            &[(first, b"a"), (second, b"b")],
+            |path, _| {
+                if path == second {
+                    Err(KeyRootError::Io)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(KeyRootError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn all_restore_failures_are_reported() {
+        let mut calls = 0;
+
+        let result = restore_originals(
+            &[
+                (Path::new("first"), b"a"),
+                (Path::new("second"), b"b"),
+            ],
+            |_, _| {
+                calls += 1;
+                Err(KeyRootError::Io)
+            },
+        );
+
+        assert_eq!(calls, 2);
+
+        assert!(matches!(
+            result,
+            Err(KeyRootError::Refused(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod rev006_lifecycle_tests {
+    use super::*;
+    use crate::{FileDeviceKey, FixedMachine};
+
+    const MASTER: &str = "synthetic-recovery-phrase";
+
+    const PARAMS: KdfParams = KdfParams {
+        memory_kib: 32,
+        iterations: 1,
+        parallelism: 1,
+    };
+
+    const PORT: u16 = 4242;
+
+    fn synthetic_identity() -> IdentityMaterial {
+        IdentityMaterial {
+            address: [1u8; 32],
+            public_key: [2u8; 32],
+            signing_public_key: [3u8; 32],
+            created_at: "synthetic-test".into(),
+            private_key: Zeroizing::new([4u8; 32]),
+            signing_private_key: Zeroizing::new([5u8; 32]),
+        }
+    }
+
+    fn fixture(
+        dir: &KeyDir,
+        machine: &FixedMachine,
+    ) -> (Zeroizing<[u8; 32]>, IdentityMaterial) {
+        let root = Zeroizing::new([42u8; 32]);
+        let identity = synthetic_identity();
+
+        let auth = crate::legacy::seal_legacy_auth(
+            &root,
+            "synthetic-login-hash",
+            machine,
+        ).unwrap();
+
+        let passphrase =
+            crate::identity_store::legacy_passphrase(
+                None,
+                machine,
+                &identity.address,
+            );
+
+        let bytes =
+            crate::identity_store::seal_identity_legacy(
+                &identity,
+                &passphrase,
+            ).unwrap();
+
+        crate::atomic::create_new_file(
+            &dir.auth_file(),
+            &auth,
+        ).unwrap();
+
+        crate::atomic::create_new_file(
+            &dir.identity_file(PORT),
+            &bytes,
+        ).unwrap();
+
+        (root, identity)
+    }
+
+    #[test]
+    fn migration_and_recovery_preserve_identity() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = KeyDir::open(d.path()).unwrap();
+
+        let machine =
+            FixedMachine("synthetic-original".into());
+
+        let device =
+            FileDeviceKey::new(dir.file("device.key"));
+
+        let policy = KdfPolicy::for_tests();
+
+        let (root, identity) = fixture(&dir, &machine);
+
+        let original_auth =
+            fs::read(dir.auth_file()).unwrap();
+
+        let original_identity =
+            fs::read(dir.identity_file(PORT)).unwrap();
+
+        let report = Migration {
+            dir: &dir,
+            port: PORT,
+            machine: &machine,
+            env_password: None,
+            device: &device,
+            recovery_password: MASTER,
+            params: PARAMS,
+            policy: &policy,
+        }.run().unwrap();
+
+        assert!(dir.ensure_clean().is_ok());
+
+        assert_eq!(report.backups.len(), 2);
+
+        assert_eq!(
+            fs::read(&report.backups[0]).unwrap(),
+            original_auth
+        );
+
+        assert_eq!(
+            fs::read(&report.backups[1]).unwrap(),
+            original_identity
+        );
+
+        let (loaded, _) = crate::unlock_root(
+            &dir, &machine, &device
+        ).unwrap();
+
+        assert!(*loaded == *root);
+
+        let identity_bytes =
+            fs::read(dir.identity_file(PORT)).unwrap();
+
+        assert_eq!(
+            identity_format(&identity_bytes).unwrap(),
+            IdentityFormat::RootV3
+        );
+
+        let destination = tempfile::tempdir().unwrap();
+
+        let restored =
+            KeyDir::open(destination.path()).unwrap();
+
+        crate::atomic::create_new_file(
+            &restored.auth_file(),
+            &fs::read(dir.auth_file()).unwrap(),
+        ).unwrap();
+
+        crate::atomic::create_new_file(
+            &restored.identity_file(PORT),
+            &identity_bytes,
+        ).unwrap();
+
+        let other_machine =
+            FixedMachine("synthetic-destination".into());
+
+        let other_device = FileDeviceKey::new(
+            restored.file("device.key")
+        );
+
+        Recovery {
+            dir: &restored,
+            port: PORT,
+            machine: &other_machine,
+            device: &other_device,
+            password: MASTER,
+            policy: &policy,
+        }.run().unwrap();
+
+        assert!(restored.ensure_clean().is_ok());
+
+        let (recovered, _) = crate::unlock_root(
+            &restored,
+            &other_machine,
+            &other_device,
+        ).unwrap();
+
+        assert!(*recovered == *root);
+
+        let recovered_identity = open_identity(
+            &fs::read(
+                restored.identity_file(PORT)
+            ).unwrap(),
+            &OpenContext {
+                machine: &other_machine,
+                env_password: None,
+                root: Some(&recovered),
+            },
+        ).unwrap();
+
+        assert!(
+            recovered_identity.same_identity(&identity)
+        );
+
+        assert_eq!(
+            fs::read(
+                restored.identity_file(PORT)
+            ).unwrap(),
+            identity_bytes
+        );
     }
 }

@@ -314,3 +314,54 @@ Limits:
   incomplete.
 - Installed-service restart after integrity repair
   remains unverified.
+
+## REV-006: Durable key-root storage transactions
+
+Priority: HIGH.
+
+### Remediation
+
+- Require directory synchronization after publication.
+- Preserve published files after uncertain persistence.
+- Publish new files without replacing existing targets.
+- Use renameat2 with RENAME_NOREPLACE.
+- Preserve existing backup files during concurrent creation.
+- Report incomplete rollback explicitly.
+- Serialize high-level key-store mutations.
+- Reject unsafe transaction lock files.
+- Publish a durable pending transaction marker.
+- Refuse normal root loading while a transaction is pending.
+- Preserve key material after uncertain initial setup.
+- Verify successful setup through both root wrappers.
+
+### Verification
+
+- Key Root: 47 PASS, 0 FAIL, 1 helper ignored.
+- Default workspace regression: PASS.
+- Hybrid-signatures and FIDO2 regression: PASS.
+- All-target compilation: PASS.
+- Concurrent publication and backup stress: PASS.
+- Targeted setup persistence faults: PASS.
+- Transaction completion persistence fault: PASS.
+- Separate-process SIGKILL regression: PASS.
+- Repeated crash regression: 20/20 PASS.
+- Legacy-to-Root-V2 migration: PASS.
+- Identity preservation during migration: PASS.
+- Recovery using a different machine identifier
+  without the original device key: PASS.
+
+Status: CONDITIONALLY ACCEPTED.
+
+Limits:
+- A pending marker detects interrupted transactions;
+  it is not a complete recovery journal.
+- Verified recovery of interrupted transactions
+  remains to be implemented.
+- SIGKILL tests exercised storage transaction primitives,
+  not interruption inside a complete migration.
+- Not all low-level readers and writers participate
+  in the transaction protocol.
+- Marker recreation after uncertain removal is best effort.
+- Physical power loss and recovery on a separate
+  physical computer remain untested.
+- Installed-system acceptance remains pending.
