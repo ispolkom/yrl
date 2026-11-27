@@ -147,3 +147,15 @@ Code revision `8cc926f` was tested from the relocated workspace on SSD480. The d
 | 8-R-FINAL-05 | Physical TPM and FIDO2 | Use owner-approved hardware for the physical test matrix | PCR/ownership/replacement and token interoperability properties demonstrated | No physical hardware available for these runs | BLOCKED | The three previously accepted virtual TPM checks are separate |
 
 8-R remediation passed for the executed dependency, hybrid authentication, signed update, filesystem error and regression checks. Stage 8 acceptance remains conditional. The outstanding checks include physical hardware, compatibility between legacy and negotiated wire builds during migration, longer controlled workloads, actual power-loss durability, and external recovery/anchor validation. Treat complete privileged host rollback as outside a purely local trust boundary. No production release was made and extended crypto remains opt-in.
+
+## Final acceptance continuation: protocol migration (2026-11-27)
+
+Evidence: `/mnt/ssd480/projects/yrl-stage8-evidence/protocol/probe-results.txt`. The probe in `crates/yrl/examples/wire_compat_probe.rs` was compiled twice from the same revision, once with default features and once with `crypto-profiles`, then run in all four client/server combinations on the Debian lab server loopback. Each run used the same pinned X25519 identities and Gatekeeper context. The probe tests the actual Noise handshake without login or service configuration.
+
+| ID | Property | Expected | Actual | Status | Limit |
+|---|---|---|---|---|---|
+| LAB-PROTO-01 | Same-build legacy and negotiated classical handshakes | Both versions connect within their own format | Legacy/legacy and negotiated/negotiated both completed profile `0x00010001` at both endpoints | PASS | Handshake-level probe. Installed negotiated operation was previously covered by LAB-03 and LAB-CRYPTO-01 |
+| LAB-PROTO-02 | Mixed-build fail-closed behavior | No silent downgrade or unauthenticated fallback | Both old-client/new-server and new-client/old-server failed at the server; the client received EOF | PASS | This is a safe rejection, not interoperability |
+| LAB-PROTO-03 | Rolling migration across the two wire formats | Old and upgraded peers interoperate during a staged rollout | Neither mixed-build pair can establish a session. The feature deliberately has no legacy fallback | FAIL | Coordinated cutover is possible operationally, but a rolling cross-version migration is not implemented. Adding it would be new functionality outside this acceptance task |
+
+The profile offer/selection, minimum policy, exact-offer binding and persistent high-water checks already passed in 8-R.3 and 8-R-FINAL-03; no repeat was needed. No production key or service state was changed by the loopback probe. The installed services were stopped after the earlier installed-path negative check.
