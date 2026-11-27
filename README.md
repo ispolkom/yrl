@@ -147,7 +147,7 @@ Security rules are also checked with targeted source mutants listed under `tools
 
 ## Honest status
 
-Stage 8 acceptance is conditional and incomplete: the default serial suite passed with one cgroup test explicitly skipped, while dependency advisories, hybrid-signature integration, hardware and isolated installation remain open. See `STAGE8_ACCEPTANCE.md`.
+Stage 8 acceptance remains conditional. The Debian 12 lab verified installed TCP, UDP and Relay, cgroup limits, hybrid authentication and password step-up, signed updates and process-crash recovery. See `STAGE8_ACCEPTANCE.md` for the results and remaining hardware, protocol migration and long-duration workload limits. Extended crypto profiles are opt-in.
 
 **Working prototype, not a finished product.** The core Linux scenarios are implemented and heavily tested, but the project has not had an independent security audit.
 
@@ -156,7 +156,7 @@ Stage 8 acceptance is conditional and incomplete: the default serial suite passe
 - UDP lacks NAT hole punching, UDP relay, path-MTU discovery, in-place address migration, and pacing. Automatic failover uses a fresh Noise-authenticated connection and RESUME; it does not race or score routes.
 - Sessions survive connection loss but not an `yrld` restart; active session state is currently in memory.
 - Stage 7 cryptographic profiles, hybrid ML-KEM transport/signatures, OPAQUE and FIDO2 are default-off and await Stage 8 interoperability, hardware and performance acceptance.
-- Optional TPM2-TSS key sealing/native P-256 support is default-off and awaits Stage 8 simulator/hardware acceptance; second-device approval remains planned.
+- Optional TPM2-TSS key sealing/native P-256 support is default-off and has passed simulator and virtual TPM checks and awaits physical hardware acceptance; second-device approval remains planned.
 - Metadata such as IP addresses, timing, and traffic volume remains visible to the network or relay.
 
 Do not treat a secret port, SPA, or an untrusted relay as authentication. Device keys, passwords, explicit rights, and end-to-end cryptography remain mandatory.
