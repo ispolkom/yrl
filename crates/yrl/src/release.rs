@@ -39,22 +39,105 @@ pub fn generate_key(private: &Path, public: &Path) -> Result<()> {
     )
 }
 
-fn signing(path: &Path) -> Result<SigningKey> {
-    let seed = crate::keys::read_secret_hex(path, 32)?;
-    Ok(SigningKey::from_bytes(seed.as_slice().try_into()?))
+#[derive(Clone)]
+pub enum ReleasePublic {
+    Classical(VerifyingKey),
+    #[cfg(feature = "hybrid-signatures")]
+    Hybrid(Box<crate::hybrid_signature::PublicKey>),
 }
-fn verifying(path: &Path) -> Result<VerifyingKey> {
-    let b: [u8; 32] = hex::decode(fs::read_to_string(path)?.trim())?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
-    Ok(VerifyingKey::from_bytes(&b)?)
+impl std::fmt::Debug for ReleasePublic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "release public key {}", blake3::hash(&self.to_bytes()))
+    }
+}
+impl PartialEq for ReleasePublic {
+    fn eq(&self, other: &Self) -> bool { self.to_bytes() == other.to_bytes() }
+}
+impl ReleasePublic {
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Classical(key) => key.to_bytes().to_vec(),
+            #[cfg(feature = "hybrid-signatures")]
+            Self::Hybrid(key) => key.encode(),
+        }
+    }
+
+    fn decode(bytes: &[u8], root: bool, generation: Option<u64>) -> Result<Self> {
+        if bytes.len() == 32 {
+            return Ok(Self::Classical(VerifyingKey::from_bytes(bytes.try_into()?)?));
+        }
+        #[cfg(feature = "hybrid-signatures")]
+        {
+            use crate::hybrid_signature::{PublicKey, Purpose};
+            let key = PublicKey::decode(bytes)?;
+            let purpose = if root { Purpose::ReleaseRoot } else { Purpose::ReleaseDelegated };
+            if key.purpose != purpose || generation.is_some_and(|g| key.generation != g) {
+                bail!("wrong hybrid release key purpose or generation");
+            }
+            return Ok(Self::Hybrid(Box::new(key)));
+        }
+        #[cfg(not(feature = "hybrid-signatures"))]
+        {
+            let _ = (root, generation);
+            bail!("unsupported release public key format");
+        }
+    }
+
+    fn same_profile(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+
+    fn verify(&self, body: &[u8], signature: &[u8]) -> Result<()> {
+        match self {
+            Self::Classical(key) => Ok(key.verify(body, &Signature::from_slice(signature)?)?),
+            #[cfg(feature = "hybrid-signatures")]
+            Self::Hybrid(key) => key.verify(body, &crate::hybrid_signature::SignatureEnvelope::decode(signature)?),
+        }
+    }
+}
+
+enum ReleaseSecret {
+    Classical(SigningKey),
+    #[cfg(feature = "hybrid-signatures")]
+    Hybrid(Box<crate::hybrid_signature::SigningKey>),
+}
+impl ReleaseSecret {
+    fn load(path: &Path, public: &ReleasePublic) -> Result<Self> {
+        match public {
+            ReleasePublic::Classical(key) => {
+                let seed = crate::keys::read_secret_hex(path, 32)?;
+                let secret = SigningKey::from_bytes(seed.as_slice().try_into()?);
+                if secret.verifying_key() != *key { bail!("release private key mismatch"); }
+                Ok(Self::Classical(secret))
+            }
+            #[cfg(feature = "hybrid-signatures")]
+            ReleasePublic::Hybrid(key) => Ok(Self::Hybrid(Box::new(crate::hybrid_signature::SigningKey::load_pinned(path, key)?))),
+        }
+    }
+
+    fn sign(&self, body: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            Self::Classical(key) => Ok(key.sign(body).to_bytes().to_vec()),
+            #[cfg(feature = "hybrid-signatures")]
+            Self::Hybrid(key) => Ok(key.sign(body)?.encode()),
+        }
+    }
+}
+
+fn verifying(path: &Path, root: bool, generation: u64) -> Result<ReleasePublic> {
+    let bytes = fs::read(path)?;
+    if bytes.starts_with(b"YHP1") {
+        ReleasePublic::decode(&bytes, root, Some(generation))
+    } else {
+        ReleasePublic::decode(&hex::decode(std::str::from_utf8(&bytes)?.trim())?, root, Some(generation))
+    }
 }
 
 #[derive(Clone)]
 pub struct TrustStore {
     pub generation: u64,
-    pub current: VerifyingKey,
-    pub roots: BTreeMap<u64, VerifyingKey>,
+    pub current: ReleasePublic,
+    pub roots: BTreeMap<u64, ReleasePublic>,
     pub revoked_delegates: BTreeSet<(u64, String)>,
 }
 
@@ -64,7 +147,7 @@ pub fn init_trust(root_public: &Path, trust_dir: &Path) -> Result<()> {
     }
     fs::create_dir(trust_dir)?;
     fs::set_permissions(trust_dir, fs::Permissions::from_mode(0o755))?;
-    let key = verifying(root_public)?;
+    let key = verifying(root_public, true, 0)?;
     atomic(
         &trust_dir.join("root.pub"),
         format!("{}\n", hex::encode(key.to_bytes())).as_bytes(),
@@ -84,24 +167,28 @@ pub fn rotate_root(
     new_public: &Path,
 ) -> Result<()> {
     let store = load_trust(trust_dir)?;
-    let old = signing(old_private)?;
-    if old.verifying_key() != store.current {
-        bail!("old release root private key does not match trust store");
+    let old = ReleaseSecret::load(old_private, &store.current)?;
+    let generation = store.generation.checked_add(1).context("release root generation overflow")?;
+    match &store.current {
+        ReleasePublic::Classical(_) => generate_key(new_private, new_public)?,
+        #[cfg(feature = "hybrid-signatures")]
+        ReleasePublic::Hybrid(_) => {
+            crate::hybrid_signature::SigningKey::generate_files(new_private, new_public, crate::hybrid_signature::Purpose::ReleaseRoot, generation)?;
+        }
     }
-    generate_key(new_private, new_public)?;
-    let new = signing(new_private)?;
-    let generation = store.generation + 1;
+    let public = verifying(new_public, true, generation)?;
+    let new = ReleaseSecret::load(new_private, &public)?;
     let body = format!(
         "YRL-RELEASE-ROOT-TRANSITION-1 {} {} {} {}",
         store.generation,
-        hex::encode(old.verifying_key().to_bytes()),
+        hex::encode(store.current.to_bytes()),
         generation,
-        hex::encode(new.verifying_key().to_bytes())
+        hex::encode(public.to_bytes())
     );
     let line = format!(
         "{body} {} {}\n",
-        hex::encode(old.sign(body.as_bytes()).to_bytes()),
-        hex::encode(new.sign(body.as_bytes()).to_bytes())
+        hex::encode(old.sign(body.as_bytes())?),
+        hex::encode(new.sign(body.as_bytes())?)
     );
     let mut f = OpenOptions::new()
         .create(true)
@@ -116,7 +203,7 @@ pub fn rotate_root(
         &tmp,
         format!(
             "{generation} {}\n",
-            hex::encode(new.verifying_key().to_bytes())
+            hex::encode(public.to_bytes())
         ),
     )?;
     File::open(&tmp)?.sync_all()?;
@@ -125,7 +212,7 @@ pub fn rotate_root(
 }
 
 pub fn load_trust(dir: &Path) -> Result<TrustStore> {
-    let root = verifying(&dir.join("root.pub"))?;
+    let root = verifying(&dir.join("root.pub"), true, 0)?;
     let mut roots = BTreeMap::new();
     roots.insert(0, root);
     for line in fs::read_to_string(dir.join("root-transitions.log"))
@@ -138,30 +225,22 @@ pub fn load_trust(dir: &Path) -> Result<TrustStore> {
         }
         let og: u64 = f[1].parse()?;
         let ng: u64 = f[3].parse()?;
-        if ng != og + 1 {
+        if og.checked_add(1) != Some(ng) || roots.contains_key(&ng) {
             bail!("non-monotonic release root generation");
         }
-        let old = VerifyingKey::from_bytes(
-            &hex::decode(f[2])?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid old root"))?,
-        )?;
-        let new = VerifyingKey::from_bytes(
-            &hex::decode(f[4])?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid new root"))?,
-        )?;
-        if roots.get(&og) != Some(&old) {
-            bail!("detached release root transition");
+        let old = ReleasePublic::decode(&hex::decode(f[2])?, true, Some(og))?;
+        let new = ReleasePublic::decode(&hex::decode(f[4])?, true, Some(ng))?;
+        if roots.get(&og) != Some(&old) || !old.same_profile(&new) {
+            bail!("detached release root transition or profile change");
         }
         let body = format!("YRL-RELEASE-ROOT-TRANSITION-1 {og} {} {ng} {}", f[2], f[4]);
         old.verify(
             body.as_bytes(),
-            &Signature::from_slice(&hex::decode(f[5])?)?,
+            &hex::decode(f[5])?,
         )?;
         new.verify(
             body.as_bytes(),
-            &Signature::from_slice(&hex::decode(f[6])?)?,
+            &hex::decode(f[6])?,
         )?;
         roots.insert(ng, new);
     }
@@ -173,12 +252,7 @@ pub fn load_trust(dir: &Path) -> Result<TrustStore> {
         bail!("invalid current release root");
     }
     let generation: u64 = current_fields[0].parse()?;
-    let current = verifying(&dir.join("current.pub")).or_else(|_| {
-        let b: [u8; 32] = hex::decode(&current_fields[1])?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid current root"))?;
-        Ok::<_, anyhow::Error>(VerifyingKey::from_bytes(&b)?)
-    })?;
+    let current = ReleasePublic::decode(&hex::decode(&current_fields[1])?, true, Some(generation))?;
     if roots.get(&generation) != Some(&current) {
         bail!("release trust store was rolled back or detached");
     }
@@ -197,7 +271,7 @@ pub fn load_trust(dir: &Path) -> Result<TrustStore> {
         let body = format!("YRL-RELEASE-REVOKE-1 {rg} {dg} {} {}", f[3], f[4]);
         signer.verify(
             body.as_bytes(),
-            &Signature::from_slice(&hex::decode(f[5])?)?,
+            &hex::decode(f[5])?,
         )?;
         revoked_delegates.insert((dg, f[3].to_owned()));
     }
@@ -213,7 +287,7 @@ pub fn load_trust(dir: &Path) -> Result<TrustStore> {
 pub struct Delegation {
     pub root_generation: u64,
     pub generation: u64,
-    pub public: VerifyingKey,
+    pub public: ReleasePublic,
     pub valid_from: u64,
     pub valid_until: u64,
     pub min_release: u64,
@@ -249,25 +323,23 @@ pub fn delegate(
         bail!("invalid delegation bounds");
     }
     let store = load_trust(trust_dir)?;
-    let root = signing(root_private)?;
-    if root.verifying_key() != store.current {
-        bail!("root private key does not match current generation");
-    }
+    let root = ReleaseSecret::load(root_private, &store.current)?;
     let d = Delegation {
         root_generation: store.generation,
         generation,
-        public: verifying(delegate_public)?,
+        public: verifying(delegate_public, false, generation)?,
         valid_from,
         valid_until,
         min_release,
         max_release,
     };
+    if !store.current.same_profile(&d.public) { bail!("release delegation changes signature profile"); }
     let body = d.body();
     atomic(
         output,
         format!(
             "{body} {}\n",
-            hex::encode(root.sign(body.as_bytes()).to_bytes())
+            hex::encode(root.sign(body.as_bytes())?)
         )
         .as_bytes(),
         0o644,
@@ -283,11 +355,7 @@ pub fn parse_delegation(path: &Path, store: &TrustStore) -> Result<Delegation> {
     let d = Delegation {
         root_generation: f[1].parse()?,
         generation: f[2].parse()?,
-        public: VerifyingKey::from_bytes(
-            &hex::decode(f[3])?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid delegate key"))?,
-        )?,
+        public: ReleasePublic::decode(&hex::decode(f[3])?, false, Some(f[2].parse()?))?,
         valid_from: f[4].parse()?,
         valid_until: f[5].parse()?,
         min_release: f[6].parse()?,
@@ -297,9 +365,10 @@ pub fn parse_delegation(path: &Path, store: &TrustStore) -> Result<Delegation> {
         .roots
         .get(&d.root_generation)
         .context("delegation uses unknown root")?;
+    if !root.same_profile(&d.public) { bail!("release delegation changes signature profile"); }
     root.verify(
         d.body().as_bytes(),
-        &Signature::from_slice(&hex::decode(f[8])?)?,
+        &hex::decode(f[8])?,
     )?;
     if store
         .revoked_delegates
@@ -318,11 +387,8 @@ pub fn revoke_delegate(
     at: u64,
 ) -> Result<()> {
     let store = load_trust(trust_dir)?;
-    let root = signing(root_private)?;
-    if root.verifying_key() != store.current {
-        bail!("wrong release root private key");
-    }
-    let public = verifying(delegate_public)?;
+    let root = ReleaseSecret::load(root_private, &store.current)?;
+    let public = verifying(delegate_public, false, generation)?;
     let body = format!(
         "YRL-RELEASE-REVOKE-1 {} {generation} {} {at}",
         store.generation,
@@ -330,7 +396,7 @@ pub fn revoke_delegate(
     );
     let line = format!(
         "{body} {}\n",
-        hex::encode(root.sign(body.as_bytes()).to_bytes())
+        hex::encode(root.sign(body.as_bytes())?)
     );
     let mut f = OpenOptions::new()
         .create(true)
@@ -342,7 +408,7 @@ pub fn revoke_delegate(
     Ok(())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub number: u64,
     pub version: String,
@@ -514,10 +580,7 @@ pub fn sign_manifest(
 ) -> Result<()> {
     let store = load_trust(trust)?;
     let d = parse_delegation(delegation, &store)?;
-    let key = signing(delegate_private)?;
-    if key.verifying_key() != d.public {
-        bail!("delegate private key mismatch");
-    }
+    let key = ReleaseSecret::load(delegate_private, &d.public)?;
     let bytes = fs::read(manifest)?;
     let m = Manifest::parse(&bytes)?;
     if m.delegation != d.generation || m.number < d.min_release || m.number > d.max_release {
@@ -525,7 +588,7 @@ pub fn sign_manifest(
     }
     atomic(
         signature,
-        format!("{}\n", hex::encode(key.sign(&bytes).to_bytes())).as_bytes(),
+        format!("{}\n", hex::encode(key.sign(&bytes)?)).as_bytes(),
         0o644,
     )
 }
@@ -551,7 +614,7 @@ pub fn verify_release(
     if m.delegation != d.generation || m.number < d.min_release || m.number > d.max_release {
         bail!("release is outside delegated scope");
     }
-    let sig = Signature::from_slice(&hex::decode(fs::read_to_string(signature)?.trim())?)?;
+    let sig = hex::decode(fs::read_to_string(signature)?.trim())?;
     d.public.verify(&bytes, &sig)?;
     let mut actual = BTreeSet::new();
     for e in fs::read_dir(artifacts)? {

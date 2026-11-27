@@ -190,7 +190,7 @@ async fn open_authenticated_stream(route: &Route, me: &KeyPair, gate_public: &[u
 }
 
 async fn profiled_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, me: &KeyPair, peer: &[u8], opts: &ClientOptions, context: CryptoContext) -> Result<Secure> {
-    let mut policy = CryptoPolicy::from_env()?;
+    let mut policy = CryptoPolicy::for_handshake(context)?;
     policy.minimum = policy.minimum.max(opts.minimum_crypto_profile);
     let mut store = match &opts.crypto_profile_store { Some(path) => Some(ProfileStore::open(path)?), None => None };
     if let Some(s) = store.as_ref() { policy.minimum = s.minimum(context, peer, policy.minimum); }

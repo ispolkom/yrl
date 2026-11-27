@@ -70,8 +70,8 @@ impl Secure {
         Secure { state: Mutex::new(TransportState::Classical(state)), sent: AtomicU64::new(0), received: AtomicU64::new(0), rekey_every, raw_mode: Default::default(), raw_out: AtomicU64::new(0), raw_in: AtomicU64::new(0), profile, channel_binding: *blake3::hash(binding).as_bytes() }
     }
     #[cfg(feature = "pq-hybrid")]
-    fn new_hybrid(state: PqTransport, rekey_every: u64, binding: &[u8]) -> Secure {
-        Secure { state: Mutex::new(TransportState::Hybrid(state)), sent: AtomicU64::new(0), received: AtomicU64::new(0), rekey_every, raw_mode: Default::default(), raw_out: AtomicU64::new(0), raw_in: AtomicU64::new(0), profile: crate::crypto_profile::HYBRID_X25519_MLKEM768, channel_binding: *blake3::hash(binding).as_bytes() }
+    fn new_hybrid(state: PqTransport, rekey_every: u64, binding: &[u8], profile: crate::crypto_profile::ProfileId) -> Secure {
+        Secure { state: Mutex::new(TransportState::Hybrid(state)), sent: AtomicU64::new(0), received: AtomicU64::new(0), rekey_every, raw_mode: Default::default(), raw_out: AtomicU64::new(0), raw_in: AtomicU64::new(0), profile, channel_binding: *blake3::hash(binding).as_bytes() }
     }
     pub fn profile(&self) -> crate::crypto_profile::ProfileId { self.profile }
     pub fn channel_binding(&self) -> &[u8; 32] { &self.channel_binding }
@@ -170,7 +170,7 @@ pub async fn hybrid_auth_client<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, se
     let request = own.sign(&hybrid_proof_body(context, sec, initiator_x25519, responder_x25519, b'I')?)?.encode();
     write_msg(s, &sec.seal(&Frame::new(crate::wire::HYBRID_CLIENT_PROOF, 0, request))?).await?;
     let reply = sec.open(&read_msg(s).await?)?;
-    if reply.kind != crate::wire::HYBRID_SERVER_PROOF { bail!("missing hybrid server proof") }
+    if reply.kind != crate::wire::HYBRID_SERVER_PROOF || reply.stream != 0 { bail!("missing hybrid server proof") }
     let signature = crate::hybrid_signature::SignatureEnvelope::decode(&reply.payload)?;
     pinned_server.verify(&hybrid_proof_body(context, sec, initiator_x25519, responder_x25519, b'R')?, &signature)
 }
@@ -179,7 +179,7 @@ pub async fn hybrid_auth_client<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, se
 pub async fn hybrid_auth_server<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, sec: &Secure, context: crate::crypto_profile::Context, initiator_x25519: &[u8], responder_x25519: &[u8], own: &crate::hybrid_signature::SigningKey, pinned_client: &crate::hybrid_signature::PublicKey) -> Result<()> {
     if own.public().purpose != crate::hybrid_signature::Purpose::Handshake || pinned_client.purpose != crate::hybrid_signature::Purpose::Handshake { bail!("wrong hybrid handshake key purpose") }
     let request = sec.open(&read_msg(s).await?)?;
-    if request.kind != crate::wire::HYBRID_CLIENT_PROOF { bail!("missing hybrid client proof") }
+    if request.kind != crate::wire::HYBRID_CLIENT_PROOF || request.stream != 0 { bail!("missing hybrid client proof") }
     let signature = crate::hybrid_signature::SignatureEnvelope::decode(&request.payload)?;
     pinned_client.verify(&hybrid_proof_body(context, sec, initiator_x25519, responder_x25519, b'I')?, &signature)?;
     let response = own.sign(&hybrid_proof_body(context, sec, initiator_x25519, responder_x25519, b'R')?)?.encode();
@@ -223,9 +223,15 @@ pub async fn client_handshake_context<S: AsyncRead + AsyncWrite + Unpin>(s: &mut
     #[cfg(not(feature = "crypto-profiles"))]
     let selected = crate::crypto_profile::CLASSICAL_V1;
     #[cfg(feature = "pq-hybrid")]
-    if selected == crate::crypto_profile::HYBRID_X25519_MLKEM768 {
+    if selected != crate::crypto_profile::CLASSICAL_V1 {
         let binding = hs.get_handshake_hash().to_vec();
-        return pq_upgrade_client(s, hs.into_transport_mode()?, &binding, rekey_every).await;
+        let secure = pq_upgrade_client(s, hs.into_transport_mode()?, &binding, rekey_every, selected).await?;
+        #[cfg(feature = "hybrid-signatures")]
+        if selected == crate::crypto_profile::HYBRID_MUTUAL_SIGNATURES {
+            let (own, pin) = crate::hybrid_signature::handshake_keys(context, &me.public, server_public)?;
+            hybrid_auth_client(s, &secure, context, &me.public, server_public, &own, &pin).await?;
+        }
+        return Ok(secure);
     }
     let binding = hs.get_handshake_hash().to_vec();
     Ok(Secure::new_profile_bound(hs.into_transport_mode()?, rekey_every, selected, &binding))
@@ -285,9 +291,14 @@ pub async fn server_handshake_open_context<S: AsyncRead + AsyncWrite + Unpin>(s:
     #[cfg(not(feature = "crypto-profiles"))]
     let selected = crate::crypto_profile::CLASSICAL_V1;
     #[cfg(feature = "pq-hybrid")]
-    if selected == crate::crypto_profile::HYBRID_X25519_MLKEM768 {
+    if selected != crate::crypto_profile::CLASSICAL_V1 {
         let binding = hs.get_handshake_hash().to_vec();
-        let secure = pq_upgrade_server(s, hs.into_transport_mode().map_err(|_| Silent)?, &binding, rekey_every).await?;
+        let secure = pq_upgrade_server(s, hs.into_transport_mode().map_err(|_| Silent)?, &binding, rekey_every, selected).await?;
+        #[cfg(feature = "hybrid-signatures")]
+        if selected == crate::crypto_profile::HYBRID_MUTUAL_SIGNATURES {
+            let (own, pin) = crate::hybrid_signature::handshake_keys(context, &me.public, &remote).map_err(|_| Silent)?;
+            hybrid_auth_server(s, &secure, context, &remote, &me.public, &own, &pin).await.map_err(|_| Silent)?;
+        }
         return Ok((secure, who));
     }
     let binding = hs.get_handshake_hash().to_vec();
@@ -312,7 +323,7 @@ fn pq_handshake(initiator: bool, binding: &[u8]) -> Result<PqHandshake> {
 }
 
 #[cfg(feature = "pq-hybrid")]
-async fn pq_upgrade_client<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, mut outer: snow::TransportState, binding: &[u8], rekey_every: u64) -> Result<Secure> {
+async fn pq_upgrade_client<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, mut outer: snow::TransportState, binding: &[u8], rekey_every: u64, profile: crate::crypto_profile::ProfileId) -> Result<Secure> {
     use clatter::traits::Handshaker;
     let mut pq = pq_handshake(true, binding)?;
     let mut pq_msg = vec![0u8; 4096];
@@ -326,11 +337,11 @@ async fn pq_upgrade_client<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, mut out
     let mut payload = [0u8; 1];
     let p = pq.read_message(&pq_msg[..n], &mut payload).map_err(|e| anyhow::anyhow!("PQ Noise reply: {e:?}"))?;
     if p != 0 || !pq.is_finished() { bail!("invalid PQ Noise completion") }
-    Ok(Secure::new_hybrid(pq.finalize().map_err(|e| anyhow::anyhow!("PQ Noise finalize: {e:?}"))?, rekey_every, binding))
+    Ok(Secure::new_hybrid(pq.finalize().map_err(|e| anyhow::anyhow!("PQ Noise finalize: {e:?}"))?, rekey_every, binding, profile))
 }
 
 #[cfg(feature = "pq-hybrid")]
-async fn pq_upgrade_server<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, mut outer: snow::TransportState, binding: &[u8], rekey_every: u64) -> Result<Secure, Silent> {
+async fn pq_upgrade_server<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, mut outer: snow::TransportState, binding: &[u8], rekey_every: u64, profile: crate::crypto_profile::ProfileId) -> Result<Secure, Silent> {
     use clatter::traits::Handshaker;
     let request = read_msg(s).await.map_err(|_| Silent)?;
     if request.len() > 4096 { return Err(Silent) }
@@ -345,5 +356,5 @@ async fn pq_upgrade_server<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, mut out
     let mut wrapped = vec![0u8; n + 16];
     let w = outer.write_message(&pq_msg[..n], &mut wrapped).map_err(|_| Silent)?;
     write_msg(s, &wrapped[..w]).await.map_err(|_| Silent)?;
-    Ok(Secure::new_hybrid(pq.finalize().map_err(|_| Silent)?, rekey_every, binding))
+    Ok(Secure::new_hybrid(pq.finalize().map_err(|_| Silent)?, rekey_every, binding, profile))
 }

@@ -169,6 +169,7 @@ fn stage_bundle(bundle: &Path, stage: &Path, m: &crate::release::Manifest) -> Re
         copy_file(&bundle.join(name), &meta.join(name), 0o644)?;
     }
     File::open(&art)?.sync_all()?;
+    File::open(&meta)?.sync_all()?;
     File::open(stage)?.sync_all()?;
     Ok(())
 }
@@ -231,6 +232,14 @@ fn verify_installed(
     now: u64,
 ) -> Result<crate::release::Manifest> {
     let dir = release_dir(root, n);
+    let manifest = verify_staged(&dir, trust, now)?;
+    if manifest.number != n {
+        bail!("release directory number differs from signed metadata");
+    }
+    Ok(manifest)
+}
+
+fn verify_staged(dir: &Path, trust: &Path, now: u64) -> Result<crate::release::Manifest> {
     let meta = dir.join("metadata");
     crate::release::verify_release(
         &dir.join("artifacts"),
@@ -296,15 +305,20 @@ pub async fn apply(
     if stage.exists() || release_dir(root, manifest.number).exists() {
         bail!("release staging or destination already exists")
     }
+    let manifest_digest = blake3::hash(&manifest.encode());
     let tx = format!(
         "YRL-UPDATE-TXN-1 {} {} {}\n",
         manifest.number,
         opt(state.current),
-        hex::encode(blake3::hash(&fs::read(&m)?).as_bytes())
+        manifest_digest.to_hex()
     );
     atomic(&ledger.join("transaction"), tx.as_bytes())?;
-    if let Err(e) = stage_bundle(bundle, &stage, &manifest).and_then(|_| health(&stage, yrl_state))
-    {
+    if let Err(e) = stage_bundle(bundle, &stage, &manifest).and_then(|_| {
+        if verify_staged(&stage, trust, now)? != manifest {
+            bail!("release metadata changed while staging");
+        }
+        health(&stage, yrl_state)
+    }) {
         let _ = fs::remove_dir_all(&stage);
         let _ = fs::remove_file(ledger.join("transaction"));
         let _ = note(audit, "update_failed", manifest.number, RESULT_ERROR).await;
@@ -365,18 +379,10 @@ pub async fn recover(
         if !stage.exists() {
             bail!("interrupted update has neither staged nor published release")
         }
-        let meta = stage.join("metadata");
-        let manifest = crate::release::verify_release(
-            &stage.join("artifacts"),
-            &meta.join("manifest.txt"),
-            &meta.join("manifest.sig"),
-            &meta.join("delegation.txt"),
-            trust,
-            now,
-        );
+        let manifest = verify_staged(&stage, trust, now);
         match manifest {
-            Ok(_)
-                if hex::encode(blake3::hash(&fs::read(meta.join("manifest.txt"))?).as_bytes())
+            Ok(manifest)
+                if manifest.number == n && blake3::hash(&manifest.encode()).to_hex().as_str()
                     == f[3] =>
             {
                 health(&stage, yrl_state)?;
@@ -393,7 +399,7 @@ pub async fn recover(
         }
     }
     let manifest = verify_installed(root, n, trust, now)?;
-    if hex::encode(blake3::hash(&fs::read(final_dir.join("metadata/manifest.txt"))?).as_bytes())
+    if blake3::hash(&manifest.encode()).to_hex().as_str()
         != f[3]
     {
         bail!("published manifest differs from transaction")

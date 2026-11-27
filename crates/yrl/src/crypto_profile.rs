@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 pub type ProfileId = u32;
 pub const CLASSICAL_V1: ProfileId = 0x0001_0001;
 pub const HYBRID_X25519_MLKEM768: ProfileId = 0x0002_0001;
+pub const HYBRID_MUTUAL_SIGNATURES: ProfileId = 0x0003_0001;
 pub const NEGOTIATION_VERSION: u8 = 1;
 pub const MAX_PROFILES: usize = 8;
 
@@ -59,6 +60,15 @@ pub fn suite(id: ProfileId) -> Option<&'static Suite> {
     if id == CLASSICAL_V1 { return Some(&CLASSICAL) }
     #[cfg(feature = "pq-hybrid")]
     if id == HYBRID_X25519_MLKEM768 { return Some(&HYBRID) }
+    #[cfg(feature = "hybrid-signatures")]
+    if id == HYBRID_MUTUAL_SIGNATURES {
+        const SIGNED: Suite = Suite {
+            id: HYBRID_MUTUAL_SIGNATURES,
+            authentication: "X25519 static IK and mutual Ed25519 + ML-DSA-65",
+            ..HYBRID
+        };
+        return Some(&SIGNED);
+    }
     None
 }
 
@@ -76,6 +86,22 @@ impl Default for Policy {
     }
 }
 impl Policy {
+    pub fn for_handshake(context: Context) -> Result<Self> {
+        let configured = match context {
+            Context::Gatekeeper => std::env::var_os("YRL_HYBRID_GATE_KEYS"),
+            Context::Executor => std::env::var_os("YRL_HYBRID_EXECUTOR_KEYS"),
+            _ => None,
+        };
+        if configured.is_some() {
+            let policy = Self {
+                minimum: HYBRID_MUTUAL_SIGNATURES,
+                supported: vec![HYBRID_MUTUAL_SIGNATURES],
+            };
+            policy.validate()?;
+            return Ok(policy);
+        }
+        Self::from_env()
+    }
     pub fn from_env() -> Result<Self> {
         let mut p = Self::default();
         #[cfg(feature = "pq-hybrid")]

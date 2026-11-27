@@ -37,3 +37,9 @@ yrl-release root-rotate release-trust old-root.key new-root.key new-root.pub
 ```
 
 Distribute the updated trust store over an authenticated channel. Revoke a delegated key with the current offline root using `yrl-release revoke`. Root/private delegated keys must never enter the repository, release bundle, CI logs or command output. CI may hold a narrowly scoped delegated key only under the project's explicit secret-management policy; the root remains offline.
+
+## Hybrid release trust
+
+A build with `hybrid-signatures` can provision a separate hybrid trust store. Run `yrl-release hybrid-keygen release-root 0 ROOT_KEY ROOT_PUBLIC` and initialize the store with `yrl-release trust-init ROOT_PUBLIC TRUST_DIR`. Generate delegates with `hybrid-keygen release-delegated GENERATION KEY PUBLIC`. Pass the exact generation to `delegate`. The existing `delegate`, `sign`, `verify`, `root-rotate` and `revoke` commands derive the signature profile from the pinned release root. The updater uses the same trust store and verification code. A hybrid trust store requires Ed25519 and ML-DSA-65 at each verification step. Importing a different root is an explicit trust provisioning operation. Keep the pinned root and state on trusted storage.
+
+Classical trust stores and their wire formats remain supported. The hybrid key files are separate from classical keys. Hybrid mode requires explicit trust setup. Emergency recovery of a lost hybrid release root has yet to be accepted.

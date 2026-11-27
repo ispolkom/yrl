@@ -77,3 +77,64 @@ fn r65_expired_or_revoked_delegation_is_rejected() {
     let store = yrl::release::load_trust(&trust).unwrap();
     assert!(yrl::release::parse_delegation(&cert, &store).is_err());
 }
+
+#[cfg(feature = "hybrid-signatures")]
+#[test]
+fn hybrid_release_requires_both_signatures_at_every_trust_boundary() {
+    use yrl::hybrid_signature::{Purpose, SigningKey};
+    use yrl::release::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let (root, root_pub) = (dir.join("root.key"), dir.join("root.pub"));
+    let (delegate_key, delegate_pub) = (dir.join("delegate.key"), dir.join("delegate.pub"));
+    let trust = dir.join("trust");
+    SigningKey::generate_files(&root, &root_pub, Purpose::ReleaseRoot, 0).unwrap();
+    SigningKey::generate_files(&delegate_key, &delegate_pub, Purpose::ReleaseDelegated, 7).unwrap();
+    init_trust(&root_pub, &trust).unwrap();
+    let cert = dir.join("cert");
+    delegate(&trust, &root, &delegate_pub, 7, 100, 900, 40, 50, &cert).unwrap();
+    assert!(delegate(&trust, &root, &delegate_pub, 8, 100, 900, 40, 50, &dir.join("bad")).is_err());
+
+    let artifacts = dir.join("artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    std::fs::write(artifacts.join("yrld"), b"daemon").unwrap();
+    let manifest = dir.join("manifest");
+    create_manifest(&artifacts, 42, "1.2.3", "linux", "x86_64", 1, 1, 1, 200, 800, 7, &manifest).unwrap();
+    let sig = dir.join("sig");
+    sign_manifest(&manifest, &cert, &delegate_key, &sig, &trust).unwrap();
+    let verify = |sig: &std::path::Path, cert: &std::path::Path| {
+        verify_release(&artifacts, &manifest, sig, cert, &trust, 500)
+    };
+    assert_eq!(verify(&sig, &cert).unwrap().number, 42);
+
+    let original = hex::decode(std::fs::read_to_string(&sig).unwrap().trim()).unwrap();
+    let bad_sig = dir.join("bad-sig");
+    let bad_cert = dir.join("bad-cert");
+    let cert_text = std::fs::read_to_string(&cert).unwrap();
+    let (body, cert_sig) = cert_text.trim().rsplit_once(' ').unwrap();
+    let cert_sig = hex::decode(cert_sig).unwrap();
+    for mutation in [
+        |b: &mut Vec<u8>| b[45] ^= 1,
+        |b: &mut Vec<u8>| b[109] ^= 1,
+        |b: &mut Vec<u8>| { b.drain(45..109); },
+        |b: &mut Vec<u8>| b.truncate(109),
+        |b: &mut Vec<u8>| b[12] ^= 1,
+        |b: &mut Vec<u8>| b[13] ^= 1,
+    ] {
+        let mut altered = original.clone();
+        mutation(&mut altered);
+        std::fs::write(&bad_sig, hex::encode(altered)).unwrap();
+        assert!(verify(&bad_sig, &cert).is_err());
+        let mut altered = cert_sig.clone();
+        mutation(&mut altered);
+        std::fs::write(&bad_cert, format!("{body} {}\n", hex::encode(altered))).unwrap();
+        assert!(verify(&sig, &bad_cert).is_err());
+    }
+
+    let new_root = dir.join("new.key");
+    rotate_root(&trust, &root, &new_root, &dir.join("new.pub")).unwrap();
+    assert_eq!(load_trust(&trust).unwrap().generation, 1);
+    assert!(verify(&sig, &cert).is_ok());
+    revoke_delegate(&trust, &new_root, 7, &delegate_pub, 520).unwrap();
+    assert!(verify(&sig, &cert).is_err());
+}

@@ -316,7 +316,7 @@ async fn handle_gate<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + S
     use crate::ipc::{IPC_TUNNEL, IPC_TUNNEL_OK};
     let authorized = read_authorized(&cfg.dir.join("authorized_keys"));
     let window = crate::enroll::read_window(&cfg.dir);
-    let policy = match crate::crypto_profile::Policy::from_env() { Ok(p) => p, Err(_) => { cfg.log("connection dropped (invalid crypto policy)".into()); return } };
+    let policy = match crate::crypto_profile::Policy::for_handshake(crate::crypto_profile::Context::Gatekeeper) { Ok(p) => p, Err(_) => { cfg.log("connection dropped (invalid crypto policy)".into()); return } };
     let hs = tokio::time::timeout(
         cfg.handshake_timeout,
         crate::session::server_handshake_open_context(&mut stream, &me, &authorized, cfg.rekey_every, window.is_some(), crate::crypto_profile::Context::Gatekeeper, policy),
@@ -349,7 +349,7 @@ pub(crate) async fn handle_inner<S: tokio::io::AsyncRead + tokio::io::AsyncWrite
     let authorized = read_authorized(&cfg.dir.join("authorized_keys"));
     // outside a window an unknown key gets silence; while the owner has one open it may complete the handshake, to present the code and nothing else
     let window = crate::enroll::read_window(&cfg.dir);
-    let policy = match crate::crypto_profile::Policy::from_env() { Ok(p) => p, Err(_) => { cfg.log("connection dropped (invalid crypto policy)".into()); return } };
+    let policy = match crate::crypto_profile::Policy::for_handshake(crate::crypto_profile::Context::Executor) { Ok(p) => p, Err(_) => { cfg.log("connection dropped (invalid crypto policy)".into()); return } };
     let hs = tokio::time::timeout(cfg.handshake_timeout, crate::session::server_handshake_open_context(&mut stream, &me, &authorized, cfg.rekey_every, window.is_some(), crate::crypto_profile::Context::Executor, policy)).await;
     let (sec, who) = match hs {
         Ok(Ok(x)) => x,

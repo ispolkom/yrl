@@ -88,6 +88,25 @@ pub struct SignatureEnvelope {
     ml: Vec<u8>,
 }
 
+pub(crate) fn handshake_keys(context: crate::crypto_profile::Context, local: &[u8], remote: &[u8]) -> Result<(SigningKey, PublicKey)> {
+    use crate::crypto_profile::Context as Role;
+    let variable = match context {
+        Role::Gatekeeper => "YRL_HYBRID_GATE_KEYS",
+        Role::Executor => "YRL_HYBRID_EXECUTOR_KEYS",
+        _ => bail!("no hybrid identity store for this context"),
+    };
+    let root = std::env::var_os(variable).ok_or_else(|| anyhow::anyhow!("hybrid handshake identity store missing"))?;
+    let root = Path::new(&root);
+    if !root.is_absolute() || local.len() != 32 || remote.len() != 32 {
+        bail!("invalid hybrid handshake identity store or Noise identity");
+    }
+    let own = root.join("local").join(hex::encode(local));
+    let pin = root.join("peers").join(hex::encode(remote)).with_extension("pub");
+    let peer = PublicKey::load_file(&pin, Purpose::Handshake)?;
+    let key = SigningKey::load_files(&own.with_extension("key"), &own.with_extension("pub"), Purpose::Handshake)?;
+    Ok((key, peer))
+}
+
 /// Canonical transition body. Planned rotation requires signatures from both
 /// generations (proof of old authorization and possession of the new key).
 pub fn transition_body(old: &PublicKey, new: &PublicKey) -> Result<Vec<u8>> {
@@ -157,7 +176,7 @@ impl SigningKey {
         if private.exists() || public.exists() { bail!("hybrid key path already exists") }
         let (key, mut seeds) = Self::generate(purpose, generation);
         let public_key = key.public();
-        let mut secret = b"YRL-HYBRID-SECRET-1\0".to_vec();
+        let mut secret = zeroize::Zeroizing::new(b"YRL-HYBRID-SECRET-1\0".to_vec());
         secret.push(purpose as u8); secret.extend_from_slice(&generation.to_be_bytes()); secret.extend_from_slice(&public_key.key_id);
         secret.extend_from_slice(&seeds.ed25519); secret.extend_from_slice(&seeds.ml_dsa65);
         write_new(private, &secret, 0o600)?;
@@ -167,7 +186,13 @@ impl SigningKey {
     }
 
     pub fn load_files(private: &Path, public: &Path, expected: Purpose) -> Result<Self> {
-        let mut bytes = read_bounded(private, 256, true)?;
+        let pinned = PublicKey::load_file(public, expected)?;
+        Self::load_pinned(private, &pinned)
+    }
+
+    pub(crate) fn load_pinned(private: &Path, pinned: &PublicKey) -> Result<Self> {
+        let expected = pinned.purpose;
+        let mut bytes = zeroize::Zeroizing::new(read_bounded(private, 256, true)?);
         let prefix = b"YRL-HYBRID-SECRET-1\0";
         if bytes.len() != prefix.len() + 1 + 8 + 32 + 64 || !bytes.starts_with(prefix) { bytes.zeroize(); bail!("invalid hybrid private key") }
         let purpose = Purpose::from_byte(bytes[prefix.len()])?;
@@ -179,7 +204,7 @@ impl SigningKey {
         bytes.zeroize();
         let key = Self::from_seeds(purpose, generation, &seeds);
         let actual = key.public();
-        if actual.key_id != claimed || actual.encode() != read_bounded(public, PUBLIC_LEN, false)? { bail!("hybrid public/private key mismatch") }
+        if actual.key_id != claimed || actual.encode() != pinned.encode() { bail!("hybrid public/private key mismatch") }
         Ok(key)
     }
 }
