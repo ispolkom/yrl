@@ -159,3 +159,15 @@ Evidence: `/mnt/ssd480/projects/yrl-stage8-evidence/protocol/probe-results.txt`.
 | LAB-PROTO-03 | Rolling migration across the two wire formats | Old and upgraded peers interoperate during a staged rollout | Neither mixed-build pair can establish a session. The feature deliberately has no legacy fallback | FAIL | Coordinated cutover is possible operationally, but a rolling cross-version migration is not implemented. Adding it would be new functionality outside this acceptance task |
 
 The profile offer/selection, minimum policy, exact-offer binding and persistent high-water checks already passed in 8-R.3 and 8-R-FINAL-03; no repeat was needed. No production key or service state was changed by the loopback probe. The installed services were stopped after the earlier installed-path negative check.
+
+## Final acceptance continuation: external recovery and Audit anchor
+
+Evidence is retained outside Git in `/mnt/ssd480/projects/yrl-stage8-evidence/`: `recovery-results.txt`, the encrypted lab backup and two signed anchors. A lab-only GnuPG recipient key was created on the separate client VM. The server imported only its public key. Services were stopped before `yrld keys backup`; `yrld keys restore` ran on the client with its decryption key. The first anchor was exported and retained on the client before the backup. No production recovery key was used.
+
+| ID | Property | Expected | Actual | Status | Limit |
+|---|---|---|---|---|---|
+| LAB-REC-01 | Encrypted offline backup restored on a separate Debian guest | Restore validates content and publishes a private state directory | Restore exited 0; recovered Audit verified against the earlier independently held anchor: 287 ordinary, 747 security, 1034 active records | PASS | Did not activate the recovered state as installed services on the client |
+| LAB-REC-02 | Key continuity | Restored server, Gatekeeper, Executor, Broker and Audit public identities agree with the source | SHA-256 matched for four complete static key files and `audit/root.pub` and `audit/sign.pub` across guests | PASS | Sampled identity files; TPM sealed blobs were not migrated |
+| LAB-REC-03 | External anchor detects whole-state rollback | An earlier valid backup fails against a later source checkpoint | The source verified 1036 active records with the later anchor; the 1034-record restore failed: `active Audit journal does not extend trusted checkpoint` | PASS | Depends on the independent client anchor and its key remaining trustworthy |
+
+The encrypted backup has SHA-256 `e16626b38686aa26b8b931d533177f4dce2af4e5c2487900f24d6c9892d65e34`; the early and later anchor hashes are recorded in `recovery-results.txt`. GnuPG encryption alone does not authenticate the backup sender; the independently retained Audit anchor and separately compared identities provide the trust check used here. Complete installed-service recovery and virtual TPM state transfer remain outside this result.
