@@ -147,7 +147,7 @@ Security rules are also checked with targeted source mutants listed under `tools
 
 ## Honest status
 
-Stage 8 acceptance is in progress; see `STAGE8_ACCEPTANCE.md` for measured results and blockers.
+Stage 8 acceptance is conditional and incomplete: the default serial suite passed with one cgroup test explicitly skipped, while dependency advisories, hybrid-signature integration, hardware and isolated installation remain open. See `STAGE8_ACCEPTANCE.md`.
 
 **Working prototype, not a finished product.** The core Linux scenarios are implemented and heavily tested, but the project has not had an independent security audit.
 
