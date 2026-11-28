@@ -57,6 +57,17 @@ pub const HYBRID: Suite = Suite {
     aead: "ChaChaPoly",
 };
 
+/// Whether the protocol recognizes this profile identifier.
+/// Recognition does not imply local implementation or permission.
+pub fn known_profile(id: ProfileId) -> bool {
+    matches!(
+        id,
+        CLASSICAL_V1
+            | HYBRID_X25519_MLKEM768
+            | HYBRID_MUTUAL_SIGNATURES
+    )
+}
+
 pub fn suite(id: ProfileId) -> Option<&'static Suite> {
     if id == CLASSICAL_V1 { return Some(&CLASSICAL) }
     #[cfg(feature = "pq-hybrid")]
@@ -194,7 +205,7 @@ impl Offer {
         let mut supported = Vec::with_capacity(n);
         for c in b[prefix.len() + 7..].chunks_exact(4) {
             let id = u32::from_be_bytes(c.try_into().unwrap());
-            if suite(id).is_none() || supported.contains(&id) {
+            if !known_profile(id) || supported.contains(&id) {
                 bail!("unknown or repeated crypto profile")
             };
             supported.push(id)

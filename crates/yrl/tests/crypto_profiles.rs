@@ -380,3 +380,218 @@ fn profile_store_preserves_lock_inode() {
     assert_eq!(before.dev(), after.dev());
     assert_eq!(after.permissions().mode() & 0o777, 0o600);
 }
+
+// REV-007: a local policy must not permit an unavailable
+// mandatory cryptographic profile.
+#[cfg(not(feature = "pq-hybrid"))]
+#[test]
+fn rev007_unavailable_mandatory_profile_is_refused() {
+    let policy = Policy {
+        minimum: HYBRID_X25519_MLKEM768,
+        supported: vec![CLASSICAL_V1],
+    };
+
+    assert!(policy.validate().is_err());
+}
+
+// REV-007: selecting a mutually permitted profile must
+// never violate the local or remote minimum.
+#[test]
+fn rev007_incompatible_minimum_is_refused() {
+    let policy = Policy {
+        minimum: CLASSICAL_V1,
+        supported: vec![CLASSICAL_V1],
+    };
+
+    let offer = Offer {
+        context: Context::Executor,
+        minimum: HYBRID_X25519_MLKEM768,
+        supported: vec![HYBRID_X25519_MLKEM768],
+    };
+
+    assert!(policy.select(&offer).is_err());
+}
+
+// REV-007: invalid local policies must fail before any
+// handshake traffic is required.
+#[tokio::test]
+async fn rev007_invalid_client_policy_fails_immediately() {
+    use std::time::Duration;
+
+    let client = yrl::keys::generate();
+    let server = yrl::keys::generate();
+    let (mut stream, _peer) = tokio::io::duplex(4096);
+
+    let policy = Policy {
+        minimum: CLASSICAL_V1,
+        supported: vec![],
+    };
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        yrl::session::client_handshake_context(
+            &mut stream,
+            &client,
+            &server.public,
+            yrl::session::REKEY_EVERY,
+            Context::Executor,
+            policy,
+        ),
+    )
+    .await
+    .expect("invalid local policy must not wait for peer");
+
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn rev007_invalid_server_policy_fails_immediately() {
+    use std::time::Duration;
+
+    let server = yrl::keys::generate();
+    let (mut stream, _peer) = tokio::io::duplex(4096);
+
+    let policy = Policy {
+        minimum: CLASSICAL_V1,
+        supported: vec![],
+    };
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        yrl::session::server_handshake_open_context(
+            &mut stream,
+            &server,
+            &[],
+            yrl::session::REKEY_EVERY,
+            false,
+            Context::Executor,
+            policy,
+        ),
+    )
+    .await
+    .expect("invalid local policy must not wait for peer");
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn rev007_known_optional_profile_can_be_decoded() {
+    let offer = Offer {
+        context: Context::Executor,
+        minimum: CLASSICAL_V1,
+        supported: vec![
+            CLASSICAL_V1,
+            HYBRID_X25519_MLKEM768,
+        ],
+    };
+
+    let encoded = offer.encode().unwrap();
+
+    assert_eq!(
+        Offer::decode(&encoded).unwrap(),
+        offer
+    );
+}
+
+#[test]
+fn rev007_unknown_profile_remains_refused() {
+    let offer = Offer {
+        context: Context::Executor,
+        minimum: CLASSICAL_V1,
+        supported: vec![CLASSICAL_V1, 0xfeed_beef],
+    };
+
+    assert!(
+        offer.encode()
+            .and_then(|bytes| Offer::decode(&bytes))
+            .is_err()
+    );
+}
+
+#[test]
+fn rev007_required_profile_cannot_be_replaced() {
+    let policy = Policy::default();
+
+    let offer = Offer {
+        context: Context::Executor,
+        minimum: HYBRID_X25519_MLKEM768,
+        supported: vec![
+            CLASSICAL_V1,
+            HYBRID_X25519_MLKEM768,
+        ],
+    };
+
+    assert!(policy.select(&offer).is_err());
+}
+
+#[test]
+fn rev007_known_signed_profile_can_be_decoded() {
+    use yrl::crypto_profile::HYBRID_MUTUAL_SIGNATURES;
+
+    let offer = Offer {
+        context: Context::Executor,
+        minimum: CLASSICAL_V1,
+        supported: vec![
+            CLASSICAL_V1,
+            HYBRID_MUTUAL_SIGNATURES,
+        ],
+    };
+
+    assert_eq!(
+        Offer::decode(&offer.encode().unwrap()).unwrap(),
+        offer
+    );
+}
+
+#[test]
+fn rev007_recognition_does_not_change_local_capabilities() {
+    use yrl::crypto_profile::{
+        known_profile,
+        suite,
+        HYBRID_MUTUAL_SIGNATURES,
+    };
+
+    assert!(known_profile(CLASSICAL_V1));
+    assert!(known_profile(HYBRID_X25519_MLKEM768));
+    assert!(known_profile(HYBRID_MUTUAL_SIGNATURES));
+    assert!(!known_profile(0xfeed_beef));
+
+    assert!(suite(CLASSICAL_V1).is_some());
+
+    assert_eq!(
+        suite(HYBRID_X25519_MLKEM768).is_some(),
+        cfg!(feature = "pq-hybrid")
+    );
+
+    assert_eq!(
+        suite(HYBRID_MUTUAL_SIGNATURES).is_some(),
+        cfg!(feature = "hybrid-signatures")
+    );
+}
+
+#[test]
+fn rev007_classical_policy_remains_classical() {
+    let policy = Policy::default();
+
+    assert_eq!(policy.minimum, CLASSICAL_V1);
+    assert_eq!(policy.supported, vec![CLASSICAL_V1]);
+
+    assert!(policy.validate().is_ok());
+}
+
+#[test]
+fn rev007_required_minimum_remains_mandatory() {
+    use yrl::crypto_profile::HYBRID_MUTUAL_SIGNATURES;
+
+    for minimum in [
+        HYBRID_X25519_MLKEM768,
+        HYBRID_MUTUAL_SIGNATURES,
+    ] {
+        let policy = Policy {
+            minimum,
+            supported: vec![CLASSICAL_V1],
+        };
+
+        assert!(policy.validate().is_err());
+    }
+}

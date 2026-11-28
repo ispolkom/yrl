@@ -192,8 +192,10 @@ pub async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, me: 
 }
 
 pub async fn client_handshake_context<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, me: &KeyPair, server_public: &[u8], rekey_every: u64, context: crate::crypto_profile::Context, policy: crate::crypto_profile::Policy) -> Result<Secure> {
+    policy.validate()?;
+
     #[cfg(not(feature = "crypto-profiles"))]
-    let _ = (context, policy);
+    let _ = context;
     #[cfg(feature = "crypto-profiles")]
     let prologue = crate::crypto_profile::prologue(context);
     #[cfg(not(feature = "crypto-profiles"))]
@@ -205,7 +207,6 @@ pub async fn client_handshake_context<S: AsyncRead + AsyncWrite + Unpin>(s: &mut
     let n = hs.write_message(HELLO, &mut buf)?;
     #[cfg(feature = "crypto-profiles")]
     let (offer, n) = {
-        policy.validate()?;
         let offer = crate::crypto_profile::Offer { context, minimum: policy.minimum, supported: policy.supported.clone() };
         let n = hs.write_message(&offer.encode()?, &mut buf)?;
         (offer, n)
@@ -251,8 +252,10 @@ pub async fn server_handshake_open<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S,
 }
 
 pub async fn server_handshake_open_context<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, me: &KeyPair, authorized: &[Authorized], rekey_every: u64, open: bool, context: crate::crypto_profile::Context, policy: crate::crypto_profile::Policy) -> Result<(Secure, Authorized), Silent> {
+    policy.validate().map_err(|_| Silent)?;
+
     #[cfg(not(feature = "crypto-profiles"))]
-    let _ = (context, policy);
+    let _ = context;
     let m1 = read_msg(s).await.map_err(|_| Silent)?;
     if m1.len() > 512 {
         return Err(Silent);

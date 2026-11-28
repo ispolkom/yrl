@@ -195,7 +195,29 @@ async fn serve(dir: &str, bind: &str, relay: Option<String>) -> anyhow::Result<(
     let dir = PathBuf::from(dir);
     let _key_guard = yrl::keylife::service_guard(&dir)?;
     let me = keys::load(&dir)?;
+    let executor_identity = keys::load(&dir.join("ipc/executor"))
+        .context("cannot load persistent Executor identity")?;
+    let broker_identity = keys::load(&dir.join("ipc/broker"))
+        .context("cannot load persistent Broker identity")?;
+
+    for (role, identity) in [
+        ("executor", &executor_identity),
+        ("broker", &broker_identity),
+    ] {
+        let published = std::fs::read_to_string(
+            dir.join("ipc").join(format!("{role}.pub")),
+        ).with_context(|| format!("cannot read {role} public key"))?;
+
+        anyhow::ensure!(
+            hex::decode(published.trim())? == identity.public,
+            "{role} public key does not match persistent identity"
+        );
+    }
+
     let mut cfg = server::ServerConfig::new(dir);
+    cfg.exec_identity = Some(executor_identity);
+    cfg.broker_identity = Some(broker_identity);
+
     cfg.set_resource_limits(yrl::resources::ResourceLimits::from_env()?)
         .map_err(|e| anyhow::anyhow!(e))?;
     cfg.set_disk_limits(yrl::disk::DiskLimits::from_env()?)?;

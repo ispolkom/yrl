@@ -160,6 +160,16 @@ Evidence: `/mnt/ssd480/projects/yrl-stage8-evidence/protocol/probe-results.txt`.
 
 The profile offer/selection, minimum policy, exact-offer binding and persistent high-water checks already passed in 8-R.3 and 8-R-FINAL-03; no repeat was needed. No production key or service state was changed by the loopback probe. The installed services were stopped after the earlier installed-path negative check.
 
+REV-007 later exercised four independently built configurations on separate
+Server and Client guests using `yrld serve` and pinned Executor identity. All
+10 compatible pairs passed authenticated PING/PONG; all 6 legacy/negotiated
+pairs refused with EOF. PQ-enabled peers selected `0x00020001`, optional PQ
+fell back to classical only when policy allowed it, and a persisted PQ mark
+blocked a later downgrade. This strengthens the system-level evidence for
+LAB-PROTO-01/02; LAB-PROTO-03 remains **FAIL**. The CLI `serve` path does not
+replace installed component-isolation acceptance. Detailed REV-007 evidence
+and limits are in `SECURITY_REVIEW.md`.
+
 ## Final acceptance continuation: external recovery and Audit anchor
 
 Evidence is retained outside Git in `/mnt/ssd480/projects/yrl-stage8-evidence/`: `recovery-results.txt`, the encrypted lab backup and two signed anchors. A lab-only GnuPG recipient key was created on the separate client VM. The server imported only its public key. Services were stopped before `yrld keys backup`; `yrld keys restore` ran on the client with its decryption key. The first anchor was exported and retained on the client before the backup. No production recovery key was used.

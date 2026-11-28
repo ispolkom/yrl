@@ -248,3 +248,28 @@ Two more actual guest power cuts covered the signed updater. Bundle 10 was inter
 The temporary lab account was restored from the independently held backup; `users` matches its original SHA-256. Broker policy was regenerated for its new file revision and contains no password hashes. `yrld install check` and final Audit verification passed (1359 active records). The client qdisc is `fq_codel`, the temporary Gatekeeper override and Relay process are gone, and the YRL services are stopped. The server retains lab-only signed release 11, its ledger, signed bundles, quarantine and test data. The client retains the encrypted recovery material and anchors. No backup or test-result artifact was deleted. SSD480 had 79 GiB free.
 
 Stage 8 remains conditional. The mixed legacy/negotiated wire combination is a verified fail-closed interoperability **FAIL** for rolling migration; addressing it requires a reviewed protocol change outside this no-new-functionality acceptance. Physical TPM and FIDO2 remain **BLOCKED**. Complete service activation from the restored second-host state, longer/WAN soaks and independent architecture/security review are **NOT RUN**. Do not claim unconditional acceptance or a production release.
+
+## Independent BSI review: REV-007
+
+The independent review branch `bsi/security-review` contains the previously
+published REV-001 through REV-006 work and the REV-007 crypto-policy changes.
+The VM TCP blocker was the empty `allowed4` nftables set on the server guest;
+the review added a two-hour, client-only port-2222 entry. Bidirectional SSH
+TCP and YRL PING/PONG then passed. The unmodified `yrld serve` reproduced an
+Executor pin failure. The repaired CLI loads and checks the identities from
+`yrld init`; a focused regression covers restart and missing, damaged or
+mismatched role keys. The 4×4 build matrix and PQ minimum/high-water checks
+are in `SECURITY_REVIEW.md`. The original 24 build artifacts and their patch
+remain under `/home/iam/yrl-review-builds/REV007-20261128-060834`; repaired
+`yrld` artifacts and matrix results are under
+`/home/iam/yrl-review-builds/REV007-fixed-20261128`.
+The default workspace, crypto-profiles and PQ full regressions passed. The
+first hybrid full run observed one slow-link reconnect assertion failure; an
+isolated retry and a second full hybrid run passed. `SECURITY_REVIEW.md`
+records the counts and limits. The guest test `yrld` was stopped; the narrow
+guest nftables entry expires automatically two hours after insertion.
+
+The review sequence continues with Key Root recovery (REV-008), update and
+restore rollback safety (REV-009), installed isolation (REV-010), long-duration
+load/network tests (REV-011), performance (REV-012) and final security
+acceptance (REV-013). The known rolling-migration incompatibility remains open.

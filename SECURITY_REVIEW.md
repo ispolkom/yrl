@@ -365,3 +365,82 @@ Limits:
 - Physical power loss and recovery on a separate
   physical computer remain untested.
 - Installed-system acceptance remains pending.
+
+## REV-007: Cross-build cryptographic policy and CLI role identity
+
+Priority: HIGH.
+
+### Defects
+
+The handshake ignored an invalid local cryptographic policy in builds without
+`crypto-profiles`. A negotiated build rejected an offer containing a known,
+optional profile that the local build did not implement. This prevented a
+permitted common profile from being selected. Separately, `yrld init` published
+persistent Executor and Broker keys, but `yrld serve` supplied neither key to
+`ServerConfig`; the single-process runtime generated temporary identities.
+Clients pinning the published Executor key could not authenticate.
+
+### Remediation
+
+- Validate local policy before handshake traffic in every build.
+- Decode known profile identifiers independently of local implementation.
+- Select only a locally implemented, mutually offered profile at or above both
+  minimums. Preserve the existing high-water mark and no-fallback rules.
+- Load the persistent Executor and Broker identities in `yrld serve`, verify
+  their published public keys, and refuse startup if either is absent or
+  inconsistent.
+
+### Verification
+
+- Initial REV-007 matrix: 60 PASS. Post-decoding matrix: 90 PASS.
+- Focused invariant checks before CLI repair: 42 PASS, 0 FAIL.
+- The old `yrld serve` with a valid published Executor pin: FAIL (`early eof`).
+- The repaired Default → Default connection: PING/PONG PASS; repeat after
+  service restart with the same pin: PASS.
+- Missing and damaged persistent Executor keys: startup refused. Regression
+  tests also cover missing, damaged and mismatched published keys for both
+  Executor and Broker.
+- VM cross-build matrix: 10/10 compatible negotiated or legacy pairs passed
+  PING/PONG. All 6/6 legacy/negotiated mixed pairs failed closed with `early
+  eof`; this remains the documented rolling-migration interoperability FAIL.
+- Optional PQ: PQ ↔ PQ selected `0x00020001`; a classical-only client and a
+  PQ-capable client with a server lacking PQ selected `0x00010001` when policy
+  permitted. A mandatory PQ minimum refused a classical-only peer.
+- The client's persisted `0x00020001` marks for Gatekeeper and Executor
+  survived process and server restarts and prevented automatic downgrade.
+- An unsupported minimum in a default build was refused.
+- Full default workspace regression with one test thread: 534 PASS, 0 FAIL,
+  7 ignored. An initial parallel run had one Key Root lock-contention FAIL;
+  the isolated retry and complete sequential run passed. The first failure is
+  retained as a test-concurrency observation, not attributed to REV-007.
+- Full `crypto-profiles` regression: 447 PASS, 0 FAIL, 6 ignored.
+- Full `pq-hybrid` regression: 448 PASS, 0 FAIL, 6 ignored.
+- The first full `hybrid-signatures,fido2` run had one FAIL in the pre-existing
+  slow-network `resume::r14` assertion: authenticated EXEC and upload worked,
+  but the client reconnected once under the fixture's 40 ms per-block delay
+  and 900 ms dead-link threshold. An isolated retry passed. A second full
+  `hybrid-signatures,fido2` run passed: 456 PASS, 0 FAIL, 6 ignored. The
+  first failure remains recorded and warrants follow-up in REV-011.
+- The final `serve_identity` regression after test timeout hardening passed
+  2/2 in the default build. The hybrid-signature proof integration also passed
+  within the full hybrid suite.
+
+The VM network blocker was the server guest's nftables `allowed4` set: it was
+empty and port 2222 had an explicit drop. TCP/22 worked between both guests.
+A temporary entry permitting only `192.168.77.12 . 2222` for two hours restored
+YRL traffic. The host bridge had three forwarding TAP ports, VLAN filtering
+off and bridge iptables hooks off; the host nftables service was active, but
+reading its live rules required unavailable host sudo privileges. A network
+timeout was not used as cryptographic evidence.
+
+Status: CONDITIONALLY ACCEPTED within the tested scope.
+
+Limits:
+- The matrix used `yrld serve`, which does not establish installed
+  separation of system users. Installed isolation acceptance remains REV-010.
+- Hybrid-signature profile activation with provisioned signing keys was not
+  part of this cross-build matrix; its existing focused suite is a separate
+  check.
+- The legacy/negotiated wire incompatibility remains a functional migration
+  failure even though mixed connections fail closed.
+- Physical hardware and power-loss behavior of REV-007 were not tested.

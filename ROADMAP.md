@@ -1,5 +1,22 @@
 # YRL roadmap
 
+## Independent BSI security review sequence
+
+REV-001 through REV-006 are recorded in `SECURITY_REVIEW.md`. REV-007 covers
+cross-build crypto policy and the persistent role identities used by CLI
+`serve`. The follow-up order remains appropriate for the code as reviewed:
+
+| Review | Next scope | Reason for order |
+|---|---|---|
+| REV-008 | Recover interrupted Key Root transactions | REV-006 detects pending transactions but does not provide a complete recovery journal. Resolve this before relying on update or restore recovery. |
+| REV-009 | Update, restore and rollback safety | The signed updater has lab power-cut evidence, but transaction boundaries, trust anchoring and recovered-state activation still need independent review. |
+| REV-010 | Installed component isolation | `yrld serve` is a single-process test path. The separate Gatekeeper, Executor, Broker, Audit and Firewall identities and filesystem policies require installed acceptance. |
+| REV-011 | Long-duration load and impaired networks | The earlier ten-minute three-route workload is a useful baseline, not a soak or WAN acceptance. |
+| REV-012 | Performance | Measure after correctness, recovery and resource behavior are settled. |
+| REV-013 | Final security acceptance | Reconcile prior findings, remaining hardware limits and the known legacy/negotiated rolling-migration failure. |
+
+This review sequence does not supersede the implementation stages below.
+
 This file distinguishes the **accepted implementation-stage sequence** from the older long-term product plan in `docs/DESIGN.md` §10. It records the state after the initial corrective work in implementation Stage 5. Stage numbers in these two plans are separate; completing a security stage does not imply that an aspirational desktop, transport or cross-platform milestone is complete.
 
 ## Accepted implementation stages, in order
